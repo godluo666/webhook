@@ -4,13 +4,13 @@
 
 ## Docker 一键部署
 
-安装 Docker 和 Git 后，在终端执行：
+安装 Docker 后，直接运行已发布的 GHCR 镜像：
 
 ```bash
-git clone https://github.com/godluo666/webhook.git && cd webhook && docker compose up --build -d
+docker run -d --name webhook-radar --restart unless-stopped --read-only --cap-drop ALL --security-opt no-new-privileges --add-host host.docker.internal:host-gateway -p 127.0.0.1:3000:3000 -v radar_data:/app/.data ghcr.io/godluo666/webhook:latest
 ```
 
-打开 <http://127.0.0.1:3000> 注册账户。数据保存在 Docker 卷 `radar_data`；端口、注册邀请码和邮件服务可通过 `.env` 配置，详情见下文。`main` 分支的 GitHub Actions 会发布镜像 `ghcr.io/godluo666/webhook:latest`。
+打开 <http://127.0.0.1:3000> 注册账户。数据保存在 Docker 卷 `radar_data`，容器更新后仍会保留。需要邀请码或邮件服务时，在命令中追加相应的 `-e` 环境变量；完整配置见下文。若 GHCR 镜像保持私有，首次拉取前须登录有权限的 GitHub 账户，或将镜像包设置为公开。
 
 ## 启动
 
