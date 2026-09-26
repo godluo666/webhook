@@ -41,3 +41,24 @@ test('拒绝超出受约束逻辑范围的生成结果', () => {
   assert.throws(() => validateGeneratedPlan({ sourceType: 'javascript', mode: 'eval' }), /不支持/);
   assert.throws(() => validateGeneratedPlan({ sourceType: 'json', mode: 'compare', path: '__proto__.x', operator: 'equals', expected: 'yes' }), /字段路径/);
 });
+
+
+test('服务连续失败达到指定次数才通知，恢复后重新计数', () => {
+  const plan = validateGeneratedPlan({ sourceType: 'service', mode: 'unavailable', initial: 'notify', failureThreshold: 3 });
+  const failed = () => ({ matched: true, summary: '不可用' });
+  const healthy = () => ({ matched: false, summary: '可用' });
+  const first = failed();
+  assert.equal(transitionGenerated(plan, null, first), false);
+  const second = failed();
+  assert.equal(transitionGenerated(plan, first, second), false);
+  const third = failed();
+  assert.equal(transitionGenerated(plan, second, third), true);
+  const fourth = failed();
+  assert.equal(transitionGenerated(plan, third, fourth), false);
+  const recovered = healthy();
+  assert.equal(transitionGenerated(plan, fourth, recovered), false);
+  const again = failed();
+  assert.equal(transitionGenerated(plan, recovered, again), false);
+  assert.equal(again.consecutiveFailures, 1);
+  assert.match(describeGeneratedPlan(plan), /连续 3 次不可用/);
+});

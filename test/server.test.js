@@ -291,3 +291,82 @@ test('不同用户的规则、渠道、日志隔离，ntfy 优先级按通知覆
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+
+test('AI 对话补充信息、自动修正模型遗漏并在确认后创建规则', async () => {
+  const aiCalls = [];
+  const notifications = [];
+  const mock = http.createServer(async (req, res) => {
+    if (req.url === '/health') { res.writeHead(503); res.end('unavailable'); return; }
+    if (req.url === '/hook') {
+      let body = '';
+      for await (const chunk of req) body += chunk;
+      notifications.push(JSON.parse(body));
+      res.writeHead(200); res.end('ok');
+      return;
+    }
+    if (req.url === '/v1/chat/completions') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const call = JSON.parse(raw);
+      aiCalls.push(call);
+      const turns = call.messages.filter((message) => message.role === 'user').map((message) => message.content).join(' ');
+      const repairing = call.messages.some((message) => message.role === 'system' && message.content.includes('上次生成的规则未通过校验'));
+      const url = `http://127.0.0.1:${mock.address().port}/health`;
+      const content = !turns.includes(url)
+        ? { status: 'need_more_info', questions: ['订单接口的健康检查地址是什么？'] }
+        : repairing
+          ? { status: 'ready', url, label: '订单接口可用性', plan: { sourceType: 'service', mode: 'unavailable', initial: 'notify', failureThreshold: 3 } }
+          : { status: 'ready', url, label: '订单接口可用性', plan: { sourceType: 'service', initial: 'notify', failureThreshold: 3 } };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }));
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-dialog-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', {
+      webhooks: [{ id: 'hook', name: '通知', url: `http://127.0.0.1:${port}/hook`, enabled: true }],
+      aiBaseUrl: `http://127.0.0.1:${port}/v1`, aiModel: 'test-model', aiKey: 'test-key'
+    });
+    const instruction = '帮我监控订单接口';
+    const first = await request(base, '/api/parse', 'POST', { instruction });
+    assert.equal(first.status, 'need_more_info');
+    assert.match(first.questions[0], /地址/);
+    assert.equal(aiCalls.length, 1);
+    assert.equal((await request(base, '/api/state')).monitors.length, 0);
+    const url = `http://127.0.0.1:${port}/health`;
+    const conversation = [
+      { role: 'assistant', content: first.questions[0] },
+      { role: 'user', content: `${url}，每 5 分钟检查，连续失败 3 次报警` }
+    ];
+    const ready = await request(base, '/api/parse', 'POST', { instruction, conversation });
+    assert.equal(ready.status, 'ready');
+    assert.equal(ready.monitor.url, `http://127.0.0.1:${port}/health`);
+    assert.equal(ready.monitor.intervalMinutes, 5);
+    assert.equal(ready.monitor.severity, 'warning');
+    assert.equal(ready.monitor.plan.failureThreshold, 3);
+    assert.equal(aiCalls.length, 3);
+    const logs = await request(base, '/api/logs');
+    assert.match(JSON.stringify(logs), /首次生成|firstModelError|AI 未生成有效监控逻辑/);
+    const revised = await request(base, '/api/parse', 'POST', { instruction, sourceUrl: `http://127.0.0.1:${port}/old`, conversation });
+    assert.equal(revised.monitor.url, url);
+    assert.equal((await request(base, '/api/state')).monitors.length, 0);
+    const created = await request(base, '/api/monitors', 'POST', { ...ready.monitor, webhookIds: ['hook'] });
+    assert.equal(created.status, 'created');
+    assert.equal(created.monitors.length, 1);
+    assert.equal(notifications.length, 0);
+    const id = created.monitors[0].id;
+    await request(base, `/api/monitors/${id}/check`, 'POST');
+    assert.equal(notifications.length, 0);
+    await request(base, `/api/monitors/${id}/check`, 'POST');
+    assert.equal(notifications.length, 1);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mock.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

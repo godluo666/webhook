@@ -1,6 +1,9 @@
 const $ = (selector) => document.querySelector(selector);
 let appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [], sentCount: 0 };
 let previewMonitor = null;
+let assistantInstruction = '';
+let assistantConversation = [];
+let assistantMessages = [];
 let toastTimer;
 let authMode = 'login';
 let emailVerificationEnabled = false;
@@ -154,7 +157,7 @@ function renderLogs() {
   const list = $('#log-list');
   const scrollTop = list.scrollTop;
   const expanded = new Set([...list.querySelectorAll('.raw-log[open]')].map((details) => details.dataset.id));
-  const labels = { instruction: '用户原始指令', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
+  const labels = { instruction: '用户原始指令', conversation: '对话记录', firstModelError: '首次生成校验错误', firstModelResponse: '首次 AI 原始响应', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
   const rawHtml = (entry) => `<details class="raw-log" data-id="${escapeHtml(entry.id)}" ${expanded.has(entry.id) ? 'open' : ''}><summary>查看原始记录</summary><button type="button" class="mini-button copy-log" data-copy-log="${escapeHtml(entry.id)}">复制原始记录</button>${Object.entries(entry.raw).filter(([, value]) => value != null && value !== '').map(([name, value]) => {
     let display = String(value ?? '');
     if (name === 'aiRequest' || name === 'aiResponse' || name === 'responseBody') { try { display = JSON.stringify(JSON.parse(display), null, 2); } catch { /* display the original text */ } }
@@ -258,8 +261,83 @@ async function saveSettings(silent = false) {
 }
 
 async function ensureSettings() {
+  const targets = $('#preview-targets');
+  const selected = targets?.querySelector('input[type="checkbox"]') ? selectedIds(targets) : null;
   await saveSettings(true);
+  if (targets) {
+    const retained = selected?.filter((id) => activeHooks().some((hook) => hook.id === id));
+    targets.innerHTML = targetOptions(retained?.length ? retained : undefined);
+    updatePriorityVisibility($('#preview'), '#preview-targets');
+  }
   if (!activeHooks().length) throw new Error('请先添加并启用一个 Webhook 地址');
+}
+
+function assistantPhase(status) {
+  const labels = { generating: '正在理解你的需求…', need_more_info: '等待你补充信息', ready: '规则已生成，等待确认', created: '监控已创建', failed: '处理遇到问题，可以继续补充' };
+  $('#assistant-dialog').dataset.status = status;
+  $('#assistant-phase').textContent = labels[status] || '等待需求';
+  $('#assistant-reply-button').disabled = status === 'generating';
+}
+
+function renderAssistantMessages() {
+  const list = $('#assistant-messages');
+  list.innerHTML = assistantMessages.map((message) => `<div class="assistant-message ${message.role}"><small>${message.role === 'user' ? '你' : 'AI 监控助手'}</small>${escapeHtml(message.content)}</div>`).join('');
+  list.scrollTop = list.scrollHeight;
+}
+
+function addAssistantMessage(role, content) {
+  $('#assistant-dialog').classList.remove('hidden');
+  assistantMessages.push({ role, content });
+  assistantMessages = assistantMessages.slice(-20);
+  renderAssistantMessages();
+}
+
+function resetAssistant(instruction = '') {
+  assistantInstruction = instruction;
+  assistantConversation = [];
+  assistantMessages = [];
+  $('#assistant-dialog').classList.toggle('hidden', !instruction);
+  $('#assistant-reply').value = '';
+  $('#assistant-messages').innerHTML = '';
+  assistantPhase('idle');
+}
+
+async function prepareAiSettings() {
+  if ((!appState.settings.hasAiKey && !$('#ai-key').value.trim()) || !$('#ai-model').value.trim()) {
+    $('#ai-settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    throw new Error('请先在 AI 生成设置中填写模型和 API Key');
+  }
+  if ($('#settings-dirty').textContent || $('#ai-key').value || $('#ai-model').value !== appState.settings.aiModel || $('#ai-base-url').value !== appState.settings.aiBaseUrl) await saveSettings(true);
+}
+
+async function askAssistant() {
+  assistantPhase('generating');
+  try {
+    await prepareAiSettings();
+    assistantConversation = assistantConversation.slice(-10);
+    const result = await api('/api/parse', 'POST', { instruction: assistantInstruction, sourceUrl: $('#instruction-url').value.trim(), conversation: assistantConversation });
+    if (result.status === 'need_more_info') {
+      previewMonitor = null;
+      $('#preview').classList.add('hidden');
+      const reply = result.questions.map((question, index) => `${index + 1}. ${question}`).join('\n');
+      addAssistantMessage('assistant', `为了生成准确的监控规则，我还需要确认：\n${reply}`);
+      assistantConversation.push({ role: 'assistant', content: reply });
+      assistantPhase('need_more_info');
+      $('#assistant-reply').focus();
+      return;
+    }
+    if (result.status !== 'ready' || !result.monitor) throw new Error('AI 未返回可确认的监控规则');
+    previewMonitor = { ...result.monitor, sourceNote: result.sourceNote || '' };
+    addAssistantMessage('assistant', '信息已齐，规则已生成。请核对下方的监控来源、条件和通知渠道，然后确认创建；需要调整可继续告诉我。');
+    assistantConversation.push({ role: 'assistant', content: ('已生成规则：' + JSON.stringify(result.monitor)).slice(0, 1900) });
+    renderPreview(previewMonitor);
+    assistantPhase('ready');
+    $('#preview').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  } catch (error) {
+    addAssistantMessage('assistant', `暂时无法完成生成：${error.message}。你可以补充或修改需求后重试。`);
+    assistantPhase('failed');
+    throw error;
+  }
 }
 
 function renderPreview(monitor) {
@@ -267,7 +345,7 @@ function renderPreview(monitor) {
   element.classList.remove('hidden');
   const planLabels = { compare: '字段条件', changed: '字段变化', any: '任意条目符合', 'item-transition': '逐项状态变化', contains: '文字出现', absent: '文字消失', 'new-item': '新条目', unavailable: '服务不可用', available: '服务恢复', slow: '响应变慢', 'new-line': '新增日志行' };
   element.innerHTML = `<div class="preview-head"><span>✦ &nbsp; 监控规则预览</span><span>AI 本次生成 · 待确认</span></div>
-    <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>监控来源</small><strong>${escapeHtml(monitor.url)}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
+    <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>监控来源</small><strong>${escapeHtml(monitor.url)}</strong></div><div class="preview-item"><small>告警级别</small><strong>${monitor.severity === 'critical' ? '紧急' : monitor.severity === 'info' ? '提示' : '警告（默认）'}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
     <div class="preview-note">${monitor.sourceNote ? `${escapeHtml(monitor.sourceNote)} ` : ''}${monitor.kind === 'generated' ? '这是你本次请求时由 AI 生成的逻辑。请检查来源、筛选条件与首次通知方式；可在下方编辑。' : monitor.kind === 'dmit' && monitor.triggerMode === 'any-available' ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'generated' && monitor.plan.sourceType === 'html' ? ' 网页检查只读取服务端返回的 HTML，不执行页面 JavaScript；建议先点“测试来源”。' : ''}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
     <div class="field-label">通知到</div><div id="preview-targets" class="target-options">${targetOptions()}</div>
     <details class="rule-editor"><summary>调整监控规则</summary><div class="rule-fields">
@@ -281,7 +359,7 @@ function renderPreview(monitor) {
       <div class="priority-field"><span>ntfy 优先级</span>${priorityPicker('rule-priority', monitor.priority)}</div>
       <label>检查间隔（分钟）<input id="rule-interval" type="number" min="${monitor.kind === 'generated' && ['service', 'log'].includes(monitor.plan.sourceType) ? 1 : 5}" max="1440" value="${monitor.intervalMinutes}"></label>
     </div></details>
-    <div id="preview-result" class="preview-result" aria-live="polite"></div><div class="preview-actions"><button class="button button-outline" id="preview-check-button" type="button">测试来源</button><button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button></div>`;
+    <div id="preview-result" class="preview-result" aria-live="polite"></div><div class="preview-actions"><button class="button button-outline" id="preview-revise-button" type="button">修改需求</button><button class="button button-outline" id="preview-check-button" type="button">测试来源</button><button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button></div>`;
   updatePriorityVisibility(element, '#preview-targets');
 }
 
@@ -320,6 +398,7 @@ function showAuth() {
   $('#auth-screen').classList.remove('hidden');
   $('.app-shell').classList.add('auth-hidden');
   previewMonitor = null;
+  resetAssistant();
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
   for (const selector of ['#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code', '#saved-ai-key-value']) $(selector).value = '';
@@ -570,19 +649,39 @@ $('#send-form').addEventListener('submit', (event) => {
 $('#parse-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#parse-button'), async () => {
-    if ((!appState.settings.hasAiKey && !$('#ai-key').value.trim()) || !$('#ai-model').value.trim()) {
-      $('#ai-settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
-      throw new Error('请先在 AI 生成设置中填写模型和 API Key');
+    const instruction = $('#instruction').value.trim();
+    resetAssistant(instruction);
+    previewMonitor = null;
+    $('#preview').classList.add('hidden');
+    if (!instruction) {
+      addAssistantMessage('assistant', '先告诉我想监控什么。我会根据你的描述追问必要信息。');
+      assistantPhase('need_more_info');
+      $('#assistant-reply').focus();
+      return;
     }
-    if ($('#settings-dirty').textContent || $('#ai-key').value || $('#ai-model').value !== appState.settings.aiModel || $('#ai-base-url').value !== appState.settings.aiBaseUrl) await saveSettings(true);
-    const result = await api('/api/parse', 'POST', { instruction: $('#instruction').value, sourceUrl: $('#instruction-url').value.trim() });
-    previewMonitor = { ...result.monitor, sourceNote: result.sourceNote || '' };
-    renderPreview(previewMonitor);
-    toast('规则已生成，请确认');
+    addAssistantMessage('user', instruction);
+    await askAssistant();
   });
 });
 
+$('#assistant-reply-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  withButton($('#assistant-reply-button'), async () => {
+    const reply = $('#assistant-reply').value.trim();
+    if (!reply) return;
+    if (!assistantInstruction) assistantInstruction = reply;
+    else assistantConversation.push({ role: 'user', content: reply });
+    addAssistantMessage('user', reply);
+    $('#assistant-reply').value = '';
+    await askAssistant();
+  });
+});
 $('#preview').addEventListener('click', (event) => {
+  if (event.target.closest('#preview-revise-button')) {
+    $('#assistant-dialog').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    $('#assistant-reply').focus();
+    return;
+  }
   if (event.target.closest('#preview-check-button')) {
     withButton($('#preview-check-button'), async () => {
       const resultBox = $('#preview-result');
@@ -602,12 +701,23 @@ $('#preview').addEventListener('click', (event) => {
   }
   if (!event.target.closest('#create-button')) return;
   withButton($('#create-button'), async () => {
-    await ensureSettings();
+    try { await ensureSettings(); }
+    catch (error) {
+      $('#preview-result').className = 'preview-result error';
+      $('#preview-result').textContent = error.message;
+      addAssistantMessage('assistant', `规则已准备好，但设置需要处理：${error.message}。请检查通知渠道后再确认。`);
+      $('#settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
     const rule = collectPreviewRule();
     appState = await api('/api/monitors', 'POST', rule);
     const created = appState.monitors[0];
     previewMonitor = null;
     $('#preview').classList.add('hidden');
+    addAssistantMessage('assistant', `监控“${created.label}”已创建，之后会按规则自动检查。`);
+    assistantPhase('created');
+    assistantInstruction = '';
+    assistantConversation = [];
     $('#instruction').value = '';
     $('#instruction-url').value = '';
     render(true);

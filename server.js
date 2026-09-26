@@ -92,15 +92,16 @@ function selectedWebhookIds(user, ids) {
 function validateMonitor(candidate) {
   if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated'].includes(candidate.kind)) throw new Error('无法识别监控类型');
   const minInterval = candidate.kind === 'generated' && ['service', 'log'].includes(candidate.plan?.sourceType) ? 1 : 5;
-  const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 10));
+  const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 5));
   const label = String(candidate.label || '未命名监控').trim().slice(0, 60);
   const description = String(candidate.description || '').trim().slice(0, 180);
+  const severity = ['info', 'warning', 'critical'].includes(candidate.severity) ? candidate.severity : 'warning';
   if (candidate.kind === 'dmit') return { kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
   if (candidate.kind === 'generated') {
     const plan = validateGeneratedPlan(candidate.plan);
     const url = sourceOf(candidate.url, plan.sourceType);
     if (plan.sourceType === 'log' && !url.startsWith('log:') || plan.sourceType === 'service' && !url.startsWith('tcp://') && !/^https?:\/\//.test(url) || !['log', 'service'].includes(plan.sourceType) && !/^https?:\/\//.test(url)) throw new Error('来源与监控规则类型不匹配');
-    return { kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, plan };
+    return { kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, severity, plan };
   }
   const url = urlOf(candidate.url, '监控地址');
   if (candidate.kind === 'dmit-product') {
@@ -212,6 +213,7 @@ function currentStateMatches(monitor, current) {
   if (monitor.kind !== 'generated') return null;
   if (monitor.plan.sourceType === 'log' || ['changed', 'item-transition', 'new-item'].includes(monitor.plan.mode)) return null;
   if (monitor.plan.sourceType === 'service' && monitor.plan.mode === 'available') return null;
+  if (monitor.plan.sourceType === 'service' && monitor.plan.mode === 'unavailable') return current.matched === true && (current.consecutiveFailures || 0) >= (monitor.plan.failureThreshold || 1);
   return current.matched === true;
 }
 
@@ -240,8 +242,8 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
       responseSample = html.slice(0, 4000);
       current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
     }
-    const conditionSatisfied = currentStateMatches(monitor, current);
     const transitioned = monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
+    const conditionSatisfied = currentStateMatches(monitor, current);
     const triggered = transitioned || manual && conditionSatisfied === true && !hadPending;
     if (triggered) {
       if (!monitor.webhookIds.length) {
@@ -261,7 +263,7 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
         : monitor.description || current.summary;
       monitor.pendingNotifications.push({
         id: randomUUID(),
-        payload: { event: 'monitor.triggered', title: `${monitor.label} · 条件已满足`, message, url: monitor.url, monitorId: monitor.id, priority: monitor.priority },
+        payload: { event: 'monitor.triggered', title: `${monitor.label} · 条件已满足`, message, url: monitor.url, monitorId: monitor.id, priority: monitor.priority, severity: monitor.severity || 'warning' },
         remainingIds: [...monitor.webhookIds]
       });
       persist();
@@ -306,29 +308,69 @@ function instructionUrl(input) {
   return input.match(/tcp:\/\/(?:\[[^\]]+\]|[a-z0-9.-]+):\d{1,5}/i)?.[0] || input.match(/https?:\/\/[^\s<>"'“”‘’，。；、（）()]+/i)?.[0] || input.match(/\blog:[a-z0-9._/-]+/i)?.[0] || '';
 }
 
-async function parseInstruction(user, instruction, sourceUrlInput, trace) {
+function needMoreInfo(questions) {
+  const list = (Array.isArray(questions) ? questions : [questions]).map((item) => String(item || '').trim().slice(0, 180)).filter(Boolean).slice(0, 3);
+  return { status: 'need_more_info', questions: list.length ? list : ['请补充要监控的目标地址，以及希望在什么情况下收到通知。'] };
+}
+
+function conversationTurns(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 12) throw new Error('对话内容过长，请重新描述监控需求');
+  return value.map((turn) => {
+    const role = turn?.role;
+    const content = String(turn?.content || '').trim();
+    if (!['user', 'assistant'].includes(role) || !content || content.length > 2000) throw new Error('对话内容无效');
+    return { role, content };
+  });
+}
+
+function invalidAiRule(message) {
+  const error = new Error(message);
+  error.repairable = true;
+  throw error;
+}
+
+function missingRuleQuestion(error, plan) {
+  const detail = String(error.message || '');
+  if (/来源|地址/.test(detail)) return '请提供实际可访问的监控地址：HTTP 接口、网页、tcp://主机:端口或 log:文件名。';
+  if (/字段|列表路径|比较值/.test(detail)) return '接口返回的数据中，应该检查哪个字段或哪种状态？';
+  if (/监控文字|日志关键词/.test(detail)) return plan?.sourceType === 'log' ? '新增日志里出现什么文字时通知？' : '页面出现或消失什么文字时通知？';
+  if (/阈值/.test(detail)) return '响应超过多少毫秒时需要通知？';
+  return null;
+}
+
+async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput = [], repairFeedback = '') {
   const input = String(instruction || '').trim();
   trace.instruction = input;
   if (!input || input.length > 2000) throw new Error('指令长度需要在 1 到 2000 字之间');
-  const explicitSourceUrl = String(sourceUrlInput || '').trim();
-  const sourceUrl = explicitSourceUrl ? sourceOf(explicitSourceUrl) : instructionUrl(input);
-  trace.sourceUrl = sourceUrl;
-  trace.sourceMode = explicitSourceUrl ? '单独填写' : sourceUrl ? '从指令提取' : '未提供';
+  const turns = conversationTurns(conversationInput);
+  trace.conversation = JSON.stringify(turns).slice(0, 12000);
+  const userTurns = [input, ...turns.filter((turn) => turn.role === 'user').map((turn) => turn.content)];
+  const fullInput = userTurns.join('\n');
+  const sourceInput = String(sourceUrlInput || '').trim();
+  let explicitSourceUrl = '';
+  try { if (sourceInput) explicitSourceUrl = sourceOf(sourceInput); } catch { /* ask for a corrected source after AI analysis */ }
+  const followupUrl = turns.filter((turn) => turn.role === 'user').slice().reverse().map((turn) => instructionUrl(turn.content)).find(Boolean) || '';
+  const sourceUrl = followupUrl || explicitSourceUrl || instructionUrl(input) || '';
+  const fixedSourceUrl = explicitSourceUrl && !followupUrl;
+  trace.sourceUrl = sourceUrl || sourceInput;
+  trace.sourceMode = followupUrl ? '从补充信息提取' : fixedSourceUrl ? '单独填写' : sourceInput ? '单独填写的地址无效' : sourceUrl ? '从指令提取' : '未提供';
   if (!user.settings.aiKey) throw new Error('按需生成监控逻辑需要先在设置中填写 AI API Key');
   if (!user.settings.aiModel) throw new Error('请先填写 AI 模型名称');
-  const dmit = /\bdmit\b/i.test(input);
-  if (!sourceUrl && !dmit) throw new Error('请填写来源：HTTP 地址、tcp://主机:端口或账户日志文件 log:文件名');
+  const dmit = /\bdmit\b/i.test(fullInput);
   const endpoint = aiEndpoint(user.settings.aiBaseUrl || 'https://api.openai.com/v1');
   trace.model = user.settings.aiModel;
   trace.apiEndpoint = new URL(endpoint).origin + new URL(endpoint).pathname;
   const aiRequest = {
       model: user.settings.aiModel,
       messages: [
-        { role: 'system', content: `你是监控逻辑编译器。根据用户本次指令，生成一条可执行的声明式监控程序，仅输出 JSON，不要 Markdown。顶层字段：url,label,intervalMinutes,plan。plan 必填 sourceType=json/html/rss，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；信息不足时返回 {"error":"请补充来源地址或触发条件"}。` },
+        { role: 'system', content: `你是监控助手。结合本次对话判断能否创建可执行监控。仅输出 JSON，不要 Markdown。信息不足时返回 {"status":"need_more_info","questions":["只问缺失的关键信息"]}，最多 3 个简短问题。信息充足时返回 {"status":"ready","url":"真实来源","label":"任务名称","intervalMinutes":5,"severity":"warning","plan":{}}。默认每 5 分钟检查，告警级别 warning；用户未要求其他频率或级别时不要为此提问。通知渠道由界面选择。不能用 auto、unknown 或臆造地址作为真实来源。顶层字段：url,label,intervalMinutes,severity,plan。plan 必填 sourceType=json/html/rss，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；缺少实际地址、字段或触发条件时应返回 need_more_info 和具体问题。` },
         { role: 'system', content: '如果使用 DMIT 第三方库存来源，plan.path 必须为 products；filters 必须包括 provider equals "dmit"、stale equals 0、last_check_at withinMinutes 120。任意有货模式还必须筛选 status in ["有货","available","in stock"]；补货模式使用 item-transition，idPath=product_key、statePath=status、fromValues=["无货","缺货","out of stock"]、toValues=["有货","available","in stock"]，且不要在 filters 中筛选 status。' },
-        { role: 'system', content: '来源类型除上文 json/html/rss 外，还支持 service/log。HTTP 服务或 TCP 端口的可用性使用 plan.sourceType="service"，mode="unavailable"（故障时）、"available"（恢复可用时）或 "slow"（响应时间超过 thresholdMs 毫秒）；url 使用 http(s):// 或 tcp://主机:端口。本地日志使用 plan.sourceType="log"，mode="new-line"，keyword 为新日志行要包含的文字，可选 caseSensitive；url 使用 log:相对路径，例如 log:app.log。日志默认 initial="baseline"，只检查创建后新增的行；用户明确要求现有日志也触发才用 initial="notify"。服务和日志 intervalMinutes 可为 1 到 1440。不得输出脚本、命令或未获用户提供的文件路径。' },
-        { role: 'system', content: explicitSourceUrl ? `用户已单独填写监控来源地址：${sourceUrl}。输出的 url 必须与此地址完全一致。` : '上文要求使用用户提供的 URL，指真实网址部分。如果网址后紧贴中文指令文字，辨别网址和自然语言的边界；不要把“存在”“包含”“通知”等句子当作网址路径。' },
-        { role: 'user', content: input }
+        { role: 'system', content: '来源类型除上文 json/html/rss 外，还支持 service/log。HTTP 服务或 TCP 端口的可用性使用 plan.sourceType="service"，mode="unavailable"（故障时）、"available"（恢复可用时）或 "slow"（响应时间超过 thresholdMs 毫秒）；url 使用 http(s):// 或 tcp://主机:端口。本地日志使用 plan.sourceType="log"，mode="new-line"，keyword 为新日志行要包含的文字，可选 caseSensitive；url 使用 log:相对路径，例如 log:app.log。日志默认 initial="baseline"，只检查创建后新增的行；用户明确要求现有日志也触发才用 initial="notify"。服务和日志 intervalMinutes 可为 1 到 1440，默认 5。服务不可用监控如要求连续失败 N 次才告警，使用 plan.failureThreshold=N（1 到 10），默认 1。当前只支持 HTTP 或 TCP 可用性，不支持 ICMP Ping；缺少主机端口或健康检查地址时请追问。不得输出脚本、命令或未获用户提供的文件路径。' },
+        { role: 'system', content: fixedSourceUrl ? `用户已单独填写监控来源地址：${sourceUrl}。输出的 url 必须与此地址完全一致。` : sourceInput && !followupUrl ? `用户填写的来源地址“${sourceInput}”无法识别。请根据对话中的后续地址修正；仍不明确就追问。` : '上文要求使用用户提供的 URL，指真实网址部分。如果网址后紧贴中文指令文字，辨别网址和自然语言的边界；不要把“存在”“包含”“通知”等句子当作网址路径。' },
+        ...(repairFeedback ? [{ role: 'system', content: `上次生成的规则未通过校验：${repairFeedback}。请根据用户已提供的信息修正并重新输出 JSON；仅当确实缺少用户才能提供的信息时才返回 need_more_info。` }] : []),
+        { role: 'user', content: input },
+        ...turns
       ]
     };
   trace.aiRequest = JSON.stringify(aiRequest).slice(0, 16000);
@@ -344,45 +386,85 @@ async function parseInstruction(user, instruction, sourceUrlInput, trace) {
     const result = JSON.parse(text);
     const content = String(result.choices?.[0]?.message?.content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     parsed = JSON.parse(content);
-  } catch { throw new Error('AI 返回内容无法解析，请调整模型或指令'); }
-  if (parsed.error) throw new Error(String(parsed.error));
-  const expectedUrl = sourceUrl || DMIT_STOCK_URL;
-  const allowedUrls = [sourceOf(expectedUrl)];
-  const github = sourceUrl?.match(/^https?:\/\/github\.com\/([^/]+)\/([^/?#]+)/i);
-  if (github) allowedUrls.push(`https://api.github.com/repos/${github[1]}/${github[2]}/releases/latest`);
-  const returnedUrl = sourceOf(parsed.url, parsed.plan?.sourceType);
-  trace.aiReturnedUrl = returnedUrl;
-  if (!explicitSourceUrl && sourceUrl?.startsWith('http') && returnedUrl === allowedUrls[0]) {
-    let decodedPath = '';
-    try { decodedPath = decodeURIComponent(new URL(returnedUrl).pathname); } catch { /* validation below still applies */ }
-    const followingText = input.slice(input.indexOf(sourceUrl) + sourceUrl.length).trimStart();
-    if (/(?:存在|包含|出现).*(?:通知|这两个字)/.test(decodedPath) || /[\p{Script=Han}]/u.test(decodedPath) && /^["“]/.test(followingText) && /(?:通知|这两个字)/.test(followingText)) {
-      throw new Error('网址和指令文字连在一起，请把监控来源地址单独填写');
-    }
+  } catch { const error = new Error('AI 返回内容无法解析'); error.repairable = true; throw error; }
+  if (parsed?.status === 'need_more_info') return needMoreInfo(parsed.questions || parsed.message);
+  if (parsed?.error) {
+    if (/补充|提供|缺少|不明确|不清楚/.test(String(parsed.error))) return needMoreInfo(parsed.error);
+    throw new Error(String(parsed.error));
   }
+  if (!sourceUrl && !dmit) return needMoreInfo(['请提供实际监控地址，例如健康检查接口、网页、tcp://主机:端口或账户日志文件 log:文件名。']);
+  const output = parsed?.status === 'ready' && parsed.monitor ? parsed.monitor : parsed;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) { const error = new Error('AI 未返回有效监控规则'); error.repairable = true; throw error; }
+  const expectedUrl = sourceUrl || DMIT_STOCK_URL;
+  let expected;
+  try { expected = sourceOf(expectedUrl); }
+  catch { return needMoreInfo(['请确认监控来源的完整地址；目前提供的地址无法识别。']); }
+  const allowedUrls = [expected];
+  const github = sourceUrl?.match(/^https?:\/\/github\.com\/([^/]+)\/([^/?#]+)/i);
+  if (github) allowedUrls.push('https://api.github.com/repos/' + github[1] + '/' + github[2] + '/releases/latest');
+  let returnedUrl = '';
+  try { returnedUrl = sourceOf(output.url, output.plan?.sourceType); } catch { /* use the user-provided source below */ }
+  trace.aiReturnedUrl = returnedUrl || String(output.url || '');
   let sourceNote = '';
-  if (!allowedUrls.includes(returnedUrl)) {
+  if (!returnedUrl) {
+    output.url = expected;
+    sourceNote = '已使用你提供的监控来源。';
+  } else if (allowedUrls.includes(returnedUrl)) {
+    output.url = returnedUrl;
+  } else {
     let suffix = '';
-    if (!explicitSourceUrl && sourceUrl?.startsWith('http') && allowedUrls[0].startsWith(returnedUrl)) {
-      try { suffix = decodeURIComponent(allowedUrls[0].slice(returnedUrl.length)); } catch { /* keep strict validation */ }
+    if (!fixedSourceUrl && sourceUrl?.startsWith('http') && expected.startsWith(returnedUrl)) {
+      try { suffix = decodeURIComponent(expected.slice(returnedUrl.length)); } catch { /* retain strict source matching */ }
     }
-    if (!/^[\p{Script=Han}]/u.test(suffix) || !/(?:存在|包含|出现|通知|这两个字|关键词|监控|检测)/.test(suffix)) throw new Error('AI 返回的监控地址与指令不一致；请把来源地址单独填写');
-    sourceNote = '网址与中文指令连在一起，已采用 AI 识别的来源地址。请核对下方完整地址。';
+    if (/^[\p{Script=Han}]/u.test(suffix) && /(?:存在|包含|出现|通知|这两个字|关键词|监控|检测)/.test(suffix)) {
+      output.url = returnedUrl;
+      sourceNote = '网址与中文指令连在一起，已识别真实来源地址；请核对下方预览。';
+    } else {
+      output.url = expected;
+      sourceNote = 'AI 给出的地址与需求不同，已使用你提供的来源；请核对预览。';
+    }
     trace.sourceInterpretation = sourceNote;
   }
-  const candidate = validateMonitor({ ...parsed, kind: 'generated' });
+  if (!fixedSourceUrl && sourceUrl?.startsWith('http') && output.url === expected) {
+    let decodedPath = '';
+    try { decodedPath = decodeURIComponent(new URL(expected).pathname); } catch { /* URL was already validated */ }
+    if (/(?:存在|包含|出现).*(?:通知|这两个字)/.test(decodedPath)) return needMoreInfo(['请确认真实网页地址。网址后面的中文描述可能被当成了路径。']);
+  }
+  let candidate;
+  try { candidate = validateMonitor({ ...output, kind: 'generated' }); }
+  catch (error) {
+    const question = missingRuleQuestion(error, output.plan);
+    error.repairable = true;
+    error.question = question;
+    throw error;
+  }
   if (dmit && !sourceUrl) {
     const filters = candidate.plan.filters || [];
     const has = (field, operator, value) => filters.some((filter) => filter.path === field && filter.operator === operator && (value === undefined || String(filter.expected) === String(value)));
-    if (candidate.plan.sourceType !== 'json' || candidate.plan.path !== 'products' || !has('provider', 'equals', 'dmit') || !has('stale', 'equals', 0) || !filters.some((filter) => filter.path === 'last_check_at' && filter.operator === 'withinMinutes' && Number(filter.expected) <= 120)) throw new Error('AI 未正确生成 DMIT 来源和时效筛选，请重新生成');
-    if (candidate.plan.mode === 'any' && !filters.some((filter) => filter.path === 'status' && filter.operator === 'in' && filter.expected.some((value) => ['有货', 'available', 'in stock'].includes(String(value).toLowerCase())))) throw new Error('AI 未正确生成有货状态筛选，请重新生成');
-    if (candidate.plan.mode === 'item-transition' && (candidate.plan.idPath !== 'product_key' || candidate.plan.statePath !== 'status')) throw new Error('AI 未正确生成补货状态字段，请重新生成');
+    if (candidate.plan.sourceType !== 'json' || candidate.plan.path !== 'products' || !has('provider', 'equals', 'dmit') || !has('stale', 'equals', 0) || !filters.some((filter) => filter.path === 'last_check_at' && filter.operator === 'withinMinutes' && Number(filter.expected) <= 120)) invalidAiRule('AI 未正确生成 DMIT 来源和时效筛选，请重新生成');
+    if (candidate.plan.mode === 'any' && !filters.some((filter) => filter.path === 'status' && filter.operator === 'in' && filter.expected.some((value) => ['有货', 'available', 'in stock'].includes(String(value).toLowerCase())))) invalidAiRule('AI 未正确生成有货状态筛选，请重新生成');
+    if (candidate.plan.mode === 'item-transition' && (candidate.plan.idPath !== 'product_key' || candidate.plan.statePath !== 'status')) invalidAiRule('AI 未正确生成补货状态字段，请重新生成');
   }
-  const anyAvailable = /任意有货|只要有货|当前有货|有货就通知/.test(input);
-  if (dmit && !sourceUrl && anyAvailable && (candidate.plan.mode !== 'any' || candidate.plan.initial !== 'notify')) throw new Error('AI 没有按“任意有货”生成规则，请调整指令后重试');
-  if (dmit && !sourceUrl && !anyAvailable && /补货|恢复供货|重新有货/.test(input) && (candidate.plan.mode !== 'item-transition' || candidate.plan.initial !== 'baseline')) throw new Error('AI 没有按“补货变化”生成规则，请调整指令后重试');
+  const triggerIntent = userTurns.slice().reverse().find((turn) => /任意有货|只要有货|当前有货|有货就通知|补货|恢复供货|重新有货/.test(turn)) || fullInput;
+  const anyAvailable = /任意有货|只要有货|当前有货|有货就通知/.test(triggerIntent);
+  if (dmit && !sourceUrl && anyAvailable && (candidate.plan.mode !== 'any' || candidate.plan.initial !== 'notify')) invalidAiRule('AI 没有按“任意有货”生成规则，请调整指令后重试');
+  if (dmit && !sourceUrl && !anyAvailable && /补货|恢复供货|重新有货/.test(triggerIntent) && (candidate.plan.mode !== 'item-transition' || candidate.plan.initial !== 'baseline')) invalidAiRule('AI 没有按“补货变化”生成规则，请调整指令后重试');
   trace.validatedUrl = candidate.url;
-  return { ...candidate, parser: 'ai', sourceNote };
+  return { status: 'ready', monitor: candidate, parser: 'ai', sourceNote };
+}
+
+async function parseInstruction(user, instruction, sourceUrlInput, trace, conversationInput = []) {
+  try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput); }
+  catch (error) {
+    if (!error.repairable) throw error;
+    trace.firstModelError = error.message;
+    trace.firstModelResponse = trace.aiResponse || '';
+    try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, error.message); }
+    catch (retryError) {
+      if (retryError.question) return needMoreInfo([retryError.question]);
+      throw retryError;
+    }
+  }
 }
 
 function sendJson(response, status, data, headers = {}) {
@@ -538,12 +620,15 @@ async function handler(request, response) {
         const trace = {};
         const safeTrace = () => Object.fromEntries(Object.entries(trace).map(([name, value]) => [name, typeof value === 'string' && user.settings.aiKey ? value.replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : value]));
         try {
-          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace);
-          const { parser, sourceNote, ...candidate } = parsed;
-          const monitor = validateMonitor(candidate);
+          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace, body.conversation);
+          if (parsed.status === 'need_more_info') {
+            trace.validation = '需要补充信息';
+            addLog(user, 'parse', 'success', `AI 需要补充信息：${parsed.questions.join('；')}`, null, Date.now() - started, null, safeTrace());
+            return sendJson(response, 200, parsed);
+          }
           trace.validation = '通过';
-          addLog(user, 'parse', 'success', `AI 解析生成 ${monitor.kind} 规则`, null, Date.now() - started, null, safeTrace());
-          return sendJson(response, 200, { monitor, parser, sourceNote });
+          addLog(user, 'parse', 'success', `AI 解析生成 ${parsed.monitor.kind} 规则`, null, Date.now() - started, null, safeTrace());
+          return sendJson(response, 200, parsed);
         } catch (error) {
           if (error.responseStatus) trace.httpStatus = error.responseStatus;
           if (error.responseBody) trace.aiResponse = error.responseBody;
@@ -615,7 +700,7 @@ async function handler(request, response) {
         user.monitors.unshift(monitor);
         persist();
         await checkMonitor(user, monitor);
-        return sendJson(response, 201, publicState(user));
+        return sendJson(response, 201, { status: 'created', ...publicState(user) });
       }
       const match = pathname.match(/^\/api\/monitors\/([^/]+)(?:\/(check))?$/);
       if (match) {

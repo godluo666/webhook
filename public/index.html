@@ -43,11 +43,12 @@
               <div class="card-title-row"><div><div class="eyebrow">SMART MONITOR</div><h2>描述你想关注的事</h2></div><div class="section-icon purple" aria-hidden="true">✦</div></div>
               <p class="section-subtitle">可监控 HTTP 接口、网页、TCP 服务、账户日志文件与订阅更新。先预览规则，确认后开始运行。</p>
               <form id="parse-form">
-                <label for="instruction" class="field-label">你的指令</label>
-                <textarea id="instruction" rows="4" placeholder="描述要检查的内容和通知条件；可写接口字段、服务可用性或新增日志文字"></textarea>
-                <label for="instruction-url" class="field-label">监控来源 <span class="optional-input">与指令分开填写更清楚</span></label><input id="instruction-url" type="text" placeholder="https://example.com/health、tcp://127.0.0.1:3000 或 log:app.log" autocomplete="off"><p id="local-source-hint" class="field-help"></p>
-                <div class="composer-bottom"><span id="ai-status">点击后才调用你配置的 AI API，生成这条任务的监控逻辑</span><button class="button button-primary" type="submit" id="parse-button"><span>生成监控规则</span><span>↗</span></button></div>
+                <label for="instruction" class="field-label">想监控什么？</label>
+                <textarea id="instruction" rows="4" placeholder="例如：帮我监控订单接口，连续失败 3 次就通知我"></textarea>
+                <details class="source-optional"><summary>我知道具体监控地址（选填）</summary><label for="instruction-url" class="field-label">来源地址</label><input id="instruction-url" type="text" placeholder="https://example.com/health、tcp://主机:端口 或 log:app.log" autocomplete="off"><p id="local-source-hint" class="field-help"></p></details>
+                <div class="composer-bottom"><span id="ai-status">AI 会在信息不足时追问；规则生成后由你确认创建</span><button class="button button-primary" type="submit" id="parse-button"><span>开始创建</span><span>↗</span></button></div>
               </form>
+              <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong>AI 监控助手</strong><span id="assistant-phase" role="status">等待需求</span></div></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">补充信息或修改要求</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="直接回答上面的问题，也可以说出想修改的地方"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送补充 ↗</button></div></form></section>
               <div id="preview" class="preview hidden" aria-live="polite"></div>
             </section>
 
