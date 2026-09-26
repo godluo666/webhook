@@ -22,6 +22,8 @@ jobs:
           package-manager-cache: false
       - run: docker compose config -q
       - run: docker compose -f compose.build.yaml config -q
+      - run: docker compose -p webhook-radar -f "https://github.com/${GITHUB_REPOSITORY}.git#main:compose.build.yaml" config -q
+      - run: bash -n install.sh
       - run: node --test
       - name: Build image
         run: |

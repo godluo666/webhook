@@ -4,7 +4,13 @@
 
 ## Docker Compose 部署
 
-安装 Docker 后，在服务器直接运行一条命令。Compose 会自动读取公开仓库并在本机首次构建镜像，无需手动下载文件或执行 `git clone`：
+安装 Docker 后，在服务器运行一条命令：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/godluo666/webhook/main/install.sh | bash
+```
+
+安装脚本会检查 Docker 和 Compose，然后让 Compose 自动读取公开仓库、在本机首次构建镜像。无需手动下载文件或执行 `git clone`。也可以不运行脚本，直接执行同样的 Compose 命令：
 
 ```bash
 docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git#main:compose.build.yaml up -d --build
