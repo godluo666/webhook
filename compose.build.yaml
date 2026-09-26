@@ -1,0 +1,31 @@
+services:
+  webhook-radar:
+    build:
+      context: .
+      args:
+        SOURCE_URL: https://github.com/godluo666/webhook
+    image: webhook-radar:local
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:${RADAR_PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /app/.data
+      SIGNUP_CODE: ${SIGNUP_CODE:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      MAIL_FROM: ${MAIL_FROM:-}
+    volumes:
+      - "${RADAR_DATA_VOLUME:-radar_data}:/app/.data"
+
+volumes:
+  radar_data:

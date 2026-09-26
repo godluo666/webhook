@@ -4,13 +4,21 @@
 
 ## Docker Compose 部署
 
-安装 Docker 后，将仓库里的 `compose.yaml` 单独保存到服务器的一个目录，然后在该目录执行：
+安装 Docker 后，在服务器直接运行一条命令。Compose 会自动读取公开仓库并在本机首次构建镜像，无需手动下载文件或执行 `git clone`：
 
 ```bash
-docker compose up -d
+docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git#main:compose.build.yaml up -d --build
 ```
 
-打开 <http://127.0.0.1:3000> 注册账户。GHCR（GitHub Container Registry）是存放已构建镜像的地方；Compose 会按 `compose.yaml` 中的 `image` 地址拉取镜像并启动，不需要下载源码或在服务器编译。数据保存在 Docker 卷 `radar_data`，容器更新后仍会保留。若 GHCR 镜像保持私有，首次拉取前须登录有权限的 GitHub 账户，或将镜像包设置为公开。
+打开 <http://127.0.0.1:3000> 注册账户。数据保存在 Docker 命名卷中，容器更新后仍会保留。更新时再次运行同一命令即可。默认仅本机可访问；要供其他设备访问，可调整端口绑定及反向代理。
+
+仓库中的 `compose.yaml` 使用预构建的 GHCR 镜像。镜像包公开后，可改用无需本机编译的单条命令：
+
+```bash
+docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git up -d
+```
+
+GitHub 仓库公开与 GHCR 镜像包公开是两项独立设置。镜像包仍为私有时，上面这条拉取镜像的命令需要先登录有权限的 GitHub 账户；此时请使用第一条本机构建命令。
 
 ## 启动
 

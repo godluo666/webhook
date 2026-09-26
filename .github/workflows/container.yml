@@ -21,6 +21,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - run: docker compose config -q
+      - run: docker compose -f compose.build.yaml config -q
       - run: node --test
       - name: Build image
         run: |
