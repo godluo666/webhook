@@ -23,14 +23,14 @@ async function request(base, endpoint, method = 'GET', body) {
   return data;
 }
 
-async function startApp(dataDir) {
+async function startApp(dataDir, options = {}) {
   const reservation = http.createServer();
   const port = await listen(reservation);
   await new Promise((resolve) => reservation.close(resolve));
-  const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir }, stdio: 'ignore' });
+  const child = spawn(process.execPath, ['server.js'], { cwd: root, env: { ...process.env, RESEND_API_KEY: '', MAIL_FROM: '', ...options.env, PORT: String(port), HOST: '127.0.0.1', DATA_DIR: dataDir }, stdio: 'ignore' });
   const base = `http://127.0.0.1:${port}`;
   for (let attempt = 0; attempt < 60; attempt++) {
-    try { await request(base, '/api/auth/status'); await request(base, '/api/auth/register', 'POST', { username: 'alice', password: 'a-strong-password-123' }); return { base, child }; } catch { await new Promise((resolve) => setTimeout(resolve, 50)); }
+    try { await request(base, '/api/auth/status'); if (options.autoRegister !== false) await request(base, '/api/auth/register', 'POST', { username: 'alice', password: 'a-strong-password-123' }); return { base, child }; } catch { await new Promise((resolve) => setTimeout(resolve, 50)); }
   }
   child.kill();
   throw new Error('应用未启动');
@@ -105,8 +105,9 @@ test('多渠道选择、单独测试与失败渠道重试', async () => {
     assert.equal(created.monitors[0].baselined, true);
     assert.deepEqual([messages.a.length, messages.b.length], [1, 1]);
     pageText = '<p>有货</p>';
-    await request(base, `/api/monitors/${id}/check`, 'POST');
-    assert.deepEqual([messages.a.length, messages.b.length], [2, 2]);
+    const repeated = await request(base, `/api/monitors/${id}/check`, 'POST');
+    assert.deepEqual([messages.a.length, messages.b.length], [3, 3]);
+    assert.equal(repeated.check.sentCount, 2);
     await request(base, `/api/monitors/${id}/check`, 'POST');
     assert.deepEqual([messages.a.length, messages.b.length], [2, 2]);
 
@@ -115,17 +116,18 @@ test('多渠道选择、单独测试与失败渠道重试', async () => {
     failB = true;
     pageText = '<p>有货</p>';
     const partial = await request(base, `/api/monitors/${id}/check`, 'POST');
-    assert.deepEqual([messages.a.length, messages.b.length], [3, 2]);
+    assert.deepEqual([messages.a.length, messages.b.length], [4, 3]);
     assert.deepEqual(partial.monitors[0].pendingNotifications[0].remainingIds, ['hook-b']);
     failB = false;
     const retried = await request(base, `/api/monitors/${id}/check`, 'POST');
-    assert.deepEqual([messages.a.length, messages.b.length], [3, 3]);
+    assert.deepEqual([messages.a.length, messages.b.length], [4, 4]);
+    assert.equal(retried.check.sentCount, 1);
     assert.equal(retried.monitors[0].pendingNotifications.length, 0);
-    assert.equal(retried.sentCount, 6);
+    assert.equal(retried.sentCount, 8);
 
     await request(base, '/api/settings', 'PUT', { webhooks: [hooks[0], { ...hooks[1], enabled: false }] });
     await request(base, '/api/test-webhook', 'POST', { webhookId: 'hook-b' });
-    assert.equal(messages.b.length, 4);
+    assert.equal(messages.b.length, 5);
     await request(base, '/api/settings', 'PUT', { webhooks: hooks });
 
     const edited = await request(base, `/api/monitors/${id}`, 'PATCH', { rule: { label: '现货提醒', keyword: '现货', description: '页面出现「现货」时通知', intervalMinutes: 15 }, webhookIds: ['hook-a'] });
@@ -136,7 +138,7 @@ test('多渠道选择、单独测试与失败渠道重试', async () => {
     assert.equal(editedMonitor.snapshot.matched, false);
     pageText = '<p>现货</p>';
     await request(base, `/api/monitors/${id}/check`, 'POST');
-    assert.deepEqual([messages.a.length, messages.b.length], [4, 4]);
+    assert.deepEqual([messages.a.length, messages.b.length], [5, 5]);
 
     const onlyB = await request(base, '/api/monitors', 'POST', { kind: 'webpage', url: `http://127.0.0.1:${mockPort}/source`, label: '仅个人频道', description: '出现有货', keyword: '有货', mode: 'contains', intervalMinutes: 5, webhookIds: ['hook-b'] });
     const onlyBId = onlyB.monitors[0].id;
@@ -154,7 +156,7 @@ test('多渠道选择、单独测试与失败渠道重试', async () => {
   }
 });
 
-test('旧版单 Webhook 设置自动迁移并保留监控任务', async () => {
+test('旧版未归属数据不会进入新版账户，也不再提供认领接口', async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-migrate-'));
   await mkdir(dataDir, { recursive: true });
   await writeFile(path.join(dataDir, 'state.json'), JSON.stringify({
@@ -165,15 +167,65 @@ test('旧版单 Webhook 设置自动迁移并保留监控任务', async () => {
   const { base, child } = await startApp(dataDir);
   try {
     const saved = JSON.parse(await readFile(path.join(dataDir, 'state.json'), 'utf8'));
-    await request(base, '/api/auth/claim-legacy', 'POST', { token: saved.legacyClaimToken });
     const state = await request(base, '/api/state');
-    assert.equal(state.settings.webhooks.length, 1);
-    assert.equal(state.settings.webhooks[0].name, '默认 Webhook');
-    assert.deepEqual(state.monitors[0].webhookIds, [state.settings.webhooks[0].id]);
-    assert.equal(state.settings.hasAiKey, true);
+    assert.deepEqual(Object.keys(saved).sort(), ['sessionSecret', 'users']);
+    assert.deepEqual(state.settings.webhooks, []);
+    assert.deepEqual(state.monitors, []);
     assert.equal(JSON.stringify(state).includes('old-key'), false);
+    const claim = await fetch(`${base}/api/auth/claim-legacy`, { method: 'POST', headers: { cookie: cookies.get(base), 'content-type': 'application/json' }, body: JSON.stringify({ token: 'anything' }) });
+    assert.equal(claim.status, 404);
   } finally {
     child.kill();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test('注册和绑定邮箱必须使用邮件服务发送的一次性验证码', async () => {
+  const sent = [];
+  const mail = http.createServer(async (req, res) => {
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    sent.push({ path: req.url, authorization: req.headers.authorization, body: JSON.parse(raw) });
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ id: `mail-${sent.length}` }));
+  });
+  const mailPort = await listen(mail);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-email-'));
+  const { base, child } = await startApp(dataDir, { autoRegister: false, env: { RESEND_API_KEY: 'test-mail-key', MAIL_FROM: 'Webhook Radar <notify@example.test>', RESEND_API_URL: `http://127.0.0.1:${mailPort}/emails` } });
+  const password = 'a-strong-password-123';
+  try {
+    assert.equal((await request(base, '/api/auth/status')).emailVerificationEnabled, true);
+    const noCode = await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'alice', password, email: 'alice@example.test' }) });
+    assert.equal(noCode.status, 400);
+    await request(base, '/api/auth/email-code', 'POST', { purpose: 'register', username: 'alice', email: 'alice@example.test' });
+    assert.equal(sent[0].path, '/emails');
+    assert.equal(sent[0].authorization, 'Bearer test-mail-key');
+    assert.deepEqual(sent[0].body.to, ['alice@example.test']);
+    const registerCode = sent[0].body.text.match(/\d{6}/)[0];
+    const wrong = await fetch(`${base}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'alice', password, email: 'alice@example.test', emailCode: '999999' === registerCode ? '888888' : '999999' }) });
+    assert.equal(wrong.status, 400);
+    const registered = await request(base, '/api/auth/register', 'POST', { username: 'alice', password, email: 'alice@example.test', emailCode: registerCode });
+    assert.equal(registered.user.emailVerified, true);
+    assert.equal(registered.user.email, 'alice@example.test');
+
+    const badPassword = await fetch(`${base}/api/auth/email-code`, { method: 'POST', headers: { cookie: cookies.get(base), 'content-type': 'application/json' }, body: JSON.stringify({ purpose: 'bind', email: 'new@example.test', password: 'wrong-password' }) });
+    assert.equal(badPassword.status, 400);
+    await request(base, '/api/auth/email-code', 'POST', { purpose: 'bind', email: 'new@example.test', password });
+    const bindCode = sent.at(-1).body.text.match(/\d{6}/)[0];
+    const badBind = await fetch(`${base}/api/auth/profile`, { method: 'PUT', headers: { cookie: cookies.get(base), 'content-type': 'application/json' }, body: JSON.stringify({ email: 'new@example.test', password, emailCode: '000000' === bindCode ? '111111' : '000000' }) });
+    assert.equal(badBind.status, 400);
+    const bound = await request(base, '/api/auth/profile', 'PUT', { email: 'new@example.test', password, emailCode: bindCode });
+    assert.equal(bound.user.emailVerified, true);
+    assert.equal(bound.user.email, 'new@example.test');
+    const removed = await request(base, '/api/auth/profile', 'PUT', { email: '', password });
+    assert.equal(removed.user.emailVerified, false);
+    assert.equal(removed.user.email, '');
+    const saved = await readFile(path.join(dataDir, 'state.json'), 'utf8');
+    assert.equal(saved.includes(registerCode), false);
+    assert.equal(saved.includes(bindCode), false);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mail.close(resolve));
     await rm(dataDir, { recursive: true, force: true });
   }
 });

@@ -4,3 +4,8 @@
 node_modules
 test
 *.log
+.github
+.gitignore
+.env.example
+README.md
+release

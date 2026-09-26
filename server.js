@@ -8,11 +8,13 @@ import { validateGeneratedPlan, inspectGenerated, transitionGenerated, describeG
 import { validateLocalSource, inspectLog, inspectService, userLogDirectory } from './lib/sources.js';
 import { WEBHOOK_FORMATS, createWebhookPayload, assertWebhookAccepted } from './lib/webhook.js';
 import { createStore } from './lib/store.js';
+import { createEmailCodeService } from './lib/email.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
 const logRoot = process.env.MONITOR_LOG_ROOT ? path.resolve(process.env.MONITOR_LOG_ROOT) : path.join(dataDir, 'monitor-logs');
-const store = createStore(dataDir);
+const emailCodes = createEmailCodeService({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, endpoint: process.env.RESEND_API_URL || undefined });
+const store = createStore(dataDir, emailCodes);
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
 const activeChecks = new Set();
@@ -188,8 +190,12 @@ async function deliver(user, payload, ids, { includeDisabled = false } = {}) {
 }
 
 async function flushPending(user, monitor) {
+  let sentCount = 0;
+  let failedCount = 0;
   for (const pending of monitor.pendingNotifications) {
     const report = await deliver(user, pending.payload, pending.remainingIds);
+    sentCount += report.sent.length;
+    failedCount += report.failed.length;
     const sentIds = new Set(report.sent.map((hook) => hook.id));
     pending.remainingIds = pending.remainingIds.filter((id) => !sentIds.has(id));
     if (report.sent.length) addEvent(user, 'success', '监控通知已发送', `${monitor.label} → ${report.sent.map((hook) => hook.name).join('、')}`, monitor.id);
@@ -197,16 +203,31 @@ async function flushPending(user, monitor) {
   }
   monitor.pendingNotifications = monitor.pendingNotifications.filter((pending) => pending.remainingIds.length);
   persist();
+  return { sentCount, failedCount };
 }
 
-async function checkMonitor(user, monitor) {
-  if (activeChecks.has(monitor.id)) return;
+function currentStateMatches(monitor, current) {
+  if (monitor.kind === 'dmit') return monitor.triggerMode === 'any-available' ? current.available > 0 : null;
+  if (['webpage', 'json'].includes(monitor.kind)) return current.matched === true;
+  if (monitor.kind !== 'generated') return null;
+  if (monitor.plan.sourceType === 'log' || ['changed', 'item-transition', 'new-item'].includes(monitor.plan.mode)) return null;
+  if (monitor.plan.sourceType === 'service' && monitor.plan.mode === 'available') return null;
+  return current.matched === true;
+}
+
+async function checkMonitor(user, monitor, { manual = false } = {}) {
+  if (activeChecks.has(monitor.id)) return { checked: false, skipped: true };
   activeChecks.add(monitor.id);
   const started = Date.now();
+  const hadPending = Boolean(monitor.pendingNotifications.length);
+  let sentCount = 0;
+  let failedCount = 0;
   let responseStatus;
   let responseSample = '';
   try {
-    await flushPending(user, monitor);
+    const retried = await flushPending(user, monitor);
+    sentCount += retried.sentCount;
+    failedCount += retried.failedCount;
     let current;
     if (monitor.kind === 'generated' && monitor.plan.sourceType === 'service') {
       current = await inspectService(monitor.url, monitor.plan);
@@ -219,13 +240,15 @@ async function checkMonitor(user, monitor) {
       responseSample = html.slice(0, 4000);
       current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
     }
-    const triggered = monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
+    const conditionSatisfied = currentStateMatches(monitor, current);
+    const transitioned = monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
+    const triggered = transitioned || manual && conditionSatisfied === true && !hadPending;
     if (triggered) {
       if (!monitor.webhookIds.length) {
         monitor.lastError = '没有接收渠道，请先为任务选择 Webhook';
         monitor.lastCheckAt = new Date().toISOString();
         persist();
-        return;
+        return { checked: true, triggered, conditionSatisfied, sentCount, failedCount };
       }
       const message = monitor.kind === 'dmit'
         ? monitor.triggerMode === 'any-available'
@@ -242,7 +265,9 @@ async function checkMonitor(user, monitor) {
         remainingIds: [...monitor.webhookIds]
       });
       persist();
-      await flushPending(user, monitor);
+      const delivery = await flushPending(user, monitor);
+      sentCount += delivery.sentCount;
+      failedCount += delivery.failedCount;
     }
     monitor.snapshot = current;
     monitor.lastCheckAt = new Date().toISOString();
@@ -255,6 +280,7 @@ async function checkMonitor(user, monitor) {
       addEvent(user, 'info', '监控基线已建立', `${monitor.label} · ${current.summary}`, monitor.id);
     }
     persist();
+    return { checked: true, triggered, conditionSatisfied, sentCount, failedCount };
   } catch (error) {
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastError = error.message;
@@ -264,6 +290,7 @@ async function checkMonitor(user, monitor) {
       responseBody: error.responseBody || responseSample || null, validation: error.message
     });
     addEvent(user, 'error', '检查失败', `${monitor.label} · ${error.message}`, monitor.id);
+    return { checked: false, error: error.message };
   } finally {
     activeChecks.delete(monitor.id);
   }
@@ -380,6 +407,14 @@ function loginGuard(request) {
   if (recent.length >= 20) throw new Error('登录尝试过多，请稍后再试');
   recent.push(Date.now()); loginAttempts.set(key, recent);
 }
+setInterval(() => {
+  const cutoff = Date.now() - 15 * 60_000;
+  for (const [address, attempts] of loginAttempts) {
+    const recent = attempts.filter((at) => at > cutoff);
+    if (recent.length) loginAttempts.set(address, recent);
+    else loginAttempts.delete(address);
+  }
+}, 15 * 60_000).unref();
 
 async function handler(request, response) {
   try {
@@ -390,8 +425,23 @@ async function handler(request, response) {
       if (request.method === 'POST' && pathname === '/api/auth/register') {
         loginGuard(request);
         const body = await readJson(request);
-        const { user, recoveryCode } = store.register(body.username, body.password, body.inviteCode, body.email);
+        const { user, recoveryCode } = store.register(body.username, body.password, body.inviteCode, body.email, body.emailCode);
         return sendJson(response, 201, { ...publicState(user), recoveryCode }, { 'set-cookie': store.issueCookie(user) });
+      }
+      if (request.method === 'POST' && pathname === '/api/auth/email-code') {
+        loginGuard(request);
+        const body = await readJson(request);
+        if (body.purpose === 'register') {
+          await store.requestRegistrationEmailCode(body.username, body.inviteCode, body.email);
+          return sendJson(response, 200, { sent: true, expiresInSeconds: 600, retryAfterSeconds: 60 });
+        }
+        if (body.purpose === 'bind') {
+          const account = store.userFromRequest(request);
+          if (!account) return sendJson(response, 401, { error: '请先登录' });
+          await store.requestBindEmailCode(account, body.password, body.email);
+          return sendJson(response, 200, { sent: true, expiresInSeconds: 600, retryAfterSeconds: 60 });
+        }
+        throw new Error('不支持的验证码用途');
       }
       if (request.method === 'POST' && pathname === '/api/auth/login') {
         loginGuard(request);
@@ -408,7 +458,7 @@ async function handler(request, response) {
         return sendJson(response, 200, { ...publicState(recovered.user), recoveryCode: recovered.recoveryCode }, { 'set-cookie': store.issueCookie(recovered.user) });
       }
       const user = store.userFromRequest(request);
-      if (request.method === 'GET' && pathname === '/api/auth/status') return sendJson(response, 200, { authenticated: Boolean(user), user: user ? { id: user.id, username: user.username, email: user.email || '' } : null, hasLegacyData: Boolean(store.state.legacyUnclaimed), signupCodeRequired: Boolean(process.env.SIGNUP_CODE) });
+      if (request.method === 'GET' && pathname === '/api/auth/status') return sendJson(response, 200, { authenticated: Boolean(user), user: user ? { id: user.id, username: user.username, email: user.email || '' } : null, emailVerificationEnabled: emailCodes.enabled, signupCodeRequired: Boolean(process.env.SIGNUP_CODE) });
       if (!user) return sendJson(response, 401, { error: '请先登录' });
       if (request.method === 'POST' && pathname === '/api/auth/logout') return sendJson(response, 200, { ok: true }, { 'set-cookie': store.clearCookie() });
       if (request.method === 'POST' && pathname === '/api/auth/change-password') {
@@ -418,17 +468,13 @@ async function handler(request, response) {
       }
       if (request.method === 'PUT' && pathname === '/api/auth/profile') {
         const body = await readJson(request);
-        store.updateEmail(user, body.password, body.email);
+        store.updateEmail(user, body.password, body.email, body.emailCode);
         return sendJson(response, 200, publicState(user));
       }
       if (request.method === 'POST' && pathname === '/api/auth/recovery-code/rotate') {
         const body = await readJson(request);
         const recoveryCode = store.rotateRecoveryCode(user, body.password);
         return sendJson(response, 200, { recoveryCode });
-      }
-      if (request.method === 'POST' && pathname === '/api/auth/claim-legacy') {
-        store.claimLegacy(user, (await readJson(request)).token);
-        return sendJson(response, 200, publicState(user));
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
       if (request.method === 'GET' && pathname === '/api/logs') return sendJson(response, 200, { logs: user.logs.slice(0, 300) });
@@ -576,8 +622,8 @@ async function handler(request, response) {
         const monitor = user.monitors.find((item) => item.id === match[1]);
         if (!monitor) return sendJson(response, 404, { error: '监控任务不存在' });
         if (request.method === 'POST' && match[2] === 'check') {
-          await checkMonitor(user, monitor);
-          return sendJson(response, 200, publicState(user));
+          const outcome = await checkMonitor(user, monitor, { manual: true });
+          return sendJson(response, 200, { ...publicState(user), check: { ...outcome, pendingCount: monitor.pendingNotifications.length } });
         }
         if (request.method === 'PATCH' && !match[2]) {
           const body = await readJson(request);
@@ -624,7 +670,7 @@ async function handler(request, response) {
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: '不支持的请求方法' });
     const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-    if (!['index.html', 'app.js', 'style.css', 'extra.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
+    if (!['index.html', 'app.js', 'style.css', 'extra.css', 'spatial.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
     const file = path.join(root, 'public', filename);
     response.writeHead(200, { 'content-type': contentTypes[path.extname(file)], 'content-security-policy': "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'" });
     fs.createReadStream(file).pipe(response);
@@ -635,8 +681,12 @@ async function handler(request, response) {
 
 const server = http.createServer(handler);
 server.listen(port, host, () => console.log(`Webhook Radar: http://${host}:${port}`));
+const maxScheduledChecks = 16;
 setInterval(() => {
+  const now = Date.now();
   for (const user of store.state.users) for (const monitor of user.monitors) {
-    if (monitor.enabled && (!monitor.lastCheckAt || Date.now() - Date.parse(monitor.lastCheckAt) >= monitor.intervalMinutes * 60_000)) checkMonitor(user, monitor);
+    if (activeChecks.size >= maxScheduledChecks) return;
+    const lastCheck = Date.parse(monitor.lastCheckAt);
+    if (monitor.enabled && (!Number.isFinite(lastCheck) || now - lastCheck >= monitor.intervalMinutes * 60_000)) checkMonitor(user, monitor);
   }
 }, 20_000).unref();

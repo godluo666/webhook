@@ -3,6 +3,45 @@ let appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [],
 let previewMonitor = null;
 let toastTimer;
 let authMode = 'login';
+let emailVerificationEnabled = false;
+
+const sidebarShell = $('.app-shell');
+const sidebarToggle = $('#sidebar-toggle');
+const sidebarVisibility = $('#sidebar-visibility');
+function setSidebarExpanded(expanded, remember = false) {
+  sidebarShell.classList.toggle('sidebar-collapsed', !expanded);
+  sidebarToggle.setAttribute('aria-expanded', String(expanded));
+  const label = expanded ? '收起导航' : '展开导航';
+  sidebarToggle.setAttribute('aria-label', label);
+  sidebarToggle.title = label;
+  if (remember) {
+    try { localStorage.setItem('webhook-radar-sidebar', expanded ? 'expanded' : 'collapsed'); } catch { /* preference is optional */ }
+  }
+}
+let savedSidebar = 'collapsed';
+try { savedSidebar = localStorage.getItem('webhook-radar-sidebar') || 'collapsed'; } catch { /* use compact navigation */ }
+setSidebarExpanded(savedSidebar === 'expanded');
+sidebarToggle.addEventListener('click', () => setSidebarExpanded(sidebarShell.classList.contains('sidebar-collapsed'), true));
+function setSidebarVisible(visible, remember = false) {
+  sidebarShell.classList.toggle('sidebar-hidden', !visible);
+  sidebarVisibility.setAttribute('aria-expanded', String(visible));
+  const label = visible ? '隐藏导航' : '显示导航';
+  sidebarVisibility.setAttribute('aria-label', label);
+  sidebarVisibility.title = label;
+  if (remember) {
+    try { localStorage.setItem('webhook-radar-sidebar-visibility', visible ? 'visible' : 'hidden'); } catch { /* preference is optional */ }
+  }
+}
+let savedSidebarVisibility = 'visible';
+try { savedSidebarVisibility = localStorage.getItem('webhook-radar-sidebar-visibility') || 'visible'; } catch { /* keep navigation visible */ }
+setSidebarVisible(savedSidebarVisibility !== 'hidden');
+sidebarVisibility.addEventListener('click', () => setSidebarVisible(sidebarShell.classList.contains('sidebar-hidden'), true));
+function syncNavigation() {
+  const target = location.hash || '#top';
+  document.querySelectorAll('.side-nav .nav-link').forEach((link) => link.classList.toggle('active', link.getAttribute('href') === target));
+}
+window.addEventListener('hashchange', syncNavigation);
+syncNavigation();
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 const activeHooks = () => (appState.settings.webhooks || []).filter((hook) => hook.enabled);
@@ -283,7 +322,7 @@ function showAuth() {
   previewMonitor = null;
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
-  for (const selector of ['#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#claim-token', '#auth-recovery-code', '#saved-ai-key-value']) $(selector).value = '';
+  for (const selector of ['#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code', '#saved-ai-key-value']) $(selector).value = '';
   $('#saved-ai-key-value').classList.add('hidden');
   $('#reveal-ai-key').textContent = '显示完整 Key';
   $('#ai-test-result').textContent = '';
@@ -291,15 +330,17 @@ function showAuth() {
   for (const input of document.querySelectorAll('#email-password, #current-password, #new-password, #rotate-code-password')) input.value = '';
 }
 
-function showWorkspace(state, hasLegacyData = false) {
+function showWorkspace(state) {
   appState = state;
   $('#auth-screen').classList.add('hidden');
   $('.app-shell').classList.remove('auth-hidden');
   $('#account-name').textContent = state.user.username;
   $('#local-source-hint').textContent = `日志文件使用账户目录 ${state.user.logDirectory} 内的相对路径；例如 log:app.log。`;
   $('#account-email').value = state.user.email || '';
+  $('#email-status').textContent = state.user.emailVerified ? `已验证：${state.user.email}` : state.user.email ? `尚未验证：${state.user.email}` : '尚未绑定邮箱';
+  $('#email-form').classList.toggle('hidden', !emailVerificationEnabled);
+  $('#email-service-note').classList.toggle('hidden', emailVerificationEnabled);
   $('#recovery-code-status').textContent = state.user.hasRecoveryCode ? '已设置恢复码。生成新码后，旧码立即失效。' : '这个账号还没有恢复码；请生成并保存。';
-  $('#legacy-claim').classList.toggle('hidden', !hasLegacyData);
   populateSettings();
   render(true);
 }
@@ -314,9 +355,13 @@ function setAuthMode(mode) {
   $('#auth-password-label').textContent = mode === 'recover' ? '新密码（至少 12 位）' : '密码';
   $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
   $('#invite-wrap').classList.toggle('hidden', mode !== 'register' || !$('#auth-screen').dataset.signupCodeRequired);
-  $('#auth-email-wrap').classList.toggle('hidden', mode !== 'register');
+  $('#auth-email-wrap').classList.toggle('hidden', mode !== 'register' || !emailVerificationEnabled);
+  $('#auth-email-unavailable').classList.toggle('hidden', mode !== 'register' || emailVerificationEnabled);
   $('#auth-code-wrap').classList.toggle('hidden', mode !== 'recover');
-  $('#auth-email').disabled = mode !== 'register';
+  $('#auth-email').disabled = mode !== 'register' || !emailVerificationEnabled;
+  $('#auth-email').required = mode === 'register' && emailVerificationEnabled;
+  $('#auth-email-code').disabled = mode !== 'register' || !emailVerificationEnabled;
+  $('#auth-email-code').required = mode === 'register' && emailVerificationEnabled;
   $('#auth-recovery-code').disabled = mode !== 'recover';
   $('#auth-recovery-code').required = mode === 'recover';
 }
@@ -324,6 +369,30 @@ function setAuthMode(mode) {
 $('#show-login').addEventListener('click', () => setAuthMode('login'));
 $('#show-register').addEventListener('click', () => setAuthMode('register'));
 $('#show-recover').addEventListener('click', () => setAuthMode('recover'));
+
+function sendEmailCode(button, status, requestBody) {
+  if (button.disabled) return;
+  button.disabled = true;
+  api('/api/auth/email-code', 'POST', requestBody).then((result) => {
+    let remaining = result.retryAfterSeconds || 60;
+    status.textContent = '验证码已发送，请在 10 分钟内填写；请检查收件箱和垃圾邮件。';
+    toast('验证码已发送');
+    button.textContent = `${remaining} 秒后重发`;
+    const timer = setInterval(() => {
+      remaining -= 1;
+      button.textContent = remaining > 0 ? `${remaining} 秒后重发` : '发送验证码';
+      if (remaining <= 0) { clearInterval(timer); button.disabled = false; }
+    }, 1000);
+  }).catch((error) => {
+    button.disabled = false;
+    status.textContent = error.message;
+    toast(error.message, true);
+  });
+}
+$('#send-register-code').addEventListener('click', () => sendEmailCode($('#send-register-code'), $('#register-code-status'), { purpose: 'register', username: $('#auth-username').value.trim(), email: $('#auth-email').value.trim(), inviteCode: $('#auth-invite').value }));
+$('#send-bind-code').addEventListener('click', () => sendEmailCode($('#send-bind-code'), $('#bind-code-status'), { purpose: 'bind', email: $('#account-email').value.trim(), password: $('#email-password').value }));
+$('#auth-email').addEventListener('input', () => { $('#auth-email-code').value = ''; });
+$('#account-email').addEventListener('input', () => { $('#account-email-code').value = ''; });
 
 function showRecoveryCode(code) {
   $('#recovery-code-value').textContent = code;
@@ -344,24 +413,27 @@ $('#auth-form').addEventListener('submit', (event) => {
   withButton($('#auth-submit'), async () => {
     const body = authMode === 'recover'
       ? { username: $('#auth-username').value.trim(), recoveryCode: $('#auth-recovery-code').value.trim(), newPassword: $('#auth-password').value }
-      : { username: $('#auth-username').value.trim(), password: $('#auth-password').value, email: authMode === 'register' ? $('#auth-email').value.trim() : undefined, inviteCode: $('#auth-invite').value };
+      : { username: $('#auth-username').value.trim(), password: $('#auth-password').value, email: authMode === 'register' && emailVerificationEnabled ? $('#auth-email').value.trim() : undefined, emailCode: authMode === 'register' && emailVerificationEnabled ? $('#auth-email-code').value.trim() : undefined, inviteCode: $('#auth-invite').value };
     const state = await api(`/api/auth/${authMode}`, 'POST', body);
     $('#auth-password').value = '';
     $('#auth-recovery-code').value = '';
+    $('#auth-email-code').value = '';
     const { recoveryCode, ...workspace } = state;
     showWorkspace(workspace);
     if (recoveryCode) showRecoveryCode(recoveryCode);
-    api('/api/auth/status').then((status) => $('#legacy-claim').classList.toggle('hidden', !status.hasLegacyData)).catch(() => {});
   });
 });
 
 $('#email-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#email-form button'), async () => {
-    appState = await api('/api/auth/profile', 'PUT', { email: $('#account-email').value.trim(), password: $('#email-password').value });
+    appState = await api('/api/auth/profile', 'PUT', { email: $('#account-email').value.trim(), password: $('#email-password').value, emailCode: $('#account-email-code').value.trim() });
     $('#email-password').value = '';
+    $('#account-email-code').value = '';
     $('#account-email').value = appState.user.email;
-    toast('邮箱资料已保存');
+    $('#email-status').textContent = appState.user.emailVerified ? `已验证：${appState.user.email}` : '尚未绑定邮箱';
+    $('#bind-code-status').textContent = '修改邮箱需验证新地址；留空邮箱可解除绑定。';
+    toast(appState.user.emailVerified ? '邮箱已验证并绑定' : '邮箱已解除绑定');
   });
 });
 
@@ -388,16 +460,6 @@ $('#rotate-code-form').addEventListener('submit', (event) => {
 $('#logout-button').addEventListener('click', async () => {
   try { await api('/api/auth/logout', 'POST'); showAuth(); appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [], sentCount: 0 }; }
   catch (error) { toast(error.message, true); }
-});
-
-$('#claim-form').addEventListener('submit', (event) => {
-  event.preventDefault();
-  withButton($('#claim-form button'), async () => {
-    const state = await api('/api/auth/claim-legacy', 'POST', { token: $('#claim-token').value.trim() });
-    $('#claim-token').value = '';
-    showWorkspace(state, false);
-    toast('旧版数据已认领');
-  });
 });
 
 $('#add-webhook').addEventListener('click', () => {
@@ -583,7 +645,14 @@ $('#monitor-list').addEventListener('click', (event) => {
     } else if (action === 'check') {
       appState = await api(`${path}/check`, 'POST');
       const updated = appState.monitors.find((item) => item.id === id);
-      toast(updated.lastError || '检查已完成', Boolean(updated.lastError));
+      const check = appState.check;
+      if (check.skipped) toast('任务正在检查，请稍后查看结果');
+      else if (!check.checked) toast(check.error || updated.lastError || '检查失败', true);
+      else if (check.sentCount > 0) toast(check.pendingCount ? `已发送至 ${check.sentCount} 个渠道，其余通知待重试` : `条件满足，已发送至 ${check.sentCount} 个渠道`, Boolean(check.pendingCount));
+      else if (check.triggered) toast(updated.lastError || '条件满足，但通知未送达', true);
+      else if (check.pendingCount) toast(updated.lastError || '仍有通知待发送', true);
+      else if (check.conditionSatisfied === false) toast('检查完成，当前条件未满足');
+      else toast('检查完成，没有发现新变化');
     } else if (action === 'toggle') {
       appState = await api(path, 'PATCH', { enabled: !monitor.enabled });
       toast(monitor.enabled ? '监控已暂停' : '监控已继续');
@@ -599,7 +668,9 @@ async function init() {
   try {
     const status = await api('/api/auth/status');
     if (status.signupCodeRequired) $('#auth-screen').dataset.signupCodeRequired = '1';
-    if (status.authenticated) showWorkspace(await api('/api/state'), status.hasLegacyData);
+    emailVerificationEnabled = Boolean(status.emailVerificationEnabled);
+    setAuthMode(authMode);
+    if (status.authenticated) showWorkspace(await api('/api/state'));
     else showAuth();
     setInterval(async () => {
       if ($('.app-shell').classList.contains('auth-hidden')) return;
