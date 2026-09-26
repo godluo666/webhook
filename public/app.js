@@ -100,7 +100,7 @@ function renderStats() {
   savedKeyWrap.classList.toggle('hidden', !appState.settings.hasAiKey);
   $('#saved-ai-key-hint').textContent = `已保存：${keyHint}`;
   $('#ai-key').placeholder = appState.settings.hasAiKey ? '留空则保持当前 Key' : 'sk-...';
-  $('#ai-status').textContent = appState.settings.hasAiKey && appState.settings.aiModel ? `点击后使用 ${appState.settings.aiModel} 生成本次监控逻辑` : '先在右侧设置 AI 接口、模型和 Key；点击生成时才会调用';
+  $('#ai-status').textContent = appState.settings.hasAiKey && appState.settings.aiModel ? `点击后使用 ${appState.settings.aiModel} 生成本次监控逻辑` : '先在下方设置 AI 接口、模型和 Key；点击生成时才会调用';
 }
 
 function renderMonitors() {
