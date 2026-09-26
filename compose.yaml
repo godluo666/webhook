@@ -1,0 +1,19 @@
+services:
+  webhook-radar:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    ports:
+      - "127.0.0.1:${RADAR_PORT:-3000}:3000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      DATA_DIR: /app/.data
+      SIGNUP_CODE: ${SIGNUP_CODE:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
+    volumes:
+      - "${RADAR_DATA_VOLUME:-radar_data}:/app/.data"
+
+volumes:
+  radar_data:

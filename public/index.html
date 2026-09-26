@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8f6">
+  <title>Webhook Radar · 通知与监控</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/extra.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main id="auth-screen" class="auth-screen hidden"><div class="auth-panel"><div class="auth-mark">✦</div><div class="eyebrow">WEBHOOK RADAR</div><h1>你的通知工作台</h1><p>登录后管理自己的通知渠道和监控规则。每个账户的数据独立保存。</p><div class="auth-tabs"><button type="button" id="show-login" class="active">登录</button><button type="button" id="show-register">注册</button></div><form id="auth-form" class="stacked-form"><label class="field-label" for="auth-username">用户名</label><input id="auth-username" type="text" required autocomplete="username" minlength="3" maxlength="32"><label class="field-label" for="auth-password">密码</label><input id="auth-password" type="password" required autocomplete="current-password" minlength="12"><div id="invite-wrap" class="hidden"><label class="field-label" for="auth-invite">注册邀请码</label><input id="auth-invite" type="text" autocomplete="off"></div><button class="button button-primary" id="auth-submit" type="submit">登录</button></form></div></main>
+  <div class="app-shell auth-hidden">
+    <aside class="sidebar">
+      <a class="brand" href="#top" aria-label="Webhook Radar 首页"><span class="brand-mark">✳</span><span>webhook<span class="brand-light">radar</span></span></a>
+      <nav class="side-nav" aria-label="主导航">
+        <a class="nav-link active" href="#top"><span class="nav-icon">▦</span> 工作台</a>
+        <a class="nav-link" href="#create"><span class="nav-icon">◎</span> 智能监控</a>
+        <a class="nav-link" href="#activity"><span class="nav-icon">≡</span> 通知记录</a>
+        <a class="nav-link" href="#settings"><span class="nav-icon">⚙</span> 设置</a>
+      </nav>
+      <div class="sidebar-bottom"><span class="live-dot"></span> 本地服务运行中 <span class="version">v1.0</span></div>
+    </aside>
+
+    <main id="top" class="main-content">
+      <header class="topbar"><span class="breadcrumb">工作台 <span>/</span> 概览</span><span class="topbar-right"><span class="live-dot"></span> 系统在线 <span id="account-name"></span><button type="button" id="logout-button" class="text-button">退出</button></span></header>
+      <div class="page-inner">
+        <div class="page-heading"><div><div class="eyebrow">NOTIFICATION WORKSPACE</div><h1>让重要的消息，<br><em>准时抵达。</em></h1><p>连接你的 Webhook，发送消息，或用一句话创建自动监控。</p></div><div class="heading-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="art-core">✳</div><span class="art-spark spark-one">✦</span><span class="art-spark spark-two">✳</span></div></div>
+
+        <section class="status-grid" aria-label="系统概况">
+          <div class="stat-card"><div class="stat-label">通知渠道 <span class="stat-icon">↗</span></div><div class="stat-value" id="channel-status">未连接</div><div class="stat-foot" id="channel-hint">填写 Webhook 地址后开始</div></div>
+          <div class="stat-card"><div class="stat-label">运行中的监控 <span class="stat-icon">◉</span></div><div class="stat-value" id="active-count">0</div><div class="stat-foot">自动检查，发现变化后通知</div></div>
+          <div class="stat-card"><div class="stat-label">已发送通知 <span class="stat-icon">↗</span></div><div class="stat-value" id="sent-count">0</div><div class="stat-foot">包含测试与手动发送</div></div>
+        </section>
+
+        <div class="content-grid">
+          <div class="primary-column">
+            <section id="create" class="card compose-card">
+              <div class="section-top"><div class="section-icon purple">✦</div><span class="tag">智能监控</span></div>
+              <h2>描述你想关注的事</h2><p class="section-subtitle">支持网页文字、JSON API 字段、RSS/Atom 更新和 GitHub Release。先预览规则，确认后开始运行。</p>
+              <form id="parse-form">
+                <label for="instruction" class="field-label">你的指令</label>
+                <textarea id="instruction" rows="4" placeholder="写明来源地址与触发条件，例如 API 字段 status 等于 available 时通知"></textarea>
+                <div class="composer-bottom"><span id="ai-status">点击后才调用你配置的 AI API，生成这条任务的监控逻辑</span><button class="button button-primary" type="submit" id="parse-button"><span>生成监控规则</span><span>↗</span></button></div>
+              </form>
+              <div id="preview" class="preview hidden" aria-live="polite"></div>
+            </section>
+
+            <section class="card quick-card">
+              <div class="card-title-row"><div><div class="eyebrow">QUICK SEND</div><h2>快速发送</h2></div><div class="section-icon mint">↗</div></div>
+              <p class="section-subtitle">写好内容，立即推送到已连接的 Webhook。</p>
+              <form id="send-form" class="stacked-form">
+                <label for="send-title" class="field-label">通知标题</label><input id="send-title" type="text" maxlength="120" placeholder="例如：服务已上线" required>
+                <label for="send-message" class="field-label">通知内容</label><textarea id="send-message" rows="3" maxlength="2000" placeholder="写下要发送的消息..." required></textarea>
+                <div id="send-priority-wrap" class="hidden"><div class="field-label">ntfy 优先级</div><div id="send-priority-slot"></div></div>
+                <div class="field-label">发送到</div><div id="send-targets" class="target-options"></div>
+                <div class="form-actions"><button class="button button-dark" type="submit" id="send-button">发送通知 <span>↗</span></button></div>
+              </form>
+            </section>
+
+            <section class="card monitors-card">
+              <div class="card-title-row"><div><div class="eyebrow">AUTOMATIONS</div><h2>我的监控</h2></div><span class="count-pill" id="monitor-count">0 个任务</span></div>
+              <div id="monitor-list" class="monitor-list"></div>
+            </section>
+          </div>
+
+          <div class="secondary-column">
+            <section id="settings" class="card settings-card">
+              <div class="section-top"><div class="section-icon orange">⌁</div></div>
+              <h2>连接通知渠道</h2><p class="section-subtitle">添加多个地址，分别测试，并为每条通知选择接收渠道。</p>
+              <form id="settings-form" class="stacked-form">
+                <div class="webhook-list-head"><span class="field-label">Webhook 地址</span><button type="button" id="add-webhook" class="add-webhook">＋ 添加地址</button></div>
+                <div id="webhook-list" class="webhook-list"></div>
+                <p class="field-help">支持最多 20 个地址。ntfy.sh 可自动识别，自建 ntfy 可手动选择；优先级 1–5，3 为普通。停用渠道仍可单独测试。</p>
+                <div class="settings-divider"></div>
+                <details class="ai-settings"><summary class="optional-heading"><div><strong>AI 生成设置</strong><small>自然语言生成规则需要你的 OpenAI 兼容 Chat Completions API</small></div><span class="optional-badge">展开</span></summary>
+                  <label for="ai-base-url" class="field-label">API 地址</label><input id="ai-base-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="off">
+                  <label for="ai-model" class="field-label">模型名称</label><input id="ai-model" type="text" placeholder="填写兼容 Chat Completions 的模型名" autocomplete="off">
+                  <label for="ai-key" class="field-label">API Key <span id="key-indicator" class="key-indicator"></span></label><input id="ai-key" type="password" placeholder="未设置" autocomplete="new-password">
+                  <label class="check-row"><input id="clear-ai-key" type="checkbox"> 清除已保存的 API Key</label>
+                </details>
+                <div class="settings-actions"><button class="button button-dark" type="submit" id="save-button">保存设置</button><span id="settings-dirty" class="dirty-indicator" aria-live="polite"></span></div>
+              </form>
+              <div id="legacy-claim" class="legacy-claim hidden"><div class="settings-divider"></div><strong>认领旧版数据</strong><p class="field-help">升级前的规则尚未归属账户。在服务端启动日志中找到认领码，仅需认领一次。</p><form id="claim-form"><input id="claim-token" type="text" placeholder="输入旧数据认领码" autocomplete="off"><button class="mini-button" type="submit">认领</button></form></div>
+            </section>
+
+            <section id="activity" class="card activity-card"><div class="card-title-row"><div><div class="eyebrow">ACTIVITY</div><h2>最近活动</h2></div><span class="activity-icon">↗</span></div><div id="activity-list" class="activity-list"></div><details class="log-panel"><summary>解析、检查与发送日志</summary><div class="log-toolbar"><label><input id="log-errors-only" type="checkbox"> 仅看失败</label><span id="log-count"></span></div><div id="log-list" class="log-list"></div></details></section>
+            <div class="tip-card"><span class="tip-icon">✳</span><p>监控任务在此服务运行期间自动检查。保持应用运行，即可持续收到提醒。</p></div>
+          </div>
+        </div>
+        <footer>Webhook Radar <span>·</span> 简单、直接的通知工作台</footer>
+      </div>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
