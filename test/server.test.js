@@ -105,11 +105,12 @@ test('多渠道选择、单独测试与失败渠道重试', async () => {
     assert.equal(created.monitors[0].baselined, true);
     assert.deepEqual([messages.a.length, messages.b.length], [1, 1]);
     pageText = '<p>有货</p>';
+    const firstMatch = await request(base, `/api/monitors/${id}/check`, 'POST');
+    assert.deepEqual([messages.a.length, messages.b.length], [2, 2]);
+    assert.equal(firstMatch.check.sentCount, 2);
     const repeated = await request(base, `/api/monitors/${id}/check`, 'POST');
     assert.deepEqual([messages.a.length, messages.b.length], [3, 3]);
     assert.equal(repeated.check.sentCount, 2);
-    await request(base, `/api/monitors/${id}/check`, 'POST');
-    assert.deepEqual([messages.a.length, messages.b.length], [2, 2]);
 
     pageText = '<p>缺货</p>';
     await request(base, `/api/monitors/${id}/check`, 'POST');
