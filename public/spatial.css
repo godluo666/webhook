@@ -171,6 +171,8 @@ input::placeholder, textarea::placeholder { color: #9daabb; }
 .mini-button:hover, .add-webhook:hover { transform: translateY(-1px); background: #f7f9fc; box-shadow: 0 4px 10px rgba(44,64,94,.06); }
 .mini-button.danger { color: #a86168; }
 .mini-button.danger:hover { border-color: #e8c7cb; color: #a34751; background: #fff7f7; }
+.settings-actions { align-items: center; justify-content: flex-end; }
+.settings-actions .button { flex: 0 0 auto; min-width: 146px; }
 .preview { margin-top: 27px; padding: 21px; border: 1px solid #dfe7f1; border-radius: 16px; background: #f7f9fc; }
 .preview-head { color: #465f87; }
 .preview-grid { gap: 17px; margin: 19px 0; }
