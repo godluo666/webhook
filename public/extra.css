@@ -27,10 +27,6 @@
 .monitor-route .field-label { margin: 13px 0 5px; }
 .monitor-route .rule-fields label:has(.edit-url) { grid-column: 1 / -1; }
 .edit-hint { color: #9da2ad; font-size: 10px; line-height: 1.6; margin: 11px 0 0; }
-.ai-settings summary { cursor: pointer; list-style: none; }
-.ai-settings summary::-webkit-details-marker { display: none; }
-.ai-settings[open] .optional-badge { background: #eeeaff; color: #6658db; font-size: 0; }
-.ai-settings[open] .optional-badge::after { content: '收起'; font-size: 9px; }
 .dirty-indicator { align-self: center; color: #d18b59; font-size: 10px; white-space: nowrap; }
 .rule-editor { border-top: 1px solid #e9e5fb; padding-top: 12px; margin-bottom: 15px; }
 .rule-editor summary { font-size: 11px; font-weight: 700; color: #6659d8; cursor: pointer; }

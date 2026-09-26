@@ -40,8 +40,8 @@
         <div class="content-grid">
           <div class="primary-column">
             <section id="create" class="card compose-card">
-              <div class="section-top"><div class="section-icon purple">✦</div><span class="tag">智能监控</span></div>
-              <h2>描述你想关注的事</h2><p class="section-subtitle">可监控 HTTP 接口、网页、TCP 服务、账户日志文件与订阅更新。先预览规则，确认后开始运行。</p>
+              <div class="card-title-row"><div><div class="eyebrow">SMART MONITOR</div><h2>描述你想关注的事</h2></div><div class="section-icon purple" aria-hidden="true">✦</div></div>
+              <p class="section-subtitle">可监控 HTTP 接口、网页、TCP 服务、账户日志文件与订阅更新。先预览规则，确认后开始运行。</p>
               <form id="parse-form">
                 <label for="instruction" class="field-label">你的指令</label>
                 <textarea id="instruction" rows="4" placeholder="描述要检查的内容和通知条件；可写接口字段、服务可用性或新增日志文字"></textarea>
@@ -71,28 +71,28 @@
 
           <div class="secondary-column">
             <section id="settings" class="card settings-card">
-              <div class="section-top"><div class="section-icon orange">⌁</div></div>
-              <h2>连接通知渠道</h2><p class="section-subtitle">添加多个地址，分别测试，并为每条通知选择接收渠道。</p>
+              <div class="card-title-row"><div><div class="eyebrow">CHANNELS</div><h2>连接通知渠道</h2></div><div class="section-icon orange" aria-hidden="true">⌁</div></div>
+              <p class="section-subtitle">添加多个地址，分别测试，并为每条通知选择接收渠道。</p>
               <form id="settings-form" class="stacked-form">
                 <div class="webhook-list-head"><span class="field-label">Webhook 地址</span><button type="button" id="add-webhook" class="add-webhook">＋ 添加地址</button></div>
                 <div id="webhook-list" class="webhook-list"></div>
                 <p class="field-help">支持最多 20 个地址。ntfy.sh 可自动识别，自建 ntfy 可手动选择；优先级 1–5，3 为普通。停用渠道仍可单独测试。</p>
                 <div class="settings-divider"></div>
-                <details class="ai-settings"><summary class="optional-heading"><div><strong>AI 生成设置</strong><small>自然语言生成规则需要你的 OpenAI 兼容 Chat Completions API</small></div><span class="optional-badge">展开</span></summary>
+                <section id="ai-settings" class="ai-settings" aria-labelledby="ai-settings-title"><div class="ai-settings-heading"><h3 id="ai-settings-title">AI 生成设置</h3><p>自然语言生成规则需要你的 OpenAI 兼容 Chat Completions API</p></div>
                   <label for="ai-base-url" class="field-label">API 地址</label><input id="ai-base-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="off">
                   <label for="ai-model" class="field-label">模型名称</label><input id="ai-model" type="text" placeholder="填写兼容 Chat Completions 的模型名" autocomplete="off">
                   <label for="ai-key" class="field-label">API Key <span id="key-indicator" class="key-indicator"></span></label><input id="ai-key" type="password" placeholder="未设置" autocomplete="new-password">
                   <div id="saved-ai-key-wrap" class="saved-key hidden"><span id="saved-ai-key-hint"></span><button id="reveal-ai-key" type="button" class="mini-button">显示完整 Key</button><input id="saved-ai-key-value" class="hidden" type="text" readonly aria-label="已保存的完整 API Key"></div>
                   <label class="check-row"><input id="clear-ai-key" type="checkbox"> 清除已保存的 API Key</label>
                   <div class="ai-test-row"><button type="button" id="ai-test-button" class="mini-button">测试 API 连接</button><span id="ai-test-result" aria-live="polite"></span></div>
-                </details>
+                </section>
                 <div class="settings-actions"><button class="button button-dark" type="submit" id="save-button">保存设置</button><span id="settings-dirty" class="dirty-indicator" aria-live="polite"></span></div>
               </form>
             </section>
 
             <section id="account" class="card account-card"><div class="card-title-row"><div><div class="eyebrow">ACCOUNT</div><h2>账户与安全</h2></div><div class="section-icon purple">◉</div></div><p class="section-subtitle">管理邮箱、密码和找回密码所需的恢复码。</p><details class="account-detail"><summary>绑定邮箱</summary><p class="field-help" id="email-status"></p><p class="field-help hidden" id="email-service-note">管理员尚未配置邮件服务，暂时无法绑定邮箱；找回密码仍可使用恢复码。</p><form id="email-form" class="stacked-form"><label class="field-label" for="account-email">邮箱地址</label><input id="account-email" type="email" autocomplete="email"><label class="field-label" for="email-password">当前密码</label><input id="email-password" type="password" required autocomplete="current-password"><label class="field-label" for="account-email-code">邮箱验证码</label><div class="code-send-row"><input id="account-email-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6 位验证码"><button id="send-bind-code" class="mini-button" type="button">发送验证码</button></div><p id="bind-code-status" class="field-help" aria-live="polite">修改邮箱需验证新地址；留空邮箱可解除绑定。</p><button class="mini-button" type="submit">保存邮箱</button></form></details><details class="account-detail"><summary>修改密码</summary><form id="password-form" class="stacked-form"><label class="field-label" for="current-password">当前密码</label><input id="current-password" type="password" required autocomplete="current-password"><label class="field-label" for="new-password">新密码（至少 12 位）</label><input id="new-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"><button class="mini-button" type="submit">修改密码</button></form></details><details class="account-detail"><summary>恢复码</summary><p class="field-help" id="recovery-code-status"></p><form id="rotate-code-form" class="stacked-form"><label class="field-label" for="rotate-code-password">当前密码</label><input id="rotate-code-password" type="password" required autocomplete="current-password"><button class="mini-button" type="submit">生成新恢复码</button></form></details></section>
 
-            <section id="activity" class="card activity-card"><div class="card-title-row"><div><div class="eyebrow">ACTIVITY</div><h2>最近活动</h2></div><span class="activity-icon">↗</span></div><div id="activity-list" class="activity-list"></div><details class="log-panel"><summary>解析、检查与发送日志</summary><div class="log-toolbar"><label><input id="log-errors-only" type="checkbox"> 仅看失败</label><span id="log-count"></span></div><div id="log-list" class="log-list"></div></details></section>
+            <section id="activity" class="card activity-card"><div class="card-title-row"><div><div class="eyebrow">ACTIVITY</div><h2>最近活动</h2></div><div class="section-icon mint" aria-hidden="true">↗</div></div><div id="activity-list" class="activity-list"></div><details class="log-panel"><summary>解析、检查与发送日志</summary><div class="log-toolbar"><label><input id="log-errors-only" type="checkbox"> 仅看失败</label><span id="log-count"></span></div><div id="log-list" class="log-list"></div></details></section>
             <div class="tip-card"><span class="tip-icon">✳</span><p>监控任务在此服务运行期间自动检查。保持应用运行，即可持续收到提醒。</p></div>
           </div>
         </div>

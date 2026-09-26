@@ -571,8 +571,7 @@ $('#parse-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#parse-button'), async () => {
     if ((!appState.settings.hasAiKey && !$('#ai-key').value.trim()) || !$('#ai-model').value.trim()) {
-      $('.ai-settings').open = true;
-      $('#settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      $('#ai-settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
       throw new Error('请先在 AI 生成设置中填写模型和 API Key');
     }
     if ($('#settings-dirty').textContent || $('#ai-key').value || $('#ai-model').value !== appState.settings.aiModel || $('#ai-base-url').value !== appState.settings.aiBaseUrl) await saveSettings(true);

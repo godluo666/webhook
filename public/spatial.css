@@ -114,23 +114,22 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 .stat-value { margin: 15px 0 4px; color: #26354b; font-size: 27px; letter-spacing: -.8px; }
 .stat-foot { color: #78879a; font-size: 11px; }
 
-/* Reading order stays linear while the busiest tasks get generous widths. */
-.content-grid { display: flex; flex-direction: column; gap: 28px; }
-.primary-column, .secondary-column { display: grid; grid-template-columns: minmax(0, 1.18fr) minmax(340px, .82fr); gap: 24px; align-items: start; min-width: 0; }
-.monitors-card { grid-column: 1 / -1; }
-.settings-card { grid-column: 1; grid-row: 1 / span 2; }
-.account-card { grid-column: 2; grid-row: 1; }
-.activity-card { grid-column: 2; grid-row: 2; }
-.tip-card { grid-column: 1 / -1; }
-.card { padding: 32px; }
-.compose-card { padding: 35px 36px; }
+/* Each function has its own full-width surface and a consistent reading rhythm. */
+.page-heading, .status-grid, .content-grid, footer { max-width: 980px; margin-left: auto; margin-right: auto; }
+.content-grid { display: flex; flex-direction: column; gap: 24px; }
+.primary-column, .secondary-column { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.primary-column > *, .secondary-column > * { width: 100%; min-width: 0; }
+.card, .compose-card { padding: 32px; }
+.card-title-row { align-items: flex-start; gap: 20px; }
+.card-title-row > div:first-child { min-width: 0; }
+.card-title-row + .section-subtitle { margin-top: 11px; }
 .card h2 { margin-top: 19px; color: #29374b; font-size: 21px; letter-spacing: -.5px; font-weight: 680; }
 .card-title-row h2 { margin-top: 8px; }
 .section-icon { width: 40px; height: 40px; border: 1px solid #e7ebf0; border-radius: 12px; background: #f3f6f9; box-shadow: inset 0 1px #fff; font-size: 21px; }
 .section-icon.purple { color: #60759a; background: #eef2f8; }
 .section-icon.mint { color: #569986; background: #eef7f4; }
 .section-icon.orange { color: #ab8468; background: #f8f2ed; }
-.tag, .count-pill, .optional-badge { border: 1px solid #e8edf2; border-radius: 999px; background: #f6f8fa; color: #64758c; }
+.tag, .count-pill { border: 1px solid #e8edf2; border-radius: 999px; background: #f6f8fa; color: #64758c; }
 .tag { padding: 7px 11px; }
 .count-pill { padding: 7px 12px; }
 .field-label { margin: 22px 0 10px; color: #4d6078; font-size: 12px; }
@@ -140,8 +139,9 @@ button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visibl
 .code-send-row .mini-button { flex: none; min-width: 105px; padding: 0 11px; }
 .code-send-row .mini-button:disabled { cursor: wait; opacity: .6; transform: none; }
 .settings-divider { margin: 28px 0; background: #e9edf2; }
-.optional-heading strong { color: #34465e; }
-.optional-heading small { color: #7d8a9b; }
+.ai-settings-heading h3 { margin: 0 0 5px; color: #34465e; font-size: 16px; font-weight: 680; letter-spacing: -.3px; }
+.ai-settings-heading p { margin: 0; color: #7d8a9b; font-size: 12px; line-height: 1.65; }
+.ai-settings .field-label:first-of-type { margin-top: 19px; }
 .key-indicator, .target-empty a { color: #43618f; }
 .dirty-indicator { color: #9c7456; }
 
@@ -256,11 +256,8 @@ footer { color: #94a1b0; padding-top: 30px; }
 
 @media (max-width: 1100px) {
   .page-inner { padding: 22px 25px 32px; }
-  .primary-column, .secondary-column { grid-template-columns: minmax(0, 1fr) minmax(310px, .82fr); }
 }
 @media (max-width: 940px) {
-  .primary-column, .secondary-column { grid-template-columns: minmax(0, 1fr); }
-  .monitors-card, .settings-card, .account-card, .activity-card, .tip-card { grid-column: auto; grid-row: auto; }
   .monitor-list { grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); }
 }
 @media (max-width: 780px) {
