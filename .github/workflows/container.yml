@@ -20,6 +20,7 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - run: docker compose config -q
       - run: node --test
       - name: Build image
         run: |
