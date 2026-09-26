@@ -2,15 +2,15 @@
 
 支持多用户的通知与监控工作台。每个账户独立管理 Webhook、AI 设置、监控规则、活动记录和排查日志。无需安装第三方 Node 依赖。
 
-## Docker 一键部署
+## Docker Compose 部署
 
-安装 Docker 后，直接运行已发布的 GHCR 镜像：
+安装 Docker 后，将仓库里的 `compose.yaml` 单独保存到服务器的一个目录，然后在该目录执行：
 
 ```bash
-docker run -d --name webhook-radar --restart unless-stopped --read-only --cap-drop ALL --security-opt no-new-privileges --add-host host.docker.internal:host-gateway -p 127.0.0.1:3000:3000 -v radar_data:/app/.data ghcr.io/godluo666/webhook:latest
+docker compose up -d
 ```
 
-打开 <http://127.0.0.1:3000> 注册账户。数据保存在 Docker 卷 `radar_data`，容器更新后仍会保留。需要邀请码或邮件服务时，在命令中追加相应的 `-e` 环境变量；完整配置见下文。若 GHCR 镜像保持私有，首次拉取前须登录有权限的 GitHub 账户，或将镜像包设置为公开。
+打开 <http://127.0.0.1:3000> 注册账户。GHCR（GitHub Container Registry）是存放已构建镜像的地方；Compose 会按 `compose.yaml` 中的 `image` 地址拉取镜像并启动，不需要下载源码或在服务器编译。数据保存在 Docker 卷 `radar_data`，容器更新后仍会保留。若 GHCR 镜像保持私有，首次拉取前须登录有权限的 GitHub 账户，或将镜像包设置为公开。
 
 ## 启动
 
@@ -80,17 +80,17 @@ AI 为本次指令生成一份声明式监控逻辑，包含来源、取值路�
 
 ## Docker
 
-项目包含 `Dockerfile`、`compose.yaml` 和 `.dockerignore`。安装 Docker 后运行：
+项目包含 `Dockerfile`、`compose.yaml` 和 `.dockerignore`。默认 Compose 文件直接使用已发布镜像；在含有 `compose.yaml` 的目录运行：
 
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
 
 默认只发布到宿主机的 `127.0.0.1:3000`，数据保存在 Compose 命名卷 `radar_data`。可复制 `.env.example` 为 `.env` 来设置端口、注册邀请码、邮件服务和数据位置。如需复用当前项目的 `.data/state.json`，设置 `RADAR_DATA_VOLUME=./.data` 后再运行 Compose。Compose 以非 root 用户运行应用，只读挂载容器根文件系统，并将数据目录挂载为可写卷。
 
 要监控宿主机 HTTP/TCP 服务，可将来源写成 `http://host.docker.internal:端口/health` 或 `tcp://host.docker.internal:端口`。Compose 已添加宿主机网关映射；目标服务也必须监听容器可访问的地址。容器内的 `127.0.0.1` 只能访问容器自身。
 
-若使用 `release/webhook-radar-docker-1.0.0.tar.gz` 部署包，在目标机器解压后进入解压目录，复制 `.env.example` 为 `.env`，再执行上面的 `docker compose up --build -d`。部署包包含构建上下文，不包含账户数据或 API Key。
+若使用 `release/webhook-radar-docker-1.0.0.tar.gz` 部署包，在目标机器解压后进入解压目录，可复制 `.env.example` 为 `.env`，再执行上面的 `docker compose up -d`。部署包包含构建上下文，不包含账户数据或 API Key。需要自己构建镜像时，可以运行 `docker build -t webhook-radar:local .`，并把 `compose.yaml` 的 `image` 改为 `webhook-radar:local`。
 
 上传到 GitHub 后，`main` 分支的 “Build and publish container” 工作流会先运行测试，再构建并推送 `ghcr.io/godluo666/webhook:latest`。也可以手动运行该工作流。仓库需要允许 Actions 写入 Packages；镜像发布成功后可从 GHCR 拉取部署。
 

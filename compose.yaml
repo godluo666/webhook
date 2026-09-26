@@ -1,6 +1,6 @@
 services:
   webhook-radar:
-    build: .
+    image: ghcr.io/godluo666/webhook:latest
     restart: unless-stopped
     init: true
     read_only: true
