@@ -27,9 +27,9 @@ function addEvent(user, type, title, detail, monitorId = null) {
   persist();
 }
 
-function addLog(user, kind, status, detail, url, durationMs, monitorId = null) {
+function addLog(user, kind, status, detail, url, durationMs, monitorId = null, raw = null) {
   const displayUrl = kind === 'webhook' && url ? `${new URL(url).origin}/…` : url;
-  user.logs.unshift({ id: randomUUID(), kind, status, detail: String(detail).slice(0, 500), url: displayUrl, durationMs, monitorId, at: new Date().toISOString() });
+  user.logs.unshift({ id: randomUUID(), kind, status, detail: String(detail).slice(0, 500), url: displayUrl, durationMs, monitorId, raw, at: new Date().toISOString() });
   user.logs.length = Math.min(user.logs.length, 300);
   persist();
 }
@@ -119,10 +119,20 @@ async function readLimited(response, maxBytes) {
 async function fetchText(url, options = {}) {
   let response;
   try { response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(options.timeout || 15000), ...options }); }
-  catch (error) { throw new Error(`连接失败：${error.cause?.code || error.name || '网络错误'}${error.cause?.message ? ` · ${error.cause.message}` : ''}`); }
+  catch (error) {
+    const failure = new Error(`连接失败：${error.cause?.code || error.name || '网络错误'}${error.cause?.message ? ` · ${error.cause.message}` : ''}`);
+    failure.networkCode = error.cause?.code || error.name || '网络错误';
+    failure.networkCause = error.cause?.message || '';
+    throw failure;
+  }
   options.onResponse?.(response.status);
   const body = await readLimited(response, options.maxBytes || 2_000_000);
-  if (!response.ok) throw new Error(`HTTP ${response.status}${body ? ` · ${body.replace(/<[^>]+>/g, ' ').slice(0, 100)}` : ''}`);
+  if (!response.ok) {
+    const error = new Error(`HTTP ${response.status}${body ? ` · ${body.replace(/<[^>]+>/g, ' ').slice(0, 100)}` : ''}`);
+    error.responseStatus = response.status;
+    error.responseBody = body.slice(0, 12000);
+    throw error;
+  }
   return body;
 }
 
@@ -174,10 +184,12 @@ async function checkMonitor(user, monitor) {
   activeChecks.add(monitor.id);
   const started = Date.now();
   let responseStatus;
+  let responseSample = '';
   try {
     await flushPending(user, monitor);
     const expectsJson = ['dmit', 'json', 'github'].includes(monitor.kind) || monitor.kind === 'generated' && monitor.plan.sourceType === 'json';
     const html = await fetchText(monitor.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { responseStatus = code; } });
+    responseSample = html.slice(0, 4000);
     const current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
     const triggered = monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
     if (triggered) {
@@ -218,7 +230,11 @@ async function checkMonitor(user, monitor) {
   } catch (error) {
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastError = error.message;
-    addLog(user, 'monitor', 'error', `${monitor.label} · ${error.message}`, monitor.url, Date.now() - started, monitor.id);
+    addLog(user, 'monitor', 'error', `${monitor.label} · ${error.message}`, monitor.url, Date.now() - started, monitor.id, {
+      requestUrl: monitor.url, httpStatus: error.responseStatus || responseStatus || null,
+      networkCode: error.networkCode || null, networkCause: error.networkCause || null,
+      responseBody: error.responseBody || responseSample || null, validation: error.message
+    });
     addEvent(user, 'error', '检查失败', `${monitor.label} · ${error.message}`, monitor.id);
   } finally {
     activeChecks.delete(monitor.id);
@@ -231,27 +247,42 @@ function aiEndpoint(baseUrl) {
   return url.href;
 }
 
-async function parseInstruction(user, instruction) {
+function instructionUrl(input) {
+  return input.match(/https?:\/\/[^\s<>"'“”‘’，。；、（）()]+/i)?.[0] || '';
+}
+
+async function parseInstruction(user, instruction, sourceUrlInput, trace) {
   const input = String(instruction || '').trim();
+  trace.instruction = input;
   if (!input || input.length > 2000) throw new Error('指令长度需要在 1 到 2000 字之间');
+  const explicitSourceUrl = String(sourceUrlInput || '').trim();
+  const sourceUrl = explicitSourceUrl ? urlOf(explicitSourceUrl, '单独填写的来源地址') : instructionUrl(input);
+  trace.sourceUrl = sourceUrl;
+  trace.sourceMode = explicitSourceUrl ? '单独填写' : sourceUrl ? '从指令提取' : '未提供';
   if (!user.settings.aiKey) throw new Error('按需生成监控逻辑需要先在设置中填写 AI API Key');
   if (!user.settings.aiModel) throw new Error('请先填写 AI 模型名称');
-  const sourceUrl = input.match(/https?:\/\/[^\s，。；、）)]+/i)?.[0];
   const dmit = /\bdmit\b/i.test(input);
   if (!sourceUrl && !dmit) throw new Error('请在指令中附上监控来源地址；当前无法自行搜索来源');
   const endpoint = aiEndpoint(user.settings.aiBaseUrl || 'https://api.openai.com/v1');
-  const text = await fetchText(endpoint, {
-    method: 'POST', timeout: 20000, maxBytes: 500_000,
-    headers: { authorization: `Bearer ${user.settings.aiKey}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
+  trace.model = user.settings.aiModel;
+  trace.apiEndpoint = new URL(endpoint).origin + new URL(endpoint).pathname;
+  const aiRequest = {
       model: user.settings.aiModel,
       messages: [
         { role: 'system', content: `你是监控逻辑编译器。根据用户本次指令，生成一条可执行的声明式监控程序，仅输出 JSON，不要 Markdown。顶层字段：url,label,intervalMinutes,plan。plan 必填 sourceType=json/html/rss，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；信息不足时返回 {"error":"请补充来源地址或触发条件"}。` },
         { role: 'system', content: '如果使用 DMIT 第三方库存来源，plan.path 必须为 products；filters 必须包括 provider equals "dmit"、stale equals 0、last_check_at withinMinutes 120。任意有货模式还必须筛选 status in ["有货","available","in stock"]；补货模式使用 item-transition，idPath=product_key、statePath=status、fromValues=["无货","缺货","out of stock"]、toValues=["有货","available","in stock"]，且不要在 filters 中筛选 status。' },
+        { role: 'system', content: explicitSourceUrl ? `用户已单独填写监控来源地址：${sourceUrl}。输出的 url 必须与此地址完全一致。` : '上文要求使用用户提供的 URL，指真实网址部分。如果网址后紧贴中文指令文字，辨别网址和自然语言的边界；不要把“存在”“包含”“通知”等句子当作网址路径。' },
         { role: 'user', content: input }
       ]
-    })
+    };
+  trace.aiRequest = JSON.stringify(aiRequest).slice(0, 16000);
+  const text = await fetchText(endpoint, {
+    method: 'POST', timeout: 20000, maxBytes: 500_000,
+    headers: { authorization: `Bearer ${user.settings.aiKey}`, 'content-type': 'application/json' },
+    body: JSON.stringify(aiRequest)
   });
+  trace.aiResponse = text.slice(0, 12000);
+  if (text.length > 12000) trace.aiResponseTruncated = true;
   let parsed;
   try {
     const result = JSON.parse(text);
@@ -263,7 +294,26 @@ async function parseInstruction(user, instruction) {
   const allowedUrls = [urlOf(expectedUrl, '指令中的地址')];
   const github = sourceUrl?.match(/^https?:\/\/github\.com\/([^/]+)\/([^/?#]+)/i);
   if (github) allowedUrls.push(`https://api.github.com/repos/${github[1]}/${github[2]}/releases/latest`);
-  if (!allowedUrls.includes(urlOf(parsed.url, 'AI 返回的地址'))) throw new Error('AI 返回的监控地址与指令不一致');
+  const returnedUrl = urlOf(parsed.url, 'AI 返回的地址');
+  trace.aiReturnedUrl = returnedUrl;
+  if (!explicitSourceUrl && sourceUrl && returnedUrl === allowedUrls[0]) {
+    let decodedPath = '';
+    try { decodedPath = decodeURIComponent(new URL(returnedUrl).pathname); } catch { /* validation below still applies */ }
+    const followingText = input.slice(input.indexOf(sourceUrl) + sourceUrl.length).trimStart();
+    if (/(?:存在|包含|出现).*(?:通知|这两个字)/.test(decodedPath) || /[\p{Script=Han}]/u.test(decodedPath) && /^["“]/.test(followingText) && /(?:通知|这两个字)/.test(followingText)) {
+      throw new Error('网址和指令文字连在一起，请把监控来源地址单独填写');
+    }
+  }
+  let sourceNote = '';
+  if (!allowedUrls.includes(returnedUrl)) {
+    let suffix = '';
+    if (!explicitSourceUrl && sourceUrl && allowedUrls[0].startsWith(returnedUrl)) {
+      try { suffix = decodeURIComponent(allowedUrls[0].slice(returnedUrl.length)); } catch { /* keep strict validation */ }
+    }
+    if (!/^[\p{Script=Han}]/u.test(suffix) || !/(?:存在|包含|出现|通知|这两个字|关键词|监控|检测)/.test(suffix)) throw new Error('AI 返回的监控地址与指令不一致；请把来源地址单独填写');
+    sourceNote = '网址与中文指令连在一起，已采用 AI 识别的来源地址。请核对下方完整地址。';
+    trace.sourceInterpretation = sourceNote;
+  }
   const candidate = validateMonitor({ ...parsed, kind: 'generated' });
   if (dmit && !sourceUrl) {
     const filters = candidate.plan.filters || [];
@@ -275,7 +325,8 @@ async function parseInstruction(user, instruction) {
   const anyAvailable = /任意有货|只要有货|当前有货|有货就通知/.test(input);
   if (dmit && !sourceUrl && anyAvailable && (candidate.plan.mode !== 'any' || candidate.plan.initial !== 'notify')) throw new Error('AI 没有按“任意有货”生成规则，请调整指令后重试');
   if (dmit && !sourceUrl && !anyAvailable && /补货|恢复供货|重新有货/.test(input) && (candidate.plan.mode !== 'item-transition' || candidate.plan.initial !== 'baseline')) throw new Error('AI 没有按“补货变化”生成规则，请调整指令后重试');
-  return { ...candidate, parser: 'ai' };
+  trace.validatedUrl = candidate.url;
+  return { ...candidate, parser: 'ai', sourceNote };
 }
 
 function sendJson(response, status, data, headers = {}) {
@@ -352,6 +403,10 @@ async function handler(request, response) {
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
       if (request.method === 'GET' && pathname === '/api/logs') return sendJson(response, 200, { logs: user.logs.slice(0, 300) });
+      if (request.method === 'GET' && pathname === '/api/ai/key') {
+        if (!user.settings.aiKey) return sendJson(response, 404, { error: '当前账户没有保存 API Key' });
+        return sendJson(response, 200, { key: user.settings.aiKey });
+      }
       if (request.method === 'POST' && pathname === '/api/ai/test') {
         const body = await readJson(request);
         const baseUrl = body.aiBaseUrl ? urlOf(body.aiBaseUrl, 'AI API 地址') : user.settings.aiBaseUrl;
@@ -405,30 +460,44 @@ async function handler(request, response) {
       if (request.method === 'POST' && pathname === '/api/parse') {
         const body = await readJson(request);
         const started = Date.now();
-        const sourceUrl = String(body.instruction || '').match(/https?:\/\/[^\s，。；、）)]+/i)?.[0] || '';
+        const trace = {};
+        const safeTrace = () => Object.fromEntries(Object.entries(trace).map(([name, value]) => [name, typeof value === 'string' && user.settings.aiKey ? value.replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : value]));
         try {
-          const parsed = await parseInstruction(user, body.instruction);
-          const { parser, ...candidate } = parsed;
+          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace);
+          const { parser, sourceNote, ...candidate } = parsed;
           const monitor = validateMonitor(candidate);
-          addLog(user, 'parse', 'success', `${parser === 'ai' ? 'AI' : '本地'}解析生成 ${monitor.kind} 规则`, sourceUrl, Date.now() - started);
-          return sendJson(response, 200, { monitor, parser });
+          trace.validation = '通过';
+          addLog(user, 'parse', 'success', `AI 解析生成 ${monitor.kind} 规则`, null, Date.now() - started, null, safeTrace());
+          return sendJson(response, 200, { monitor, parser, sourceNote });
         } catch (error) {
-          addLog(user, 'parse', 'error', error.message, sourceUrl, Date.now() - started);
-          throw error;
+          if (error.responseStatus) trace.httpStatus = error.responseStatus;
+          if (error.responseBody) trace.aiResponse = error.responseBody;
+          if (error.networkCode) trace.networkCode = error.networkCode;
+          if (error.networkCause) trace.networkCause = error.networkCause;
+          const safeError = new Error(user.settings.aiKey ? String(error.message).replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : String(error.message));
+          trace.validation = safeError.message;
+          addLog(user, 'parse', 'error', safeError.message, null, Date.now() - started, null, safeTrace());
+          throw safeError;
         }
       }
       if (request.method === 'POST' && pathname === '/api/preview-check') {
         const spec = validateMonitor(await readJson(request));
         const started = Date.now();
         let status;
+        let responseSample = '';
         try {
           const expectsJson = ['dmit', 'json', 'github'].includes(spec.kind) || spec.kind === 'generated' && spec.plan.sourceType === 'json';
           const body = await fetchText(spec.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { status = code; } });
+          responseSample = body.slice(0, 4000);
           const result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
           addLog(user, 'preview', 'success', `来源测试 · HTTP ${status} · ${result.summary}`, spec.url, Date.now() - started);
           return sendJson(response, 200, { status, summary: result.summary });
         } catch (error) {
-          addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started);
+          addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started, null, {
+            requestUrl: spec.url, httpStatus: error.responseStatus || status || null,
+            networkCode: error.networkCode || null, networkCause: error.networkCause || null,
+            responseBody: error.responseBody || responseSample || null, validation: error.message
+          });
           throw error;
         }
       }

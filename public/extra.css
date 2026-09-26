@@ -79,6 +79,19 @@ select:focus { outline: none; border-color: #9d92f1; box-shadow: 0 0 0 3px #7162
 .ai-test-row span { color: #858a96; font-size: 11px; line-height: 1.4; }
 .ai-test-row span.success { color: #2f926f; }
 .ai-test-row span.error { color: #cb625e; }
+.optional-input { color: #a3a8b2; font-size: 10px; font-weight: 500; }
+.saved-key { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
+.saved-key > span { color: #777d8c; font-size: 10px; overflow-wrap: anywhere; }
+.saved-key .mini-button { flex: none; }
+.saved-key input { width: 100%; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; user-select: all; }
+.raw-log { margin-top: 9px; }
+.raw-log summary { color: #6658db; font-size: 10px; font-weight: 700; cursor: pointer; }
+.raw-log .copy-log { margin: 9px 0 3px; }
+.raw-log-field { margin-top: 9px; }
+.raw-log-field b { display: block; color: #666c79; font-size: 10px; margin-bottom: 4px; }
+.raw-log pre { max-height: 320px; margin: 9px 0 0; padding: 10px; overflow: auto; border: 1px solid #e9e9f0; border-radius: 8px; background: #fafaff; color: #4b5160; font: 10px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+input[type=email] { width: 100%; border: 1px solid #e6e8ec; background: #fff; border-radius: 10px; padding: 12px 13px; color: #30343d; font-size: 12px; outline: none; }
+input[type=email]:focus { border-color: #9d92f1; box-shadow: 0 0 0 3px #7162e91d; }
 .text-button { border: 0; background: transparent; color: #777d8c; cursor: pointer; font-size: 11px; }
 #account-name { margin-left: 12px; color: #5e55b5; font-weight: 700; }
 .legacy-claim { margin-top: 18px; }

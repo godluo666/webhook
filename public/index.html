@@ -43,6 +43,7 @@
               <form id="parse-form">
                 <label for="instruction" class="field-label">你的指令</label>
                 <textarea id="instruction" rows="4" placeholder="写明来源地址与触发条件，例如 API 字段 status 等于 available 时通知"></textarea>
+                <label for="instruction-url" class="field-label">监控来源地址 <span class="optional-input">建议单独填写，避免和指令文字混在一起</span></label><input id="instruction-url" type="url" placeholder="https://example.com/page" autocomplete="url">
                 <div class="composer-bottom"><span id="ai-status">点击后才调用你配置的 AI API，生成这条任务的监控逻辑</span><button class="button button-primary" type="submit" id="parse-button"><span>生成监控规则</span><span>↗</span></button></div>
               </form>
               <div id="preview" class="preview hidden" aria-live="polite"></div>
@@ -79,6 +80,7 @@
                   <label for="ai-base-url" class="field-label">API 地址</label><input id="ai-base-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="off">
                   <label for="ai-model" class="field-label">模型名称</label><input id="ai-model" type="text" placeholder="填写兼容 Chat Completions 的模型名" autocomplete="off">
                   <label for="ai-key" class="field-label">API Key <span id="key-indicator" class="key-indicator"></span></label><input id="ai-key" type="password" placeholder="未设置" autocomplete="new-password">
+                  <div id="saved-ai-key-wrap" class="saved-key hidden"><span id="saved-ai-key-hint"></span><button id="reveal-ai-key" type="button" class="mini-button">显示完整 Key</button><input id="saved-ai-key-value" class="hidden" type="text" readonly aria-label="已保存的完整 API Key"></div>
                   <label class="check-row"><input id="clear-ai-key" type="checkbox"> 清除已保存的 API Key</label>
                   <div class="ai-test-row"><button type="button" id="ai-test-button" class="mini-button">测试 API 连接</button><span id="ai-test-result" aria-live="polite"></span></div>
                 </details>

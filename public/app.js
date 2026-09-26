@@ -49,7 +49,17 @@ function renderStats() {
   $('#active-count').textContent = appState.monitors.filter((monitor) => monitor.enabled).length;
   $('#sent-count').textContent = appState.sentCount || 0;
   $('#monitor-count').textContent = `${appState.monitors.length} 个任务`;
-  $('#key-indicator').textContent = appState.settings.hasAiKey ? '· 已保存' : '';
+  const keyHint = appState.settings.aiKeyHint || '';
+  $('#key-indicator').textContent = appState.settings.hasAiKey ? '· 已保存' : '· 未设置';
+  const savedKeyWrap = $('#saved-ai-key-wrap');
+  if (savedKeyWrap.dataset.hint !== keyHint) {
+    $('#saved-ai-key-value').value = '';
+    $('#saved-ai-key-value').classList.add('hidden');
+    $('#reveal-ai-key').textContent = '显示完整 Key';
+  }
+  savedKeyWrap.dataset.hint = keyHint;
+  savedKeyWrap.classList.toggle('hidden', !appState.settings.hasAiKey);
+  $('#saved-ai-key-hint').textContent = `已保存：${keyHint}`;
   $('#ai-key').placeholder = appState.settings.hasAiKey ? '留空则保持当前 Key' : 'sk-...';
   $('#ai-status').textContent = appState.settings.hasAiKey && appState.settings.aiModel ? `点击后使用 ${appState.settings.aiModel} 生成本次监控逻辑` : '先在右侧设置 AI 接口、模型和 Key；点击生成时才会调用';
 }
@@ -104,7 +114,14 @@ function renderLogs() {
   $('#log-count').textContent = `显示 ${logs.length} 条`;
   const list = $('#log-list');
   const scrollTop = list.scrollTop;
-  list.innerHTML = logs.length ? logs.map((entry) => `<div class="log-row ${entry.status === 'error' ? 'log-error' : ''}"><strong>${escapeHtml({ monitor: '检查', webhook: '发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接' }[entry.kind] || entry.kind)} · ${escapeHtml(entry.status === 'error' ? '失败' : '成功')}</strong><span>${escapeHtml(new Date(entry.at).toLocaleString('zh-CN'))} · ${escapeHtml(entry.durationMs)} ms</span><p>${escapeHtml(entry.detail)}</p>${entry.url ? `<small title="${escapeHtml(entry.url)}">${escapeHtml(entry.url)}</small>` : ''}</div>`).join('') : '<p class="field-help">没有符合条件的日志。</p>';
+  const expanded = new Set([...list.querySelectorAll('.raw-log[open]')].map((details) => details.dataset.id));
+  const labels = { instruction: '用户原始指令', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
+  const rawHtml = (entry) => `<details class="raw-log" data-id="${escapeHtml(entry.id)}" ${expanded.has(entry.id) ? 'open' : ''}><summary>查看原始记录</summary><button type="button" class="mini-button copy-log" data-copy-log="${escapeHtml(entry.id)}">复制原始记录</button>${Object.entries(entry.raw).filter(([, value]) => value != null && value !== '').map(([name, value]) => {
+    let display = String(value ?? '');
+    if (name === 'aiRequest' || name === 'aiResponse' || name === 'responseBody') { try { display = JSON.stringify(JSON.parse(display), null, 2); } catch { /* display the original text */ } }
+    return `<div class="raw-log-field"><b>${escapeHtml(labels[name] || name)}</b><pre>${escapeHtml(display)}</pre></div>`;
+  }).join('')}</details>`;
+  list.innerHTML = logs.length ? logs.map((entry) => `<div class="log-row ${entry.status === 'error' ? 'log-error' : ''}"><strong>${escapeHtml({ monitor: '检查', webhook: '发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接' }[entry.kind] || entry.kind)} · ${escapeHtml(entry.status === 'error' ? '失败' : '成功')}</strong><span>${escapeHtml(new Date(entry.at).toLocaleString('zh-CN'))} · ${escapeHtml(entry.durationMs)} ms</span><p>${escapeHtml(entry.detail)}</p>${entry.url ? `<small title="${escapeHtml(entry.url)}">${escapeHtml(entry.url)}</small>` : ''}${entry.raw ? rawHtml(entry) : entry.kind === 'parse' ? '<small>旧记录未保存原始请求与回复</small>' : ''}</div>`).join('') : '<p class="field-help">没有符合条件的日志。</p>';
   list.scrollTop = scrollTop;
 }
 
@@ -150,6 +167,13 @@ function updateSendPriorityVisibility() {
 function renderSendTargets(ids) { $('#send-targets').innerHTML = targetOptions(ids); updateSendPriorityVisibility(); }
 $('#send-targets').addEventListener('change', updateSendPriorityVisibility);
 $('#log-errors-only').addEventListener('change', renderLogs);
+$('#log-list').addEventListener('click', (event) => {
+  const button = event.target.closest('[data-copy-log]');
+  if (!button) return;
+  const entry = (appState.logs || []).find((item) => item.id === button.dataset.copyLog);
+  if (!entry?.raw) return;
+  navigator.clipboard.writeText(JSON.stringify(entry.raw, null, 2)).then(() => toast('原始记录已复制')).catch(() => toast('复制失败，请手动选择日志内容', true));
+});
 
 function populateSettings() {
   renderWebhooks();
@@ -157,6 +181,9 @@ function populateSettings() {
   $('#ai-base-url').value = appState.settings.aiBaseUrl || 'https://api.openai.com/v1';
   $('#ai-model').value = appState.settings.aiModel || '';
   $('#ai-key').value = '';
+  $('#saved-ai-key-value').value = '';
+  $('#saved-ai-key-value').classList.add('hidden');
+  $('#reveal-ai-key').textContent = '显示完整 Key';
   $('#clear-ai-key').checked = false;
   $('#ai-test-result').textContent = '';
   $('#ai-test-result').className = '';
@@ -182,6 +209,9 @@ async function saveSettings(silent = false) {
   renderWebhooks();
   renderSendTargets(previouslySelected);
   $('#ai-key').value = '';
+  $('#saved-ai-key-value').value = '';
+  $('#saved-ai-key-value').classList.add('hidden');
+  $('#reveal-ai-key').textContent = '显示完整 Key';
   $('#clear-ai-key').checked = false;
   $('#settings-dirty').textContent = '';
   render(true);
@@ -198,8 +228,8 @@ function renderPreview(monitor) {
   element.classList.remove('hidden');
   const planLabels = { compare: '字段条件', changed: '字段变化', any: '任意条目符合', 'item-transition': '逐项状态变化', contains: '文字出现', absent: '文字消失', 'new-item': '新条目' };
   element.innerHTML = `<div class="preview-head"><span>✦ &nbsp; 监控规则预览</span><span>AI 本次生成 · 待确认</span></div>
-    <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>来源地址</small><strong>${escapeHtml(new URL(monitor.url).host)}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
-    <div class="preview-note">${monitor.kind === 'generated' ? '这是你本次请求时由 AI 生成的逻辑。请检查来源、筛选条件与首次通知方式；可在下方编辑。' : monitor.kind === 'dmit' && monitor.triggerMode === 'any-available' ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
+    <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>来源地址</small><strong>${escapeHtml(monitor.url)}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
+    <div class="preview-note">${monitor.sourceNote ? `${escapeHtml(monitor.sourceNote)} ` : ''}${monitor.kind === 'generated' ? '这是你本次请求时由 AI 生成的逻辑。请检查来源、筛选条件与首次通知方式；可在下方编辑。' : monitor.kind === 'dmit' && monitor.triggerMode === 'any-available' ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'generated' && monitor.plan.sourceType === 'html' ? ' 网页检查只读取服务端返回的 HTML，不执行页面 JavaScript；建议先点“测试来源”。' : ''}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
     <div class="field-label">通知到</div><div id="preview-targets" class="target-options">${targetOptions()}</div>
     <details class="rule-editor"><summary>调整监控规则</summary><div class="rule-fields">
       <label>任务名称<input id="rule-label" type="text" maxlength="60" value="${escapeHtml(monitor.label)}"></label>
@@ -253,7 +283,9 @@ function showAuth() {
   previewMonitor = null;
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
-  for (const selector of ['#ai-key', '#instruction', '#send-title', '#send-message', '#claim-token', '#auth-recovery-code']) $(selector).value = '';
+  for (const selector of ['#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#claim-token', '#auth-recovery-code', '#saved-ai-key-value']) $(selector).value = '';
+  $('#saved-ai-key-value').classList.add('hidden');
+  $('#reveal-ai-key').textContent = '显示完整 Key';
   $('#ai-test-result').textContent = '';
   $('#settings-dirty').textContent = '';
   for (const input of document.querySelectorAll('#email-password, #current-password, #new-password, #rotate-code-password')) input.value = '';
@@ -433,6 +465,21 @@ $('#ai-test-button').addEventListener('click', () => {
     }
   });
 });
+$('#reveal-ai-key').addEventListener('click', () => {
+  withButton($('#reveal-ai-key'), async () => {
+    const value = $('#saved-ai-key-value');
+    if (!value.classList.contains('hidden')) {
+      value.value = '';
+      value.classList.add('hidden');
+      $('#reveal-ai-key').textContent = '显示完整 Key';
+      return;
+    }
+    const result = await api('/api/ai/key');
+    value.value = result.key;
+    value.classList.remove('hidden');
+    $('#reveal-ai-key').textContent = '隐藏 Key';
+  });
+});
 for (const selector of ['#ai-base-url', '#ai-model', '#ai-key', '#clear-ai-key']) {
   $(selector).addEventListener('input', () => { $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; });
 }
@@ -466,8 +513,8 @@ $('#parse-form').addEventListener('submit', (event) => {
       throw new Error('请先在 AI 生成设置中填写模型和 API Key');
     }
     if ($('#settings-dirty').textContent || $('#ai-key').value || $('#ai-model').value !== appState.settings.aiModel || $('#ai-base-url').value !== appState.settings.aiBaseUrl) await saveSettings(true);
-    const result = await api('/api/parse', 'POST', { instruction: $('#instruction').value });
-    previewMonitor = result.monitor;
+    const result = await api('/api/parse', 'POST', { instruction: $('#instruction').value, sourceUrl: $('#instruction-url').value.trim() });
+    previewMonitor = { ...result.monitor, sourceNote: result.sourceNote || '' };
     renderPreview(previewMonitor);
     toast('规则已生成，请确认');
   });
@@ -500,6 +547,7 @@ $('#preview').addEventListener('click', (event) => {
     previewMonitor = null;
     $('#preview').classList.add('hidden');
     $('#instruction').value = '';
+    $('#instruction-url').value = '';
     render(true);
     toast(created.lastError ? `监控已创建，首次检查失败：${created.lastError}` : '监控已创建，首次检查已完成', Boolean(created.lastError));
     $('#monitor-list').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
