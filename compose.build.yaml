@@ -4,7 +4,8 @@ services:
       context: https://github.com/godluo666/webhook.git#main
       args:
         SOURCE_URL: https://github.com/godluo666/webhook
-    image: webhook-radar:local
+    image: ghcr.io/godluo666/webhook:latest
+    pull_policy: build
     restart: unless-stopped
     init: true
     read_only: true
@@ -29,3 +30,4 @@ services:
 
 volumes:
   radar_data:
+    name: webhook-radar_radar_data

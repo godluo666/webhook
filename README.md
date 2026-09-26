@@ -32,6 +32,16 @@ docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git up -
 
 GitHub 仓库公开与 GHCR 镜像包公开是两项独立设置。镜像包仍为私有时，直接拉取镜像需要先登录有权限的 GitHub 账户；一键脚本会自动改用本机构建。升级时沿用原来的 `RADAR_BIND`、`RADAR_PORT` 等环境变量，以保持访问地址不变。
 
+## 在 1Panel 中更新镜像
+
+镜像地址固定为 `ghcr.io/godluo666/webhook:latest`。`main` 分支每次构建成功都会更新这个标签。1Panel 要从 GHCR 拉取，镜像包必须允许服务器访问：到 GitHub 账户的 **Packages → webhook → Package settings → Change visibility**，设为 **Public**。仅将代码仓库设为公开不会改变镜像包的可见性。公开后先在服务器验证：
+
+```bash
+docker pull ghcr.io/godluo666/webhook:latest
+```
+
+之前一键安装若回退到 `webhook-radar:local`，请再运行一次上面的一键命令，让现有容器改用 GHCR 镜像；数据仍在 `webhook-radar_radar_data` 卷中。之后在 1Panel 的**容器列表**选中 `webhook-radar` 对应的容器，使用容器的**升级／更新镜像**操作，拉取 `latest` 并重建容器。只在**镜像列表**点“拉取”不会更新已经运行的容器。若要由 1Panel 管理整个编排，可以将仓库的 `compose.yaml` 粘贴到 1Panel 新建编排的编辑器中；请在编排变量中设置 `RADAR_BIND=0.0.0.0`，沿用相同的数据卷，先停止旧容器以免 3000 端口冲突。
+
 ## 启动
 
 需要 Node.js 20 或更新版本，建议使用 Node.js 24。
