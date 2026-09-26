@@ -310,8 +310,8 @@ async function handler(request, response) {
       if (request.method === 'POST' && pathname === '/api/auth/register') {
         loginGuard(request);
         const body = await readJson(request);
-        const user = store.register(body.username, body.password, body.inviteCode);
-        return sendJson(response, 201, publicState(user), { 'set-cookie': store.issueCookie(user) });
+        const { user, recoveryCode } = store.register(body.username, body.password, body.inviteCode, body.email);
+        return sendJson(response, 201, { ...publicState(user), recoveryCode }, { 'set-cookie': store.issueCookie(user) });
       }
       if (request.method === 'POST' && pathname === '/api/auth/login') {
         loginGuard(request);
@@ -320,16 +320,64 @@ async function handler(request, response) {
         if (!user) return sendJson(response, 401, { error: '用户名或密码错误' });
         return sendJson(response, 200, publicState(user), { 'set-cookie': store.issueCookie(user) });
       }
+      if (request.method === 'POST' && pathname === '/api/auth/recover') {
+        loginGuard(request);
+        const body = await readJson(request);
+        const recovered = store.recoverPassword(body.username, body.recoveryCode, body.newPassword);
+        if (!recovered) return sendJson(response, 401, { error: '用户名或恢复码不正确' });
+        return sendJson(response, 200, { ...publicState(recovered.user), recoveryCode: recovered.recoveryCode }, { 'set-cookie': store.issueCookie(recovered.user) });
+      }
       const user = store.userFromRequest(request);
-      if (request.method === 'GET' && pathname === '/api/auth/status') return sendJson(response, 200, { authenticated: Boolean(user), user: user ? { id: user.id, username: user.username } : null, hasLegacyData: Boolean(store.state.legacyUnclaimed), signupCodeRequired: Boolean(process.env.SIGNUP_CODE) });
+      if (request.method === 'GET' && pathname === '/api/auth/status') return sendJson(response, 200, { authenticated: Boolean(user), user: user ? { id: user.id, username: user.username, email: user.email || '' } : null, hasLegacyData: Boolean(store.state.legacyUnclaimed), signupCodeRequired: Boolean(process.env.SIGNUP_CODE) });
       if (!user) return sendJson(response, 401, { error: '请先登录' });
       if (request.method === 'POST' && pathname === '/api/auth/logout') return sendJson(response, 200, { ok: true }, { 'set-cookie': store.clearCookie() });
+      if (request.method === 'POST' && pathname === '/api/auth/change-password') {
+        const body = await readJson(request);
+        store.changePassword(user, body.currentPassword, body.newPassword);
+        return sendJson(response, 200, { ok: true }, { 'set-cookie': store.issueCookie(user) });
+      }
+      if (request.method === 'PUT' && pathname === '/api/auth/profile') {
+        const body = await readJson(request);
+        store.updateEmail(user, body.password, body.email);
+        return sendJson(response, 200, publicState(user));
+      }
+      if (request.method === 'POST' && pathname === '/api/auth/recovery-code/rotate') {
+        const body = await readJson(request);
+        const recoveryCode = store.rotateRecoveryCode(user, body.password);
+        return sendJson(response, 200, { recoveryCode });
+      }
       if (request.method === 'POST' && pathname === '/api/auth/claim-legacy') {
         store.claimLegacy(user, (await readJson(request)).token);
         return sendJson(response, 200, publicState(user));
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
       if (request.method === 'GET' && pathname === '/api/logs') return sendJson(response, 200, { logs: user.logs.slice(0, 300) });
+      if (request.method === 'POST' && pathname === '/api/ai/test') {
+        const body = await readJson(request);
+        const baseUrl = body.aiBaseUrl ? urlOf(body.aiBaseUrl, 'AI API 地址') : user.settings.aiBaseUrl;
+        const model = String(body.aiModel || user.settings.aiModel || '').trim();
+        const key = String(body.aiKey || user.settings.aiKey || '').trim();
+        if (!model) throw new Error('请先填写模型名称');
+        if (model.length > 100) throw new Error('模型名称不能超过 100 个字符');
+        if (!key) throw new Error('请先填写 API Key');
+        if (key.length > 500) throw new Error('API Key 过长');
+        const endpoint = aiEndpoint(baseUrl || 'https://api.openai.com/v1');
+        const started = Date.now();
+        try {
+          const raw = await fetchText(endpoint, { method: 'POST', timeout: 20000, maxBytes: 100_000,
+            headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ model, messages: [{ role: 'user', content: '回复 OK' }] }) });
+          let result;
+          try { result = JSON.parse(raw); } catch { throw new Error('API 返回的不是 JSON'); }
+          if (!Array.isArray(result.choices) || !result.choices[0]?.message) throw new Error('API 响应缺少 Chat Completions 结果');
+          addLog(user, 'ai-test', 'success', `AI 连接成功 · ${model}`, new URL(endpoint).origin, Date.now() - started);
+          return sendJson(response, 200, { ok: true, model, durationMs: Date.now() - started });
+        } catch (error) {
+          const safeError = new Error(String(error.message).replaceAll(key, '[已隐藏的 API Key]'));
+          addLog(user, 'ai-test', 'error', safeError.message, new URL(endpoint).origin, Date.now() - started);
+          throw safeError;
+        }
+      }
       if (request.method === 'PUT' && pathname === '/api/settings') {
         const body = await readJson(request);
         const webhooks = validateWebhooks(body.webhooks ?? user.settings.webhooks);
@@ -366,6 +414,21 @@ async function handler(request, response) {
           return sendJson(response, 200, { monitor, parser });
         } catch (error) {
           addLog(user, 'parse', 'error', error.message, sourceUrl, Date.now() - started);
+          throw error;
+        }
+      }
+      if (request.method === 'POST' && pathname === '/api/preview-check') {
+        const spec = validateMonitor(await readJson(request));
+        const started = Date.now();
+        let status;
+        try {
+          const expectsJson = ['dmit', 'json', 'github'].includes(spec.kind) || spec.kind === 'generated' && spec.plan.sourceType === 'json';
+          const body = await fetchText(spec.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { status = code; } });
+          const result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
+          addLog(user, 'preview', 'success', `来源测试 · HTTP ${status} · ${result.summary}`, spec.url, Date.now() - started);
+          return sendJson(response, 200, { status, summary: result.summary });
+        } catch (error) {
+          addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started);
           throw error;
         }
       }

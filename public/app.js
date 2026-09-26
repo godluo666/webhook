@@ -8,6 +8,7 @@ const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character
 const activeHooks = () => (appState.settings.webhooks || []).filter((hook) => hook.enabled);
 const isNtfyHook = (hook) => hook.format === 'ntfy' || (!hook.format || hook.format === 'auto') && /^https?:\/\/ntfy\.sh\//i.test(hook.url);
 const selectedIds = (root) => [...root.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
+const hasNtfyTarget = (ids) => activeHooks().some((hook) => ids.includes(hook.id) && isNtfyHook(hook));
 
 function relativeTime(timestamp) {
   if (!timestamp) return '尚未检查';
@@ -75,7 +76,7 @@ function renderMonitors() {
           ${monitor.kind === 'dmit' ? `<label>触发方式<select class="edit-trigger-mode"><option value="restock" ${monitor.triggerMode !== 'any-available' ? 'selected' : ''}>由无货变为有货</option><option value="any-available" ${monitor.triggerMode === 'any-available' ? 'selected' : ''}>任意有货（首次满足即通知）</option></select></label>` : ''}
           ${monitor.kind === 'json' ? `<label>JSON 字段路径<input class="edit-json-path" type="text" value="${escapeHtml(monitor.jsonPath)}"></label><label>比较方式<select class="edit-operator">${operatorOptions(monitor.operator)}</select></label><label>比较值<input class="edit-expected" type="text" value="${escapeHtml(monitor.expected)}"></label>` : ''}
           ${monitor.kind === 'rss' ? `<label>标题包含（可选）<input class="edit-keyword" type="text" value="${escapeHtml(monitor.keyword)}"></label>` : ''}
-          <div class="priority-field"><span>ntfy 优先级（仅对 ntfy 生效）</span>${priorityPicker(`edit-priority-${monitor.id}`, monitor.priority, true, 'edit-priority')}</div>
+          <div class="priority-field ${hasNtfyTarget(monitor.webhookIds || []) ? '' : 'hidden'}"><span>ntfy 优先级</span>${priorityPicker(`edit-priority-${monitor.id}`, monitor.priority, true, 'edit-priority')}</div>
           ${monitor.kind === 'generated' ? `<label class="plan-field">生成的监控逻辑<textarea class="edit-plan" rows="9" spellcheck="false">${escapeHtml(JSON.stringify(monitor.plan, null, 2))}</textarea></label>` : ''}
           <label>检查间隔（分钟）<input class="edit-interval" type="number" min="5" max="1440" value="${monitor.intervalMinutes}"></label>
         </div>
@@ -103,7 +104,7 @@ function renderLogs() {
   $('#log-count').textContent = `显示 ${logs.length} 条`;
   const list = $('#log-list');
   const scrollTop = list.scrollTop;
-  list.innerHTML = logs.length ? logs.map((entry) => `<div class="log-row ${entry.status === 'error' ? 'log-error' : ''}"><strong>${escapeHtml({ monitor: '检查', webhook: '发送', parse: '解析' }[entry.kind] || entry.kind)} · ${escapeHtml(entry.status === 'error' ? '失败' : '成功')}</strong><span>${escapeHtml(new Date(entry.at).toLocaleString('zh-CN'))} · ${escapeHtml(entry.durationMs)} ms</span><p>${escapeHtml(entry.detail)}</p>${entry.url ? `<small title="${escapeHtml(entry.url)}">${escapeHtml(entry.url)}</small>` : ''}</div>`).join('') : '<p class="field-help">没有符合条件的日志。</p>';
+  list.innerHTML = logs.length ? logs.map((entry) => `<div class="log-row ${entry.status === 'error' ? 'log-error' : ''}"><strong>${escapeHtml({ monitor: '检查', webhook: '发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接' }[entry.kind] || entry.kind)} · ${escapeHtml(entry.status === 'error' ? '失败' : '成功')}</strong><span>${escapeHtml(new Date(entry.at).toLocaleString('zh-CN'))} · ${escapeHtml(entry.durationMs)} ms</span><p>${escapeHtml(entry.detail)}</p>${entry.url ? `<small title="${escapeHtml(entry.url)}">${escapeHtml(entry.url)}</small>` : ''}</div>`).join('') : '<p class="field-help">没有符合条件的日志。</p>';
   list.scrollTop = scrollTop;
 }
 
@@ -144,7 +145,7 @@ function renderWebhooks() {
 
 function updateSendPriorityVisibility() {
   const selected = new Set(selectedIds($('#send-targets')));
-  $('#send-priority-wrap').classList.toggle('hidden', !activeHooks().some((hook) => selected.has(hook.id) && isNtfyHook(hook)));
+  $('#send-priority-wrap').classList.toggle('hidden', !hasNtfyTarget([...selected]));
 }
 function renderSendTargets(ids) { $('#send-targets').innerHTML = targetOptions(ids); updateSendPriorityVisibility(); }
 $('#send-targets').addEventListener('change', updateSendPriorityVisibility);
@@ -155,6 +156,11 @@ function populateSettings() {
   renderSendTargets();
   $('#ai-base-url').value = appState.settings.aiBaseUrl || 'https://api.openai.com/v1';
   $('#ai-model').value = appState.settings.aiModel || '';
+  $('#ai-key').value = '';
+  $('#clear-ai-key').checked = false;
+  $('#ai-test-result').textContent = '';
+  $('#ai-test-result').className = '';
+  $('#settings-dirty').textContent = '';
 }
 
 function settingsBody() {
@@ -203,10 +209,36 @@ function renderPreview(monitor) {
       ${monitor.kind === 'github' ? `<label>GitHub API 地址<input id="rule-url" type="url" value="${escapeHtml(monitor.url)}"></label>` : ''}
       ${monitor.kind === 'dmit' ? `<label>触发方式<select id="rule-trigger-mode"><option value="restock" ${monitor.triggerMode !== 'any-available' ? 'selected' : ''}>由无货变为有货</option><option value="any-available" ${monitor.triggerMode === 'any-available' ? 'selected' : ''}>任意有货（首次满足即通知）</option></select></label>` : ''}
       ${monitor.kind === 'generated' ? `<label>来源地址<input id="rule-url" type="url" value="${escapeHtml(monitor.url)}"></label><label class="plan-field">本次生成的监控逻辑<textarea id="rule-plan" rows="9" spellcheck="false">${escapeHtml(JSON.stringify(monitor.plan, null, 2))}</textarea></label>` : ''}
-      <div class="priority-field"><span>ntfy 优先级（仅对 ntfy 生效）</span>${priorityPicker('rule-priority', monitor.priority)}</div>
+      <div class="priority-field"><span>ntfy 优先级</span>${priorityPicker('rule-priority', monitor.priority)}</div>
       <label>检查间隔（分钟）<input id="rule-interval" type="number" min="5" max="1440" value="${monitor.intervalMinutes}"></label>
     </div></details>
-    <button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button>`;
+    <div id="preview-result" class="preview-result" aria-live="polite"></div><div class="preview-actions"><button class="button button-outline" id="preview-check-button" type="button">测试来源</button><button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button></div>`;
+  updatePriorityVisibility(element, '#preview-targets');
+}
+
+function updatePriorityVisibility(container, targetsSelector) {
+  const targets = container.querySelector(targetsSelector);
+  const priority = container.querySelector('.priority-field');
+  if (targets && priority) priority.classList.toggle('hidden', !hasNtfyTarget(selectedIds(targets)));
+}
+$('#preview').addEventListener('change', () => updatePriorityVisibility($('#preview'), '#preview-targets'));
+$('#monitor-list').addEventListener('change', (event) => {
+  const editor = event.target.closest('.monitor-route');
+  if (editor) updatePriorityVisibility(editor, '.target-options');
+});
+
+function collectPreviewRule() {
+  const options = $('#preview-targets').querySelectorAll('input[type="checkbox"]');
+  const chosen = options.length ? selectedIds($('#preview-targets')) : null;
+  const webhookIds = chosen ?? activeHooks().map((hook) => hook.id);
+  const rule = { ...previewMonitor, label: $('#rule-label').value.trim(), intervalMinutes: Number($('#rule-interval').value), priority: hasNtfyTarget(webhookIds) ? priorityValue($('#rule-priority')) : null, webhookIds };
+  if ($('#rule-url')) rule.url = $('#rule-url').value.trim();
+  if (rule.kind === 'generated') { try { rule.plan = JSON.parse($('#rule-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
+  if (rule.kind === 'dmit') { rule.triggerMode = $('#rule-trigger-mode').value; rule.description = rule.triggerMode === 'any-available' ? '第三方库存列表中，任意套餐有货时通知；首次检查如有货会立即通知' : '第三方库存列表中，套餐由无货变为有货时通知'; }
+  if (rule.kind === 'json') { rule.jsonPath = $('#rule-json-path').value.trim(); rule.operator = $('#rule-operator').value; rule.expected = $('#rule-expected').value.trim(); rule.description = `${rule.jsonPath} ${$('#rule-operator').selectedOptions[0].textContent} ${rule.expected} 时通知`; }
+  if (rule.kind === 'rss') { rule.keyword = $('#rule-keyword').value.trim(); rule.description = rule.keyword ? `出现标题包含「${rule.keyword}」的新条目时通知` : '出现新条目时通知'; }
+  if (rule.kind === 'webpage') { rule.keyword = $('#rule-keyword').value.trim(); rule.mode = $('#rule-mode').value; rule.description = `页面${rule.mode === 'absent' ? '不再包含' : '出现'}「${rule.keyword}」时通知`; }
+  return rule;
 }
 
 async function withButton(button, work) {
@@ -215,8 +247,16 @@ async function withButton(button, work) {
 }
 
 function showAuth() {
+  setAuthMode('login');
   $('#auth-screen').classList.remove('hidden');
   $('.app-shell').classList.add('auth-hidden');
+  previewMonitor = null;
+  $('#preview').classList.add('hidden');
+  $('#preview').innerHTML = '';
+  for (const selector of ['#ai-key', '#instruction', '#send-title', '#send-message', '#claim-token', '#auth-recovery-code']) $(selector).value = '';
+  $('#ai-test-result').textContent = '';
+  $('#settings-dirty').textContent = '';
+  for (const input of document.querySelectorAll('#email-password, #current-password, #new-password, #rotate-code-password')) input.value = '';
 }
 
 function showWorkspace(state, hasLegacyData = false) {
@@ -224,29 +264,91 @@ function showWorkspace(state, hasLegacyData = false) {
   $('#auth-screen').classList.add('hidden');
   $('.app-shell').classList.remove('auth-hidden');
   $('#account-name').textContent = state.user.username;
+  $('#account-email').value = state.user.email || '';
+  $('#recovery-code-status').textContent = state.user.hasRecoveryCode ? '已设置恢复码。生成新码后，旧码立即失效。' : '这个账号还没有恢复码；请生成并保存。';
   $('#legacy-claim').classList.toggle('hidden', !hasLegacyData);
   populateSettings();
   render(true);
 }
 
 function setAuthMode(mode) {
+  if (authMode !== mode) $('#auth-password').value = '';
   authMode = mode;
   $('#show-login').classList.toggle('active', mode === 'login');
   $('#show-register').classList.toggle('active', mode === 'register');
-  $('#auth-submit').textContent = mode === 'login' ? '登录' : '注册并进入';
+  $('#show-recover').classList.toggle('active', mode === 'recover');
+  $('#auth-submit').textContent = mode === 'login' ? '登录' : mode === 'register' ? '注册并进入' : '设置新密码';
+  $('#auth-password-label').textContent = mode === 'recover' ? '新密码（至少 12 位）' : '密码';
   $('#auth-password').autocomplete = mode === 'login' ? 'current-password' : 'new-password';
   $('#invite-wrap').classList.toggle('hidden', mode !== 'register' || !$('#auth-screen').dataset.signupCodeRequired);
+  $('#auth-email-wrap').classList.toggle('hidden', mode !== 'register');
+  $('#auth-code-wrap').classList.toggle('hidden', mode !== 'recover');
+  $('#auth-email').disabled = mode !== 'register';
+  $('#auth-recovery-code').disabled = mode !== 'recover';
+  $('#auth-recovery-code').required = mode === 'recover';
 }
 
 $('#show-login').addEventListener('click', () => setAuthMode('login'));
 $('#show-register').addEventListener('click', () => setAuthMode('register'));
+$('#show-recover').addEventListener('click', () => setAuthMode('recover'));
+
+function showRecoveryCode(code) {
+  $('#recovery-code-value').textContent = code;
+  $('#recovery-code-screen').classList.remove('hidden');
+  $('#close-recovery-code').focus();
+}
+$('#copy-recovery-code').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText($('#recovery-code-value').textContent); toast('恢复码已复制'); }
+  catch { toast('复制失败，请手动选择恢复码', true); }
+});
+$('#close-recovery-code').addEventListener('click', () => {
+  $('#recovery-code-screen').classList.add('hidden');
+  $('#recovery-code-value').textContent = '';
+});
+
 $('#auth-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#auth-submit'), async () => {
-    const state = await api(`/api/auth/${authMode}`, 'POST', { username: $('#auth-username').value.trim(), password: $('#auth-password').value, inviteCode: $('#auth-invite').value });
-    const status = await api('/api/auth/status');
+    const body = authMode === 'recover'
+      ? { username: $('#auth-username').value.trim(), recoveryCode: $('#auth-recovery-code').value.trim(), newPassword: $('#auth-password').value }
+      : { username: $('#auth-username').value.trim(), password: $('#auth-password').value, email: authMode === 'register' ? $('#auth-email').value.trim() : undefined, inviteCode: $('#auth-invite').value };
+    const state = await api(`/api/auth/${authMode}`, 'POST', body);
     $('#auth-password').value = '';
-    showWorkspace(state, status.hasLegacyData);
+    $('#auth-recovery-code').value = '';
+    const { recoveryCode, ...workspace } = state;
+    showWorkspace(workspace);
+    if (recoveryCode) showRecoveryCode(recoveryCode);
+    api('/api/auth/status').then((status) => $('#legacy-claim').classList.toggle('hidden', !status.hasLegacyData)).catch(() => {});
+  });
+});
+
+$('#email-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  withButton($('#email-form button'), async () => {
+    appState = await api('/api/auth/profile', 'PUT', { email: $('#account-email').value.trim(), password: $('#email-password').value });
+    $('#email-password').value = '';
+    $('#account-email').value = appState.user.email;
+    toast('邮箱资料已保存');
+  });
+});
+
+$('#password-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  withButton($('#password-form button'), async () => {
+    await api('/api/auth/change-password', 'POST', { currentPassword: $('#current-password').value, newPassword: $('#new-password').value });
+    $('#current-password').value = '';
+    $('#new-password').value = '';
+    toast('密码已修改，其他设备需要重新登录');
+  });
+});
+
+$('#rotate-code-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  withButton($('#rotate-code-form button'), async () => {
+    const result = await api('/api/auth/recovery-code/rotate', 'POST', { password: $('#rotate-code-password').value });
+    $('#rotate-code-password').value = '';
+    $('#recovery-code-status').textContent = '已设置恢复码。生成新码后，旧码立即失效。';
+    showRecoveryCode(result.recoveryCode);
   });
 });
 
@@ -314,13 +416,34 @@ $('#settings-form').addEventListener('submit', (event) => {
   withButton($('#save-button'), () => saveSettings());
 });
 
+$('#ai-test-button').addEventListener('click', () => {
+  withButton($('#ai-test-button'), async () => {
+    const result = $('#ai-test-result');
+    result.textContent = '正在连接…';
+    result.className = '';
+    try {
+      const report = await api('/api/ai/test', 'POST', { aiBaseUrl: $('#ai-base-url').value.trim(), aiModel: $('#ai-model').value.trim(), aiKey: $('#ai-key').value.trim() });
+      result.textContent = `连接成功 · ${report.durationMs} ms`;
+      result.className = 'success';
+      api('/api/state').then((state) => { appState = state; render(); }).catch(() => {});
+    } catch (error) {
+      result.textContent = error.message;
+      result.className = 'error';
+      throw error;
+    }
+  });
+});
+for (const selector of ['#ai-base-url', '#ai-model', '#ai-key', '#clear-ai-key']) {
+  $(selector).addEventListener('input', () => { $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; });
+}
+
 $('#send-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#send-button'), async () => {
     await ensureSettings();
     const ids = selectedIds($('#send-targets'));
     if (!ids.length) throw new Error('请至少选择一个接收渠道');
-    const report = await api('/api/send', 'POST', { title: $('#send-title').value, message: $('#send-message').value, webhookIds: ids, priority: priorityValue($('#send-priority')) });
+    const report = await api('/api/send', 'POST', { title: $('#send-title').value, message: $('#send-message').value, webhookIds: ids, priority: hasNtfyTarget(ids) ? priorityValue($('#send-priority')) : null });
     appState = await api('/api/state');
     render(true);
     if (report.failed.length) {
@@ -351,23 +474,27 @@ $('#parse-form').addEventListener('submit', (event) => {
 });
 
 $('#preview').addEventListener('click', (event) => {
+  if (event.target.closest('#preview-check-button')) {
+    withButton($('#preview-check-button'), async () => {
+      const resultBox = $('#preview-result');
+      try {
+        const result = await api('/api/preview-check', 'POST', collectPreviewRule());
+        resultBox.className = 'preview-result success';
+        resultBox.textContent = `来源可读取 · HTTP ${result.status} · ${result.summary}`;
+        appState = await api('/api/state');
+        render();
+      } catch (error) {
+        resultBox.className = 'preview-result error';
+        resultBox.textContent = `来源测试失败：${error.message}`;
+        throw error;
+      }
+    });
+    return;
+  }
   if (!event.target.closest('#create-button')) return;
   withButton($('#create-button'), async () => {
-    const options = $('#preview-targets').querySelectorAll('input[type="checkbox"]');
-    const chosen = options.length ? selectedIds($('#preview-targets')) : null;
     await ensureSettings();
-    const rule = { ...previewMonitor, label: $('#rule-label').value.trim(), intervalMinutes: Number($('#rule-interval').value), priority: priorityValue($('#rule-priority')), webhookIds: chosen ?? activeHooks().map((hook) => hook.id) };
-    if ($('#rule-url')) rule.url = $('#rule-url').value.trim();
-    if (rule.kind === 'generated') { try { rule.plan = JSON.parse($('#rule-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
-    if (rule.kind === 'dmit') { rule.triggerMode = $('#rule-trigger-mode').value; rule.description = rule.triggerMode === 'any-available' ? '第三方库存列表中，任意套餐有货时通知；首次检查如有货会立即通知' : '第三方库存列表中，套餐由无货变为有货时通知'; }
-    if (rule.kind === 'json') { rule.jsonPath = $('#rule-json-path').value.trim(); rule.operator = $('#rule-operator').value; rule.expected = $('#rule-expected').value.trim(); rule.description = `${rule.jsonPath} ${$('#rule-operator').selectedOptions[0].textContent} ${rule.expected} 时通知`; }
-    if (rule.kind === 'rss') { rule.keyword = $('#rule-keyword').value.trim(); rule.description = rule.keyword ? `出现标题包含「${rule.keyword}」的新条目时通知` : '出现新条目时通知'; }
-    if (rule.kind === 'webpage') {
-      rule.url = $('#rule-url').value.trim();
-      rule.keyword = $('#rule-keyword').value.trim();
-      rule.mode = $('#rule-mode').value;
-      rule.description = `页面${rule.mode === 'absent' ? '不再包含' : '出现'}「${rule.keyword}」时通知`;
-    }
+    const rule = collectPreviewRule();
     appState = await api('/api/monitors', 'POST', rule);
     const created = appState.monitors[0];
     previewMonitor = null;
@@ -391,7 +518,7 @@ $('#monitor-list').addEventListener('click', (event) => {
     if (action === 'save-rule') {
       const editor = button.closest('.monitor-route');
       const ids = selectedIds(editor.querySelector('.target-options'));
-      const rule = { label: editor.querySelector('.edit-label').value.trim(), intervalMinutes: Number(editor.querySelector('.edit-interval').value), priority: priorityValue(editor.querySelector('.edit-priority')) };
+      const rule = { label: editor.querySelector('.edit-label').value.trim(), intervalMinutes: Number(editor.querySelector('.edit-interval').value), priority: hasNtfyTarget(ids) ? priorityValue(editor.querySelector('.edit-priority')) : null };
       if (monitor.kind === 'generated') { try { rule.plan = JSON.parse(editor.querySelector('.edit-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
       if (editor.querySelector('.edit-url')) rule.url = editor.querySelector('.edit-url').value.trim();
       if (monitor.kind === 'webpage') {
@@ -432,4 +559,5 @@ async function init() {
   } catch (error) { showAuth(); toast(`无法连接本地服务：${error.message}`, true); }
 }
 $('#send-priority-slot').innerHTML = priorityPicker('send-priority', null, true);
+setAuthMode('login');
 init();

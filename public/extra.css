@@ -40,16 +40,20 @@
 .rule-fields label:has(#rule-url) { grid-column: 1 / -1; }
 .priority-field, .plan-field { grid-column: 1 / -1; }
 .priority-field > span, .hook-priority-line > span { display: block; color: #858a96; font-size: 10px; margin: 9px 0 7px; }
-.priority-picker { display: flex; align-items: stretch; gap: 3px; padding: 4px; border: 1px solid #e8e5f6; border-radius: 10px; background: #f5f3fc; width: 100%; }
-.priority-picker label { flex: 1; min-width: 0; cursor: pointer; position: relative; }
+.priority-picker { display: grid; grid-template-columns: repeat(auto-fit, minmax(68px, 1fr)); gap: 6px; width: 100%; font-family: inherit; }
+.priority-picker label { min-width: 0; cursor: pointer; position: relative; }
 .priority-picker input { position: absolute; opacity: 0; width: 1px; height: 1px; }
-.priority-picker label span { display: block; text-align: center; border-radius: 7px; padding: 8px 3px; color: #8883a0; font-size: 10px; font-weight: 650; white-space: nowrap; transition: background .15s, color .15s, box-shadow .15s; }
+.priority-picker label span { display: block; text-align: center; border: 1px solid #e4e5eb; border-radius: 8px; padding: 8px 5px; background: #fff; color: #636978; font-family: inherit; font-size: 11px; font-weight: 600; line-height: 1.3; white-space: nowrap; transition: background .15s, color .15s, border-color .15s; }
 .priority-picker label:hover span { color: #6558db; }
-.priority-picker input:checked + span { background: #fff; color: #6254d9; box-shadow: 0 1px 5px #46406d24; }
+.priority-picker input:checked + span { background: #f7f5ff; color: #5d50c7; border-color: #b8aff7; }
 .priority-picker input:focus-visible + span { outline: 2px solid #7a6bef; outline-offset: 1px; }
 .hook-priority-line { margin-top: 10px; }
-.hook-priority-line .priority-picker label span { font-size: 9px; padding: 7px 2px; }
+.hook-priority-line .priority-picker label span { padding: 7px 4px; }
 .plan-field textarea { display: block; width: 100%; margin-top: 8px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; line-height: 1.5; }
+.preview-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.preview-result { font-size: 11px; line-height: 1.5; margin: 10px 0; }
+.preview-result.success { color: #2f926f; }
+.preview-result.error { color: #cb625e; }
 .auth-hidden, .hidden { display: none !important; }
 select { font: inherit; width: 100%; border: 1px solid #e6e8ec; background: #fff; border-radius: 10px; padding: 10px 12px; color: #30343d; font-size: 12px; }
 select:focus { outline: none; border-color: #9d92f1; box-shadow: 0 0 0 3px #7162e91d; }
@@ -61,7 +65,20 @@ select:focus { outline: none; border-color: #9d92f1; box-shadow: 0 0 0 3px #7162
 .auth-tabs { display: flex; gap: 10px; border-bottom: 1px solid #e8e8ee; margin: 24px 0; }
 .auth-tabs button { border: 0; background: transparent; color: #8c91a0; padding: 10px 16px; cursor: pointer; }
 .auth-tabs button.active { color: #6558e8; border-bottom: 2px solid #6558e8; font-weight: 700; }
+.auth-tabs button { font: inherit; font-size: 12px; }
 .auth-panel .button { margin-top: 18px; justify-content: center; }
+.recovery-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: #202034a8; }
+.recovery-overlay .auth-panel { width: min(100%, 470px); }
+.recovery-overlay .button { width: 100%; }
+.recovery-code-value { margin: 18px 0 4px; padding: 14px; border: 1px solid #dedbf3; border-radius: 10px; background: #f7f5ff; color: #4f46ac; font: 600 14px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .06em; text-align: center; overflow-wrap: anywhere; user-select: all; }
+.account-detail { border-top: 1px solid #ececf2; padding: 14px 0; }
+.account-detail summary { color: #6258b4; font-size: 11px; font-weight: 700; cursor: pointer; }
+.account-detail .stacked-form { padding-top: 12px; }
+.account-detail .mini-button { margin-top: 12px; }
+.ai-test-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.ai-test-row span { color: #858a96; font-size: 11px; line-height: 1.4; }
+.ai-test-row span.success { color: #2f926f; }
+.ai-test-row span.error { color: #cb625e; }
 .text-button { border: 0; background: transparent; color: #777d8c; cursor: pointer; font-size: 11px; }
 #account-name { margin-left: 12px; color: #5e55b5; font-weight: 700; }
 .legacy-claim { margin-top: 18px; }
