@@ -10,7 +10,7 @@
 curl -fsSL https://raw.githubusercontent.com/godluo666/webhook/main/install.sh | bash
 ```
 
-安装脚本会检查 Docker 和 Compose，然后让 Compose 自动读取公开仓库、在本机首次构建镜像。无需手动下载文件或执行 `git clone`。也可以不运行脚本，直接执行同样的 Compose 命令：
+安装脚本会检查 Docker 和 Compose，先尝试拉取 GHCR 中最新的预构建镜像并更新容器；若镜像不可拉取，就从公开仓库自动构建。无需手动下载文件或执行 `git clone`。**以后升级时重新运行同一条命令即可**，数据卷不会删除。只想从源码构建时，可直接执行：
 
 ```bash
 docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git#main:compose.build.yaml up -d --build --wait --wait-timeout 90
@@ -24,13 +24,13 @@ curl -fsSL https://raw.githubusercontent.com/godluo666/webhook/main/install.sh |
 
 然后打开 `http://服务器IP:3000`。若仍无法连接，请检查服务器防火墙和云平台安全组是否放行 TCP 3000。数据保存在 Docker 命名卷中，重建后仍会保留；更新时再次运行所选的命令即可。对外开放注册时建议设置 `SIGNUP_CODE`。
 
-仓库中的 `compose.yaml` 使用预构建的 GHCR 镜像。镜像包公开后，可改用无需本机编译的单条命令：
+仓库中的 `compose.yaml` 使用预构建的 GHCR 镜像。镜像包公开后，或服务器已经登录 GHCR 时，可以直接用 Compose 拉取并升级：
 
 ```bash
-docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git up -d
+docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git up -d --pull always --wait --wait-timeout 90
 ```
 
-GitHub 仓库公开与 GHCR 镜像包公开是两项独立设置。镜像包仍为私有时，上面这条拉取镜像的命令需要先登录有权限的 GitHub 账户；此时请使用第一条本机构建命令。
+GitHub 仓库公开与 GHCR 镜像包公开是两项独立设置。镜像包仍为私有时，直接拉取镜像需要先登录有权限的 GitHub 账户；一键脚本会自动改用本机构建。升级时沿用原来的 `RADAR_BIND`、`RADAR_PORT` 等环境变量，以保持访问地址不变。
 
 ## 启动
 

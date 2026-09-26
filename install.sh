@@ -16,9 +16,18 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-docker compose -p webhook-radar \
-  -f 'https://github.com/godluo666/webhook.git#main:compose.build.yaml' \
-  up -d --build --wait --wait-timeout 90
+image='ghcr.io/godluo666/webhook:latest'
+if docker pull "$image" >/dev/null 2>&1; then
+  printf '已拉取最新镜像，正在更新容器…\n'
+  docker compose -p webhook-radar \
+    -f 'https://github.com/godluo666/webhook.git' \
+    up -d --wait --wait-timeout 90
+else
+  printf '当前无法拉取 GHCR 镜像，改用公开仓库源码构建…\n'
+  docker compose -p webhook-radar \
+    -f 'https://github.com/godluo666/webhook.git#main:compose.build.yaml' \
+    up -d --build --wait --wait-timeout 90
+fi
 
 if [[ "${RADAR_BIND:-127.0.0.1}" == '127.0.0.1' ]]; then
   printf 'Webhook Radar 已启动。本机访问：http://127.0.0.1:%s\n' "${RADAR_PORT:-3000}"
