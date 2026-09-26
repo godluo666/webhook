@@ -75,20 +75,20 @@ function renderMonitors() {
     const recipients = (monitor.webhookIds || []).map((id) => appState.settings.webhooks.find((hook) => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
     return `<article class="monitor-item">
       <div class="monitor-top"><div><div class="monitor-name">${escapeHtml(monitor.label)}</div><div class="monitor-description">${escapeHtml(monitor.description)}</div></div><span class="monitor-status ${status[1]}">${status[0]}</span></div>
-      <div class="monitor-meta">每 ${monitor.intervalMinutes} 分钟检查 · ${escapeHtml(relativeTime(monitor.lastCheckAt))} · <a href="${escapeHtml(monitor.url)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a></div>
+      <div class="monitor-meta">每 ${monitor.intervalMinutes} 分钟检查 · ${escapeHtml(relativeTime(monitor.lastCheckAt))} · ${/^https?:\/\//.test(monitor.url) ? `<a href="${escapeHtml(monitor.url)}" target="_blank" rel="noopener noreferrer">查看来源 ↗</a>` : `来源：${escapeHtml(monitor.url)}`}</div>
       <div class="monitor-result">接收渠道：${escapeHtml(recipients)}</div>
       ${monitor.lastError ? `<div class="monitor-result monitor-error">${escapeHtml(monitor.lastError)}</div>` : monitor.lastResult ? `<div class="monitor-result">${escapeHtml(monitor.lastResult)}</div>` : ''}
       <details class="monitor-route" data-id="${escapeHtml(monitor.id)}"><summary>编辑任务</summary>
         <div class="rule-fields">
           <label>任务名称<input class="edit-label" type="text" maxlength="60" value="${escapeHtml(monitor.label)}"></label>
-          ${monitor.kind !== 'dmit' ? `<label>监控地址<input class="edit-url" type="url" value="${escapeHtml(monitor.url)}"></label>` : ''}
+          ${monitor.kind !== 'dmit' ? `<label>监控来源<input class="edit-url" type="${monitor.kind === 'generated' ? 'text' : 'url'}" value="${escapeHtml(monitor.url)}"></label>` : ''}
           ${monitor.kind === 'webpage' ? `<label>监控文字<input class="edit-keyword" type="text" maxlength="80" value="${escapeHtml(monitor.keyword)}"></label><label>触发方式<select class="edit-mode"><option value="contains" ${monitor.mode === 'contains' ? 'selected' : ''}>文字出现</option><option value="absent" ${monitor.mode === 'absent' ? 'selected' : ''}>文字消失</option></select></label>` : ''}
           ${monitor.kind === 'dmit' ? `<label>触发方式<select class="edit-trigger-mode"><option value="restock" ${monitor.triggerMode !== 'any-available' ? 'selected' : ''}>由无货变为有货</option><option value="any-available" ${monitor.triggerMode === 'any-available' ? 'selected' : ''}>任意有货（首次满足即通知）</option></select></label>` : ''}
           ${monitor.kind === 'json' ? `<label>JSON 字段路径<input class="edit-json-path" type="text" value="${escapeHtml(monitor.jsonPath)}"></label><label>比较方式<select class="edit-operator">${operatorOptions(monitor.operator)}</select></label><label>比较值<input class="edit-expected" type="text" value="${escapeHtml(monitor.expected)}"></label>` : ''}
           ${monitor.kind === 'rss' ? `<label>标题包含（可选）<input class="edit-keyword" type="text" value="${escapeHtml(monitor.keyword)}"></label>` : ''}
           <div class="priority-field ${hasNtfyTarget(monitor.webhookIds || []) ? '' : 'hidden'}"><span>ntfy 优先级</span>${priorityPicker(`edit-priority-${monitor.id}`, monitor.priority, true, 'edit-priority')}</div>
           ${monitor.kind === 'generated' ? `<label class="plan-field">生成的监控逻辑<textarea class="edit-plan" rows="9" spellcheck="false">${escapeHtml(JSON.stringify(monitor.plan, null, 2))}</textarea></label>` : ''}
-          <label>检查间隔（分钟）<input class="edit-interval" type="number" min="5" max="1440" value="${monitor.intervalMinutes}"></label>
+          <label>检查间隔（分钟）<input class="edit-interval" type="number" min="${monitor.kind === 'generated' && ['service', 'log'].includes(monitor.plan.sourceType) ? 1 : 5}" max="1440" value="${monitor.intervalMinutes}"></label>
         </div>
         <div class="field-label">通知到</div><div class="target-options">${targetOptions(monitor.webhookIds || [])}</div>
         <p class="edit-hint">修改地址或监控文字后会重新建立基线，取消旧的待发送提醒。</p>
@@ -226,9 +226,9 @@ async function ensureSettings() {
 function renderPreview(monitor) {
   const element = $('#preview');
   element.classList.remove('hidden');
-  const planLabels = { compare: '字段条件', changed: '字段变化', any: '任意条目符合', 'item-transition': '逐项状态变化', contains: '文字出现', absent: '文字消失', 'new-item': '新条目' };
+  const planLabels = { compare: '字段条件', changed: '字段变化', any: '任意条目符合', 'item-transition': '逐项状态变化', contains: '文字出现', absent: '文字消失', 'new-item': '新条目', unavailable: '服务不可用', available: '服务恢复', slow: '响应变慢', 'new-line': '新增日志行' };
   element.innerHTML = `<div class="preview-head"><span>✦ &nbsp; 监控规则预览</span><span>AI 本次生成 · 待确认</span></div>
-    <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>来源地址</small><strong>${escapeHtml(monitor.url)}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
+    <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>监控来源</small><strong>${escapeHtml(monitor.url)}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
     <div class="preview-note">${monitor.sourceNote ? `${escapeHtml(monitor.sourceNote)} ` : ''}${monitor.kind === 'generated' ? '这是你本次请求时由 AI 生成的逻辑。请检查来源、筛选条件与首次通知方式；可在下方编辑。' : monitor.kind === 'dmit' && monitor.triggerMode === 'any-available' ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'generated' && monitor.plan.sourceType === 'html' ? ' 网页检查只读取服务端返回的 HTML，不执行页面 JavaScript；建议先点“测试来源”。' : ''}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
     <div class="field-label">通知到</div><div id="preview-targets" class="target-options">${targetOptions()}</div>
     <details class="rule-editor"><summary>调整监控规则</summary><div class="rule-fields">
@@ -238,9 +238,9 @@ function renderPreview(monitor) {
       ${monitor.kind === 'rss' ? `<label>订阅源地址<input id="rule-url" type="url" value="${escapeHtml(monitor.url)}"></label><label>标题包含（可选）<input id="rule-keyword" type="text" value="${escapeHtml(monitor.keyword)}"></label>` : ''}
       ${monitor.kind === 'github' ? `<label>GitHub API 地址<input id="rule-url" type="url" value="${escapeHtml(monitor.url)}"></label>` : ''}
       ${monitor.kind === 'dmit' ? `<label>触发方式<select id="rule-trigger-mode"><option value="restock" ${monitor.triggerMode !== 'any-available' ? 'selected' : ''}>由无货变为有货</option><option value="any-available" ${monitor.triggerMode === 'any-available' ? 'selected' : ''}>任意有货（首次满足即通知）</option></select></label>` : ''}
-      ${monitor.kind === 'generated' ? `<label>来源地址<input id="rule-url" type="url" value="${escapeHtml(monitor.url)}"></label><label class="plan-field">本次生成的监控逻辑<textarea id="rule-plan" rows="9" spellcheck="false">${escapeHtml(JSON.stringify(monitor.plan, null, 2))}</textarea></label>` : ''}
+      ${monitor.kind === 'generated' ? `<label>监控来源<input id="rule-url" type="text" value="${escapeHtml(monitor.url)}"></label><label class="plan-field">本次生成的监控逻辑<textarea id="rule-plan" rows="9" spellcheck="false">${escapeHtml(JSON.stringify(monitor.plan, null, 2))}</textarea></label>` : ''}
       <div class="priority-field"><span>ntfy 优先级</span>${priorityPicker('rule-priority', monitor.priority)}</div>
-      <label>检查间隔（分钟）<input id="rule-interval" type="number" min="5" max="1440" value="${monitor.intervalMinutes}"></label>
+      <label>检查间隔（分钟）<input id="rule-interval" type="number" min="${monitor.kind === 'generated' && ['service', 'log'].includes(monitor.plan.sourceType) ? 1 : 5}" max="1440" value="${monitor.intervalMinutes}"></label>
     </div></details>
     <div id="preview-result" class="preview-result" aria-live="polite"></div><div class="preview-actions"><button class="button button-outline" id="preview-check-button" type="button">测试来源</button><button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button></div>`;
   updatePriorityVisibility(element, '#preview-targets');
@@ -296,6 +296,7 @@ function showWorkspace(state, hasLegacyData = false) {
   $('#auth-screen').classList.add('hidden');
   $('.app-shell').classList.remove('auth-hidden');
   $('#account-name').textContent = state.user.username;
+  $('#local-source-hint').textContent = `日志文件使用账户目录 ${state.user.logDirectory} 内的相对路径；例如 log:app.log。`;
   $('#account-email').value = state.user.email || '';
   $('#recovery-code-status').textContent = state.user.hasRecoveryCode ? '已设置恢复码。生成新码后，旧码立即失效。' : '这个账号还没有恢复码；请生成并保存。';
   $('#legacy-claim').classList.toggle('hidden', !hasLegacyData);
@@ -526,8 +527,8 @@ $('#preview').addEventListener('click', (event) => {
       const resultBox = $('#preview-result');
       try {
         const result = await api('/api/preview-check', 'POST', collectPreviewRule());
-        resultBox.className = 'preview-result success';
-        resultBox.textContent = `来源可读取 · HTTP ${result.status} · ${result.summary}`;
+        resultBox.className = `preview-result ${result.healthy === false ? 'error' : 'success'}`;
+        resultBox.textContent = `来源检查完成 · ${result.status ? `HTTP ${result.status} · ` : ''}${result.summary}`;
         appState = await api('/api/state');
         render();
       } catch (error) {

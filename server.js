@@ -5,11 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DMIT_PRICING_URL, DMIT_STOCK_URL, inspectPage, isTransition, restockedItems } from './lib/monitor.js';
 import { validateGeneratedPlan, inspectGenerated, transitionGenerated, describeGeneratedPlan } from './lib/generated.js';
+import { validateLocalSource, inspectLog, inspectService, userLogDirectory } from './lib/sources.js';
 import { WEBHOOK_FORMATS, createWebhookPayload, assertWebhookAccepted } from './lib/webhook.js';
 import { createStore } from './lib/store.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
+const logRoot = process.env.MONITOR_LOG_ROOT ? path.resolve(process.env.MONITOR_LOG_ROOT) : path.join(dataDir, 'monitor-logs');
 const store = createStore(dataDir);
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
@@ -19,7 +21,12 @@ if ((process.env.HTTP_PROXY || process.env.HTTPS_PROXY) && typeof http.setGlobal
 }
 
 const persist = () => store.persist();
-const publicState = (user) => store.publicWorkspace(user);
+const publicState = (user) => {
+  const state = store.publicWorkspace(user);
+  state.user.logDirectory = userLogDirectory(logRoot, user);
+  if (!process.env.MONITOR_LOG_ROOT) fs.mkdirSync(state.user.logDirectory, { recursive: true });
+  return state;
+};
 
 function addEvent(user, type, title, detail, monitorId = null) {
   user.events.unshift({ id: randomUUID(), type, title, detail, monitorId, at: new Date().toISOString() });
@@ -40,6 +47,16 @@ function urlOf(value, label) {
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error(`${label}仅支持无账号信息的 HTTP 或 HTTPS 地址`);
   if (parsed.href.length > 2000) throw new Error(`${label}过长`);
   return parsed.href;
+}
+
+function sourceOf(value, sourceType = '') {
+  const raw = String(value || '').trim();
+  if (sourceType === 'log' || raw.startsWith('log:') || !raw.includes('://') && /\.log$/i.test(raw)) return validateLocalSource('log', raw);
+  if (sourceType === 'service' || raw.toLowerCase().startsWith('tcp://')) {
+    const local = validateLocalSource('service', raw);
+    if (local) return local;
+  }
+  return urlOf(raw, '监控来源');
 }
 
 function validateWebhooks(value) {
@@ -72,15 +89,18 @@ function selectedWebhookIds(user, ids) {
 
 function validateMonitor(candidate) {
   if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated'].includes(candidate.kind)) throw new Error('无法识别监控类型');
-  const intervalMinutes = Math.max(5, Math.min(1440, Number(candidate.intervalMinutes) || 10));
+  const minInterval = candidate.kind === 'generated' && ['service', 'log'].includes(candidate.plan?.sourceType) ? 1 : 5;
+  const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 10));
   const label = String(candidate.label || '未命名监控').trim().slice(0, 60);
   const description = String(candidate.description || '').trim().slice(0, 180);
   if (candidate.kind === 'dmit') return { kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
-  const url = urlOf(candidate.url, '监控地址');
   if (candidate.kind === 'generated') {
     const plan = validateGeneratedPlan(candidate.plan);
+    const url = sourceOf(candidate.url, plan.sourceType);
+    if (plan.sourceType === 'log' && !url.startsWith('log:') || plan.sourceType === 'service' && !url.startsWith('tcp://') && !/^https?:\/\//.test(url) || !['log', 'service'].includes(plan.sourceType) && !/^https?:\/\//.test(url)) throw new Error('来源与监控规则类型不匹配');
     return { kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, plan };
   }
+  const url = urlOf(candidate.url, '监控地址');
   if (candidate.kind === 'dmit-product') {
     const parsed = new URL(url);
     if (!/(^|\.)dmit\.io$/i.test(parsed.hostname) || !/^\/(cart|aff)\.php$/i.test(parsed.pathname)) throw new Error('DMIT 套餐监控需要官方购买链接');
@@ -187,10 +207,18 @@ async function checkMonitor(user, monitor) {
   let responseSample = '';
   try {
     await flushPending(user, monitor);
-    const expectsJson = ['dmit', 'json', 'github'].includes(monitor.kind) || monitor.kind === 'generated' && monitor.plan.sourceType === 'json';
-    const html = await fetchText(monitor.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { responseStatus = code; } });
-    responseSample = html.slice(0, 4000);
-    const current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
+    let current;
+    if (monitor.kind === 'generated' && monitor.plan.sourceType === 'service') {
+      current = await inspectService(monitor.url, monitor.plan);
+      responseStatus = current.httpStatus;
+    } else if (monitor.kind === 'generated' && monitor.plan.sourceType === 'log') {
+      current = inspectLog(logRoot, user, monitor, monitor.snapshot);
+    } else {
+      const expectsJson = ['dmit', 'json', 'github'].includes(monitor.kind) || monitor.kind === 'generated' && monitor.plan.sourceType === 'json';
+      const html = await fetchText(monitor.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { responseStatus = code; } });
+      responseSample = html.slice(0, 4000);
+      current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
+    }
     const triggered = monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
     if (triggered) {
       if (!monitor.webhookIds.length) {
@@ -219,7 +247,7 @@ async function checkMonitor(user, monitor) {
     monitor.snapshot = current;
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastResult = current.summary;
-    addLog(user, 'monitor', 'success', `${monitor.label} · HTTP ${responseStatus} · ${current.summary}`, monitor.url, Date.now() - started, monitor.id);
+    addLog(user, 'monitor', 'success', `${monitor.label} · ${responseStatus ? `HTTP ${responseStatus} · ` : ''}${current.summary}`, monitor.url, Date.now() - started, monitor.id);
     const hasActiveRecipient = monitor.webhookIds.some((id) => user.settings.webhooks.some((hook) => hook.id === id && hook.enabled));
     monitor.lastError = monitor.pendingNotifications.length ? '有通知待发送，将在下次检查时重试' : hasActiveRecipient ? '' : '接收渠道均已停用，请启用至少一个渠道';
     if (!monitor.baselined) {
@@ -248,7 +276,7 @@ function aiEndpoint(baseUrl) {
 }
 
 function instructionUrl(input) {
-  return input.match(/https?:\/\/[^\s<>"'“”‘’，。；、（）()]+/i)?.[0] || '';
+  return input.match(/tcp:\/\/(?:\[[^\]]+\]|[a-z0-9.-]+):\d{1,5}/i)?.[0] || input.match(/https?:\/\/[^\s<>"'“”‘’，。；、（）()]+/i)?.[0] || input.match(/\blog:[a-z0-9._/-]+/i)?.[0] || '';
 }
 
 async function parseInstruction(user, instruction, sourceUrlInput, trace) {
@@ -256,13 +284,13 @@ async function parseInstruction(user, instruction, sourceUrlInput, trace) {
   trace.instruction = input;
   if (!input || input.length > 2000) throw new Error('指令长度需要在 1 到 2000 字之间');
   const explicitSourceUrl = String(sourceUrlInput || '').trim();
-  const sourceUrl = explicitSourceUrl ? urlOf(explicitSourceUrl, '单独填写的来源地址') : instructionUrl(input);
+  const sourceUrl = explicitSourceUrl ? sourceOf(explicitSourceUrl) : instructionUrl(input);
   trace.sourceUrl = sourceUrl;
   trace.sourceMode = explicitSourceUrl ? '单独填写' : sourceUrl ? '从指令提取' : '未提供';
   if (!user.settings.aiKey) throw new Error('按需生成监控逻辑需要先在设置中填写 AI API Key');
   if (!user.settings.aiModel) throw new Error('请先填写 AI 模型名称');
   const dmit = /\bdmit\b/i.test(input);
-  if (!sourceUrl && !dmit) throw new Error('请在指令中附上监控来源地址；当前无法自行搜索来源');
+  if (!sourceUrl && !dmit) throw new Error('请填写来源：HTTP 地址、tcp://主机:端口或账户日志文件 log:文件名');
   const endpoint = aiEndpoint(user.settings.aiBaseUrl || 'https://api.openai.com/v1');
   trace.model = user.settings.aiModel;
   trace.apiEndpoint = new URL(endpoint).origin + new URL(endpoint).pathname;
@@ -271,6 +299,7 @@ async function parseInstruction(user, instruction, sourceUrlInput, trace) {
       messages: [
         { role: 'system', content: `你是监控逻辑编译器。根据用户本次指令，生成一条可执行的声明式监控程序，仅输出 JSON，不要 Markdown。顶层字段：url,label,intervalMinutes,plan。plan 必填 sourceType=json/html/rss，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；信息不足时返回 {"error":"请补充来源地址或触发条件"}。` },
         { role: 'system', content: '如果使用 DMIT 第三方库存来源，plan.path 必须为 products；filters 必须包括 provider equals "dmit"、stale equals 0、last_check_at withinMinutes 120。任意有货模式还必须筛选 status in ["有货","available","in stock"]；补货模式使用 item-transition，idPath=product_key、statePath=status、fromValues=["无货","缺货","out of stock"]、toValues=["有货","available","in stock"]，且不要在 filters 中筛选 status。' },
+        { role: 'system', content: '来源类型除上文 json/html/rss 外，还支持 service/log。HTTP 服务或 TCP 端口的可用性使用 plan.sourceType="service"，mode="unavailable"（故障时）、"available"（恢复可用时）或 "slow"（响应时间超过 thresholdMs 毫秒）；url 使用 http(s):// 或 tcp://主机:端口。本地日志使用 plan.sourceType="log"，mode="new-line"，keyword 为新日志行要包含的文字，可选 caseSensitive；url 使用 log:相对路径，例如 log:app.log。日志默认 initial="baseline"，只检查创建后新增的行；用户明确要求现有日志也触发才用 initial="notify"。服务和日志 intervalMinutes 可为 1 到 1440。不得输出脚本、命令或未获用户提供的文件路径。' },
         { role: 'system', content: explicitSourceUrl ? `用户已单独填写监控来源地址：${sourceUrl}。输出的 url 必须与此地址完全一致。` : '上文要求使用用户提供的 URL，指真实网址部分。如果网址后紧贴中文指令文字，辨别网址和自然语言的边界；不要把“存在”“包含”“通知”等句子当作网址路径。' },
         { role: 'user', content: input }
       ]
@@ -291,12 +320,12 @@ async function parseInstruction(user, instruction, sourceUrlInput, trace) {
   } catch { throw new Error('AI 返回内容无法解析，请调整模型或指令'); }
   if (parsed.error) throw new Error(String(parsed.error));
   const expectedUrl = sourceUrl || DMIT_STOCK_URL;
-  const allowedUrls = [urlOf(expectedUrl, '指令中的地址')];
+  const allowedUrls = [sourceOf(expectedUrl)];
   const github = sourceUrl?.match(/^https?:\/\/github\.com\/([^/]+)\/([^/?#]+)/i);
   if (github) allowedUrls.push(`https://api.github.com/repos/${github[1]}/${github[2]}/releases/latest`);
-  const returnedUrl = urlOf(parsed.url, 'AI 返回的地址');
+  const returnedUrl = sourceOf(parsed.url, parsed.plan?.sourceType);
   trace.aiReturnedUrl = returnedUrl;
-  if (!explicitSourceUrl && sourceUrl && returnedUrl === allowedUrls[0]) {
+  if (!explicitSourceUrl && sourceUrl?.startsWith('http') && returnedUrl === allowedUrls[0]) {
     let decodedPath = '';
     try { decodedPath = decodeURIComponent(new URL(returnedUrl).pathname); } catch { /* validation below still applies */ }
     const followingText = input.slice(input.indexOf(sourceUrl) + sourceUrl.length).trimStart();
@@ -307,7 +336,7 @@ async function parseInstruction(user, instruction, sourceUrlInput, trace) {
   let sourceNote = '';
   if (!allowedUrls.includes(returnedUrl)) {
     let suffix = '';
-    if (!explicitSourceUrl && sourceUrl && allowedUrls[0].startsWith(returnedUrl)) {
+    if (!explicitSourceUrl && sourceUrl?.startsWith('http') && allowedUrls[0].startsWith(returnedUrl)) {
       try { suffix = decodeURIComponent(allowedUrls[0].slice(returnedUrl.length)); } catch { /* keep strict validation */ }
     }
     if (!/^[\p{Script=Han}]/u.test(suffix) || !/(?:存在|包含|出现|通知|这两个字|关键词|监控|检测)/.test(suffix)) throw new Error('AI 返回的监控地址与指令不一致；请把来源地址单独填写');
@@ -486,12 +515,19 @@ async function handler(request, response) {
         let status;
         let responseSample = '';
         try {
-          const expectsJson = ['dmit', 'json', 'github'].includes(spec.kind) || spec.kind === 'generated' && spec.plan.sourceType === 'json';
-          const body = await fetchText(spec.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { status = code; } });
-          responseSample = body.slice(0, 4000);
-          const result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
-          addLog(user, 'preview', 'success', `来源测试 · HTTP ${status} · ${result.summary}`, spec.url, Date.now() - started);
-          return sendJson(response, 200, { status, summary: result.summary });
+          let result;
+          if (spec.kind === 'generated' && spec.plan.sourceType === 'service') {
+            result = await inspectService(spec.url, spec.plan);
+            status = result.httpStatus;
+          } else if (spec.kind === 'generated' && spec.plan.sourceType === 'log') result = inspectLog(logRoot, user, spec, null, true);
+          else {
+            const expectsJson = ['dmit', 'json', 'github'].includes(spec.kind) || spec.kind === 'generated' && spec.plan.sourceType === 'json';
+            const body = await fetchText(spec.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { status = code; } });
+            responseSample = body.slice(0, 4000);
+            result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
+          }
+          addLog(user, 'preview', 'success', `来源测试 · ${status ? `HTTP ${status} · ` : ''}${result.summary}`, spec.url, Date.now() - started);
+          return sendJson(response, 200, { status: status || null, healthy: result.healthy, summary: result.summary });
         } catch (error) {
           addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started, null, {
             requestUrl: spec.url, httpStatus: error.responseStatus || status || null,

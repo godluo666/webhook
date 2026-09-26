@@ -80,6 +80,7 @@ select:focus { outline: none; border-color: #9d92f1; box-shadow: 0 0 0 3px #7162
 .ai-test-row span.success { color: #2f926f; }
 .ai-test-row span.error { color: #cb625e; }
 .optional-input { color: #a3a8b2; font-size: 10px; font-weight: 500; }
+#local-source-hint { overflow-wrap: anywhere; }
 .saved-key { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 9px; }
 .saved-key > span { color: #777d8c; font-size: 10px; overflow-wrap: anywhere; }
 .saved-key .mini-button { flex: none; }

@@ -39,11 +39,11 @@
           <div class="primary-column">
             <section id="create" class="card compose-card">
               <div class="section-top"><div class="section-icon purple">✦</div><span class="tag">智能监控</span></div>
-              <h2>描述你想关注的事</h2><p class="section-subtitle">支持网页文字、JSON API 字段、RSS/Atom 更新和 GitHub Release。先预览规则，确认后开始运行。</p>
+              <h2>描述你想关注的事</h2><p class="section-subtitle">可监控 HTTP 接口、网页、TCP 服务、账户日志文件与订阅更新。先预览规则，确认后开始运行。</p>
               <form id="parse-form">
                 <label for="instruction" class="field-label">你的指令</label>
-                <textarea id="instruction" rows="4" placeholder="写明来源地址与触发条件，例如 API 字段 status 等于 available 时通知"></textarea>
-                <label for="instruction-url" class="field-label">监控来源地址 <span class="optional-input">建议单独填写，避免和指令文字混在一起</span></label><input id="instruction-url" type="url" placeholder="https://example.com/page" autocomplete="url">
+                <textarea id="instruction" rows="4" placeholder="描述要检查的内容和通知条件；可写接口字段、服务可用性或新增日志文字"></textarea>
+                <label for="instruction-url" class="field-label">监控来源 <span class="optional-input">与指令分开填写更清楚</span></label><input id="instruction-url" type="text" placeholder="https://example.com/health、tcp://127.0.0.1:3000 或 log:app.log" autocomplete="off"><p id="local-source-hint" class="field-help"></p>
                 <div class="composer-bottom"><span id="ai-status">点击后才调用你配置的 AI API，生成这条任务的监控逻辑</span><button class="button button-primary" type="submit" id="parse-button"><span>生成监控规则</span><span>↗</span></button></div>
               </form>
               <div id="preview" class="preview hidden" aria-live="polite"></div>
