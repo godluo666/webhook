@@ -1,7 +1,7 @@
 services:
   webhook-radar:
     build:
-      context: .
+      context: https://github.com/godluo666/webhook.git#main
       args:
         SOURCE_URL: https://github.com/godluo666/webhook
     image: webhook-radar:local

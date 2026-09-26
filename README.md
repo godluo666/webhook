@@ -10,7 +10,7 @@
 curl -fsSL https://raw.githubusercontent.com/godluo666/webhook/main/install.sh | bash
 ```
 
-安装脚本会检查 Docker 和 Compose，先尝试拉取 GHCR 中最新的预构建镜像并更新容器；若镜像不可拉取，就从公开仓库自动构建。无需手动下载文件或执行 `git clone`。**以后升级时重新运行同一条命令即可**，数据卷不会删除。只想从源码构建时，可直接执行：
+安装脚本会检查 Docker 和 Compose，先尝试拉取 GHCR 中最新的预构建镜像并更新容器；若镜像不可拉取，就从公开仓库自动构建。脚本会临时取得 Compose 配置并在结束时删除，不会遇到远程 Compose 配置的交互确认；无需手动下载文件或执行 `git clone`。**以后升级时重新运行同一条命令即可**，数据卷不会删除。只想从源码构建时，可直接执行：
 
 ```bash
 docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git#main:compose.build.yaml up -d --build --wait --wait-timeout 90

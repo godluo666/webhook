@@ -17,15 +17,20 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 image='ghcr.io/godluo666/webhook:latest'
+compose_file="$(mktemp)"
+trap 'rm -f "$compose_file"' EXIT
+
 if docker pull "$image" >/dev/null 2>&1; then
   printf '已拉取最新镜像，正在更新容器…\n'
+  curl -fsSL 'https://raw.githubusercontent.com/godluo666/webhook/main/compose.yaml' -o "$compose_file"
   docker compose -p webhook-radar \
-    -f 'https://github.com/godluo666/webhook.git' \
+    -f "$compose_file" \
     up -d --wait --wait-timeout 90
 else
   printf '当前无法拉取 GHCR 镜像，改用公开仓库源码构建…\n'
+  curl -fsSL 'https://raw.githubusercontent.com/godluo666/webhook/main/compose.build.yaml' -o "$compose_file"
   docker compose -p webhook-radar \
-    -f 'https://github.com/godluo666/webhook.git#main:compose.build.yaml' \
+    -f "$compose_file" \
     up -d --build --wait --wait-timeout 90
 fi
 
