@@ -13,10 +13,16 @@ curl -fsSL https://raw.githubusercontent.com/godluo666/webhook/main/install.sh |
 安装脚本会检查 Docker 和 Compose，然后让 Compose 自动读取公开仓库、在本机首次构建镜像。无需手动下载文件或执行 `git clone`。也可以不运行脚本，直接执行同样的 Compose 命令：
 
 ```bash
-docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git#main:compose.build.yaml up -d --build
+docker compose -p webhook-radar -f https://github.com/godluo666/webhook.git#main:compose.build.yaml up -d --build --wait --wait-timeout 90
 ```
 
-打开 <http://127.0.0.1:3000> 注册账户。数据保存在 Docker 命名卷中，容器更新后仍会保留。更新时再次运行同一命令即可。默认仅本机可访问；要供其他设备访问，可调整端口绑定及反向代理。
+默认仅服务器本机可打开 <http://127.0.0.1:3000>。需要从其他设备访问时，明确开放 3000 端口并重建容器：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/godluo666/webhook/main/install.sh | env RADAR_BIND=0.0.0.0 bash
+```
+
+然后打开 `http://服务器IP:3000`。若仍无法连接，请检查服务器防火墙和云平台安全组是否放行 TCP 3000。数据保存在 Docker 命名卷中，重建后仍会保留；更新时再次运行所选的命令即可。对外开放注册时建议设置 `SIGNUP_CODE`。
 
 仓库中的 `compose.yaml` 使用预构建的 GHCR 镜像。镜像包公开后，可改用无需本机编译的单条命令：
 
@@ -100,7 +106,7 @@ AI 为本次指令生成一份声明式监控逻辑，包含来源、取值路�
 docker compose up -d
 ```
 
-默认只发布到宿主机的 `127.0.0.1:3000`，数据保存在 Compose 命名卷 `radar_data`。可复制 `.env.example` 为 `.env` 来设置端口、注册邀请码、邮件服务和数据位置。如需复用当前项目的 `.data/state.json`，设置 `RADAR_DATA_VOLUME=./.data` 后再运行 Compose。Compose 以非 root 用户运行应用，只读挂载容器根文件系统，并将数据目录挂载为可写卷。
+默认只发布到宿主机的 `127.0.0.1:3000`，数据保存在 Compose 命名卷 `radar_data`。可复制 `.env.example` 为 `.env` 来设置监听地址、端口、注册邀请码、邮件服务和数据位置；需要从其他设备访问时将 `RADAR_BIND` 设置为 `0.0.0.0`。如需复用当前项目的 `.data/state.json`，设置 `RADAR_DATA_VOLUME=./.data` 后再运行 Compose。Compose 以非 root 用户运行应用，只读挂载容器根文件系统，并将数据目录挂载为可写卷。
 
 要监控宿主机 HTTP/TCP 服务，可将来源写成 `http://host.docker.internal:端口/health` 或 `tcp://host.docker.internal:端口`。Compose 已添加宿主机网关映射；目标服务也必须监听容器可访问的地址。容器内的 `127.0.0.1` 只能访问容器自身。
 

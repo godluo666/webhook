@@ -18,6 +18,12 @@ fi
 
 docker compose -p webhook-radar \
   -f 'https://github.com/godluo666/webhook.git#main:compose.build.yaml' \
-  up -d --build
+  up -d --build --wait --wait-timeout 90
 
-printf 'Webhook Radar 已启动：http://127.0.0.1:3000\n'
+if [[ "${RADAR_BIND:-127.0.0.1}" == '127.0.0.1' ]]; then
+  printf 'Webhook Radar 已启动。本机访问：http://127.0.0.1:%s\n' "${RADAR_PORT:-3000}"
+  printf '其他设备需要使用 RADAR_BIND=0.0.0.0 显式开放端口。\n'
+else
+  printf 'Webhook Radar 已启动。请访问 http://服务器IP:%s\n' "${RADAR_PORT:-3000}"
+  printf '如果仍无法访问，请检查服务器或云平台是否放行该 TCP 端口。\n'
+fi

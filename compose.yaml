@@ -11,7 +11,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "127.0.0.1:${RADAR_PORT:-3000}:3000"
+      - "${RADAR_BIND:-127.0.0.1}:${RADAR_PORT:-3000}:3000"
     environment:
       HOST: 0.0.0.0
       PORT: "3000"
