@@ -201,3 +201,73 @@ footer { color: #a1a7b0; padding: 18px 0; }
   .stat-card:last-child { border-bottom: 0; }
 }
 .assistant-context-note { margin: 11px 2px 0; color: #8d949e; font-size: 12px; line-height: 1.6; }
+
+/* Each sidebar destination owns the content area. */
+.overview-page, .workspace-section { display: none !important; }
+.app-shell[data-view="top"] #overview,
+.app-shell[data-view="create"] #create,
+.app-shell[data-view="monitors"] #monitors,
+.app-shell[data-view="notifications"] #notifications,
+.app-shell[data-view="channels"] #settings,
+.app-shell[data-view="ai-settings"] #settings,
+.app-shell[data-view="activity"] #activity,
+.app-shell[data-view="account"] #account { display: block !important; }
+.app-shell[data-view="channels"] #ai-settings,
+.app-shell[data-view="channels"] .settings-actions,
+.app-shell[data-view="ai-settings"] #channels { display: none !important; }
+.page-inner { min-height: calc(100vh - 62px); }
+.overview-page { max-width: 1080px; margin: 0 auto; }
+.overview-page .page-heading { margin-bottom: 48px; }
+.overview-page .status-grid { margin-bottom: 70px; }
+.overview-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid #e8eaed; border-bottom: 1px solid #e8eaed; }
+.overview-actions a { display: flex; flex-direction: column; gap: 11px; min-width: 0; padding: 30px 28px; transition: background 150ms ease; }
+.overview-actions a:first-child { padding-left: 0; border-right: 1px solid #e8eaed; }
+.overview-actions a:hover { background: #f4f5f6; }
+.overview-actions a > span { color: #8c939d; font-size: 11px; }
+.overview-actions strong { color: #282d35; font-size: 16px; font-weight: 620; }
+.overview-actions strong span { margin-left: 5px; color: #8f96a0; }
+.overview-actions small, .overview-note { color: #858d98; font-size: 12px; line-height: 1.6; }
+.overview-note { margin-top: 26px; }
+.nav-divider { height: 1px; margin: 14px 10px; background: #ebecef; }
+.workspace-flow { min-height: 0; }
+.workspace-section, .workspace-section:last-of-type {
+  margin-top: 12px; margin-bottom: 0; padding: 0; border: 0; background: transparent;
+}
+.workspace-section h2, .compose-card .card-title-row h2, .section-heading h2 { font-size: 28px; line-height: 1.3; letter-spacing: -.6px; }
+.workspace-section .section-subtitle { margin-top: 13px; }
+#parse-form { margin-top: 32px; }
+#send-form { margin-top: 40px; }
+#monitor-list, #activity-list { margin-top: 36px; }
+.settings-layout { display: block; margin-top: 42px; }
+.settings-content { max-width: 900px; }
+.settings-group { margin: 0; padding: 0; border: 0; }
+.settings-group-head { margin-bottom: 30px; }
+.settings-group-head h3, .ai-settings-heading h3 { font-size: 16px; }
+#ai-settings { max-width: 680px; }
+#ai-settings .field-label { margin-top: 24px; }
+.settings-actions { margin-top: 34px; }
+.account-detail:first-of-type { margin-top: 36px; }
+footer { max-width: 1080px; margin-top: 75px; }
+@media (max-width: 780px) {
+  .sidebar, .sidebar-collapsed .sidebar { gap: 10px; }
+  .side-nav { flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .side-nav::-webkit-scrollbar { display: none; }
+  .side-nav .nav-link { flex: none; }
+  .nav-divider { flex: none; width: 1px; height: 20px; margin: 0 7px; }
+  .page-inner { min-height: calc(100vh - 104px); }
+}
+@media (max-width: 620px) {
+  .overview-actions { grid-template-columns: 1fr; }
+  .overview-actions a, .overview-actions a:first-child { padding: 22px 0; border-right: 0; }
+  .overview-actions a:first-child { border-bottom: 1px solid #e8eaed; }
+  .overview-page .status-grid { margin-bottom: 44px; }
+  .workspace-section h2, .compose-card .card-title-row h2, .section-heading h2 { font-size: 26px; }
+  .settings-layout { margin-top: 28px; }
+}
+@media (max-width: 780px) {
+  .side-nav { justify-content: flex-start; scrollbar-width: thin; }
+  .side-nav::-webkit-scrollbar { display: block; height: 3px; }
+  .side-nav::-webkit-scrollbar-thumb { background: #d9dde2; border-radius: 3px; }
+  .side-nav .nav-link, .sidebar-collapsed .side-nav .nav-link { gap: 7px; padding: 8px 11px; font-size: 12px; }
+  .side-nav .nav-text, .sidebar-collapsed .side-nav .nav-text { display: inline; }
+}

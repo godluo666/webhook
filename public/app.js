@@ -41,11 +41,25 @@ let savedSidebarVisibility = 'visible';
 try { savedSidebarVisibility = localStorage.getItem('webhook-radar-sidebar-visibility') || 'visible'; } catch { /* keep navigation visible */ }
 setSidebarVisible(savedSidebarVisibility !== 'hidden');
 sidebarVisibility.addEventListener('click', () => setSidebarVisible(sidebarShell.classList.contains('sidebar-hidden'), true));
-function syncNavigation() {
-  const target = location.hash || '#top';
-  document.querySelectorAll('.side-nav .nav-link').forEach((link) => link.classList.toggle('active', link.getAttribute('href') === target));
+const pageNames = { top: '概览', create: '智能创建', monitors: '任务与提醒', notifications: '快速发送', channels: '通知渠道', 'ai-settings': 'AI 设置', activity: '活动与日志', account: '账户安全' };
+function syncNavigation(resetScroll = false) {
+  const requested = (location.hash || '#top').slice(1);
+  const view = requested === 'settings' ? 'ai-settings' : requested in pageNames ? requested : 'top';
+  sidebarShell.dataset.view = view;
+  const current = view === 'top' ? '#top' : '#' + view;
+  document.querySelectorAll('.side-nav .nav-link').forEach((link) => {
+    const active = link.getAttribute('href') === current;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+  $('#current-page-label').textContent = pageNames[view];
+  $('#settings-page-title').textContent = view === 'ai-settings' ? 'AI 设置' : '通知渠道';
+  $('#settings-page-subtitle').textContent = view === 'ai-settings' ? '配置生成规则所用的模型与 API。' : '管理 Webhook 接收地址与发送方式。';
+  document.title = pageNames[view] + ' · Webhook Radar';
+  if (resetScroll) requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'instant' }));
 }
-window.addEventListener('hashchange', syncNavigation);
+window.addEventListener('hashchange', () => syncNavigation(true));
 syncNavigation();
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
@@ -81,7 +95,7 @@ async function api(path, method = 'GET', body) {
 }
 
 function targetOptions(ids, emptyText = '请先添加并保存一个启用的 Webhook 地址。') {
-  if (!activeHooks().length) return `<div class="target-empty">${emptyText} <a href="#settings">前往设置 ↗</a></div>`;
+  if (!activeHooks().length) return `<div class="target-empty">${emptyText} <a href="#channels">前往通知渠道 ↗</a></div>`;
   const chosen = ids == null ? new Set(activeHooks().map((hook) => hook.id)) : new Set(ids);
   return activeHooks().map((hook) => `<label class="target-option"><input type="checkbox" value="${escapeHtml(hook.id)}" ${chosen.has(hook.id) ? 'checked' : ''}><span>${escapeHtml(hook.name)}</span></label>`).join('');
 }
@@ -296,7 +310,7 @@ async function ensureSettings() {
     targets.innerHTML = targetOptions(retained?.length ? retained : undefined);
     updatePriorityVisibility($('#preview'), '#preview-targets');
   }
-  if (!activeHooks().length) throw new Error('请先添加并启用一个 Webhook 地址');
+  if (!activeHooks().length) { location.hash = '#channels'; throw new Error('请先添加并启用一个 Webhook 地址'); }
 }
 
 function assistantPhase(status) {
@@ -331,7 +345,7 @@ function resetAssistant(instruction = '') {
 
 async function prepareAiSettings() {
   if ((!appState.settings.hasAiKey && !$('#ai-key').value.trim()) || !$('#ai-model').value.trim()) {
-    $('#ai-settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    location.hash = '#ai-settings';
     throw new Error('请先在 AI 生成设置中填写模型和 API Key');
   }
   if ($('#settings-dirty').textContent || $('#ai-key').value || $('#ai-model').value !== appState.settings.aiModel || $('#ai-base-url').value !== appState.settings.aiBaseUrl) await saveSettings(true);
@@ -681,7 +695,8 @@ $('#settings-form').addEventListener('change', () => { $('#settings-dirty').text
 
 $('#settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  withButton($('#save-button'), () => saveSettings());
+  const button = sidebarShell.dataset.view === 'channels' ? $('.settings-save-inline') : $('#save-button');
+  withButton(button, () => saveSettings());
 });
 
 $('#ai-test-button').addEventListener('click', () => {
@@ -800,7 +815,7 @@ $('#preview').addEventListener('click', (event) => {
       $('#preview-result').className = 'preview-result error';
       $('#preview-result').textContent = error.message;
       addAssistantMessage('assistant', `规则已准备好，但设置需要处理：${error.message}。请检查通知渠道后再确认。`);
-      $('#settings').scrollIntoView({ behavior: 'smooth', block: 'center' });
+      location.hash = '#channels';
       return;
     }
     const rule = collectPreviewRule();
@@ -815,7 +830,7 @@ $('#preview').addEventListener('click', (event) => {
     $('#instruction-url').value = '';
     render(true);
     toast(created.kind === 'reminder' ? '提醒已创建，等待发送时间' : created.lastError ? '监控已创建，首次检查失败：' + created.lastError : '监控已创建，首次检查已完成', Boolean(created.lastError));
-    $('#monitor-list').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    location.hash = '#monitors';
   });
 });
 
