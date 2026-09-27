@@ -4,6 +4,8 @@ let previewMonitor = null;
 let assistantInstruction = '';
 let assistantConversation = [];
 let assistantMessages = [];
+let draftHooks = [];
+let editingHookDraft = null;
 let toastTimer;
 let authMode = 'login';
 let emailVerificationEnabled = false;
@@ -21,8 +23,8 @@ function setSidebarExpanded(expanded, remember = false) {
     try { localStorage.setItem('webhook-radar-sidebar', expanded ? 'expanded' : 'collapsed'); } catch { /* preference is optional */ }
   }
 }
-let savedSidebar = 'collapsed';
-try { savedSidebar = localStorage.getItem('webhook-radar-sidebar') || 'collapsed'; } catch { /* use compact navigation */ }
+let savedSidebar = 'expanded';
+try { savedSidebar = localStorage.getItem('webhook-radar-sidebar') || 'expanded'; } catch { /* use compact navigation */ }
 setSidebarExpanded(savedSidebar === 'expanded');
 sidebarToggle.addEventListener('click', () => setSidebarExpanded(sidebarShell.classList.contains('sidebar-collapsed'), true));
 function setSidebarVisible(visible, remember = false) {
@@ -88,31 +90,42 @@ function renderStats() {
   const count = activeHooks().length;
   $('#channel-status').textContent = count ? `${count} 个已启用` : '未连接';
   $('#channel-hint').textContent = count ? '可为通知单独选择接收渠道' : '添加 Webhook 地址后开始';
-  $('#active-count').textContent = appState.monitors.filter((monitor) => monitor.enabled).length;
+  $('#active-count').textContent = appState.monitors.filter((monitor) => monitor.enabled && !monitor.completedAt).length;
   $('#sent-count').textContent = appState.sentCount || 0;
   $('#monitor-count').textContent = `${appState.monitors.length} 个任务`;
-  const keyHint = appState.settings.aiKeyHint || '';
-  $('#key-indicator').textContent = appState.settings.hasAiKey ? '· 已保存' : '· 未设置';
-  const savedKeyWrap = $('#saved-ai-key-wrap');
-  if (savedKeyWrap.dataset.hint !== keyHint) {
-    $('#saved-ai-key-value').value = '';
-    $('#saved-ai-key-value').classList.add('hidden');
-    $('#reveal-ai-key').textContent = '显示完整 Key';
-  }
-  savedKeyWrap.dataset.hint = keyHint;
-  savedKeyWrap.classList.toggle('hidden', !appState.settings.hasAiKey);
-  $('#saved-ai-key-hint').textContent = `已保存：${keyHint}`;
+  $('#key-indicator').textContent = appState.settings.hasAiKey ? '· 已配置' : '· 未设置';
+  $('#clear-ai-key-button').classList.toggle('hidden', !appState.settings.hasAiKey);
   $('#ai-key').placeholder = appState.settings.hasAiKey ? '留空则保持当前 Key' : 'sk-...';
-  $('#ai-status').textContent = appState.settings.hasAiKey && appState.settings.aiModel ? `点击后使用 ${appState.settings.aiModel} 生成本次监控逻辑` : '先在下方设置 AI 接口、模型和 Key；点击生成时才会调用';
+  $('#ai-status').textContent = appState.settings.hasAiKey && appState.settings.aiModel ? `点击后使用 ${appState.settings.aiModel} 生成本次规则或提醒` : '先在下方设置 AI 接口、模型和 Key；点击开始创建时才会调用';
 }
 
 function renderMonitors() {
   const list = $('#monitor-list');
   if (!appState.monitors.length) {
-    list.innerHTML = '<div class="empty-state"><span class="empty-icon">◎</span><strong>还没有监控任务</strong><span>在上方输入一句话，创建第一个监控。</span></div>';
+    list.innerHTML = '<div class="empty-state"><span class="empty-icon">◎</span><strong>还没有任务</strong><span>在上方输入一句话，创建监控或提醒。</span></div>';
     return;
   }
   list.innerHTML = appState.monitors.map((monitor) => {
+    if (monitor.kind === 'reminder') {
+      const status = monitor.completedAt ? ['已发送', ''] : !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastError ? ['发送待重试', 'error'] : ['等待提醒', 'paused'];
+      const recipients = (monitor.webhookIds || []).map((id) => appState.settings.webhooks.find((hook) => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
+      return '<article class="monitor-item">'
+        + '<div class="monitor-top"><div><div class="monitor-name">' + escapeHtml(monitor.label) + '</div><div class="monitor-description">' + escapeHtml(monitor.message) + '</div></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
+        + '<div class="monitor-meta">一次性提醒 · ' + escapeHtml(reminderDate(monitor.remindAt)) + '</div>'
+        + '<div class="monitor-result">接收渠道：' + escapeHtml(recipients) + '</div>'
+        + (monitor.lastError ? '<div class="monitor-result monitor-error">' + escapeHtml(monitor.lastError) + '</div>' : '')
+        + '<details class="monitor-route" data-id="' + escapeHtml(monitor.id) + '"><summary>编辑提醒</summary><div class="rule-fields">'
+        + '<label>提醒名称<input class="edit-label" type="text" maxlength="60" value="' + escapeHtml(monitor.label) + '"></label>'
+        + '<label>发送时间<input class="edit-remind-at" type="datetime-local" value="' + reminderInput(monitor.remindAt) + '"></label>'
+        + '<label>提醒内容<textarea class="edit-message" rows="3" maxlength="2000">' + escapeHtml(monitor.message) + '</textarea></label>'
+        + '<div class="priority-field ' + (hasNtfyTarget(monitor.webhookIds || []) ? '' : 'hidden') + '"><span>ntfy 优先级</span>' + priorityPicker('edit-priority-' + monitor.id, monitor.priority, true, 'edit-priority') + '</div></div>'
+        + '<div class="field-label">通知到</div><div class="target-options">' + targetOptions(monitor.webhookIds || []) + '</div>'
+        + '<p class="edit-hint">修改发送时间会重新安排一次性提醒。</p>'
+        + '<button class="mini-button" data-action="save-rule" data-id="' + escapeHtml(monitor.id) + '" type="button">保存提醒</button></details>'
+        + '<div class="monitor-actions">'
+        + (monitor.completedAt ? '' : '<button class="mini-button" data-action="toggle" data-id="' + escapeHtml(monitor.id) + '">' + (monitor.enabled ? '暂停' : '继续') + '</button>')
+        + '<button class="mini-button danger" data-action="delete" data-id="' + escapeHtml(monitor.id) + '">删除</button></div></article>';
+    }
     const status = !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastError ? ['检查异常', 'error'] : monitor.baselined ? ['运行中', ''] : ['等待检查', 'paused'];
     const recipients = (monitor.webhookIds || []).map((id) => appState.settings.webhooks.find((hook) => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
     return `<article class="monitor-item">
@@ -185,23 +198,49 @@ function operatorOptions(value) {
   return [['equals', '等于'], ['notEquals', '不等于'], ['contains', '包含'], ['gt', '大于'], ['gte', '大于等于'], ['lt', '小于'], ['lte', '小于等于']].map(([key, label]) => `<option value="${key}" ${value === key ? 'selected' : ''}>${label}</option>`).join('');
 }
 
-function webhookRow(hook = { id: crypto.randomUUID(), name: '', url: '', enabled: true }) {
-  const formats = [['auto', '自动识别'], ['generic', '通用 JSON'], ['slack', 'Slack'], ['discord', 'Discord'], ['wecom', '企业微信'], ['feishu', '飞书'], ['dingtalk', '钉钉'], ['ntfy', 'ntfy']];
-  const isNtfy = hook.format === 'ntfy' || (!hook.format || hook.format === 'auto') && /^https?:\/\/ntfy\.sh\//i.test(hook.url || '');
-  return `<div class="webhook-row" data-id="${escapeHtml(hook.id)}">
-    <div class="webhook-row-top"><input class="hook-name" type="text" maxlength="40" placeholder="渠道名称，例如：团队群" value="${escapeHtml(hook.name)}" aria-label="渠道名称"><label class="hook-toggle"><input class="hook-enabled" type="checkbox" ${hook.enabled ? 'checked' : ''}> 启用</label></div>
-    <input class="hook-url" type="url" placeholder="https://example.com/webhook" value="${escapeHtml(hook.url)}" autocomplete="off" aria-label="Webhook 地址">
-    <label class="hook-format-line">消息格式 <select class="hook-format" aria-label="消息格式">${formats.map(([value, label]) => `<option value="${value}" ${value === (hook.format || 'auto') ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
-    <div class="hook-priority-line ${isNtfy ? '' : 'hidden'}"><span>ntfy 默认优先级</span>${priorityPicker(`hook-priority-${hook.id}`, hook.priority ?? 3, false, 'hook-priority')}</div>
-    <div class="webhook-row-actions"><span>${hook.url ? escapeHtml(new URL(hook.url).host) : '填写地址后保存'}</span><button type="button" class="mini-button" data-hook-action="test">测试</button><button type="button" class="mini-button danger" data-hook-action="delete">删除</button></div>
-  </div>`;
+function webhookRow(hook) {
+  const types = { auto: '自动识别', generic: '通用 JSON', slack: 'Slack', discord: 'Discord', wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉', ntfy: 'ntfy' };
+  let host = '';
+  try { host = new URL(hook.url).host; } catch { host = hook.url || '尚未填写'; }
+  return '<tr class="webhook-row" data-id="' + escapeHtml(hook.id) + '"><td><strong>' + escapeHtml(hook.name || '未命名渠道') + '</strong></td>'
+    + '<td>' + escapeHtml(types[hook.format || 'auto'] || hook.format) + '</td>'
+    + '<td><span class="channel-state ' + (hook.enabled ? 'is-active' : '') + '">' + (hook.enabled ? '已启用' : '已停用') + '</span></td>'
+    + '<td class="channel-host" title="' + escapeHtml(hook.url) + '">' + escapeHtml(host) + '</td>'
+    + '<td><button type="button" class="mini-button" data-hook-action="edit">编辑</button></td></tr>';
 }
 
 function renderWebhooks() {
-  const hooks = appState.settings.webhooks || [];
-  $('#webhook-list').innerHTML = (hooks.length ? hooks : [{ id: crypto.randomUUID(), name: '', url: '', enabled: true }]).map(webhookRow).join('');
+  $('#webhook-list').innerHTML = draftHooks.map(webhookRow).join('');
+  $('#channel-empty').classList.toggle('hidden', draftHooks.length > 0);
+  $('.channel-table-wrap').classList.toggle('hidden', draftHooks.length === 0);
 }
 
+function hookFields(hook) {
+  const formats = [['auto', '自动识别'], ['generic', '通用 JSON'], ['slack', 'Slack'], ['discord', 'Discord'], ['wecom', '企业微信'], ['feishu', '飞书'], ['dingtalk', '钉钉'], ['ntfy', 'ntfy']];
+  const isNtfy = hook.format === 'ntfy' || (!hook.format || hook.format === 'auto') && /^https?:\/\/ntfy\.sh\//i.test(hook.url || '');
+  return '<label class="field-label">渠道名称<input class="hook-name" type="text" maxlength="40" value="' + escapeHtml(hook.name || '') + '" placeholder="例如：团队群"></label>'
+    + '<label class="field-label">Webhook 地址<input class="hook-url" type="url" value="' + escapeHtml(hook.url || '') + '" placeholder="https://example.com/webhook" autocomplete="off"></label>'
+    + '<label class="field-label">消息格式<select class="hook-format">' + formats.map(([value, label]) => '<option value="' + value + '" ' + (value === (hook.format || 'auto') ? 'selected' : '') + '>' + label + '</option>').join('') + '</select></label>'
+    + '<label class="drawer-switch"><input class="hook-enabled" type="checkbox" ' + (hook.enabled !== false ? 'checked' : '') + '>启用此渠道</label>'
+    + '<div class="hook-priority-line ' + (isNtfy ? '' : 'hidden') + '"><span>ntfy 默认优先级</span>' + priorityPicker('drawer-priority', hook.priority ?? 3, false, 'hook-priority') + '</div>';
+}
+
+function openWebhookDrawer(hook = null) {
+  editingHookDraft = hook ? { ...hook } : { id: crypto.randomUUID(), name: '', url: '', enabled: true, format: 'auto', priority: 3 };
+  $('#drawer-title').textContent = hook ? '编辑渠道' : '添加渠道';
+  $('#drawer-fields').innerHTML = hookFields(editingHookDraft);
+  $('#drawer-delete').classList.toggle('hidden', !hook);
+  $('#webhook-drawer').classList.remove('hidden');
+  $('#drawer-backdrop').classList.remove('hidden');
+  $('#drawer-fields .hook-name').focus();
+}
+
+function closeWebhookDrawer() {
+  editingHookDraft = null;
+  $('#webhook-drawer').classList.add('hidden');
+  $('#drawer-backdrop').classList.add('hidden');
+  $('#drawer-fields').innerHTML = '';
+}
 function updateSendPriorityVisibility() {
   const selected = new Set(selectedIds($('#send-targets')));
   $('#send-priority-wrap').classList.toggle('hidden', !hasNtfyTarget([...selected]));
@@ -218,43 +257,31 @@ $('#log-list').addEventListener('click', (event) => {
 });
 
 function populateSettings() {
+  draftHooks = (appState.settings.webhooks || []).map((hook) => ({ ...hook }));
   renderWebhooks();
   renderSendTargets();
   $('#ai-base-url').value = appState.settings.aiBaseUrl || 'https://api.openai.com/v1';
   $('#ai-model').value = appState.settings.aiModel || '';
   $('#ai-key').value = '';
-  $('#saved-ai-key-value').value = '';
-  $('#saved-ai-key-value').classList.add('hidden');
-  $('#reveal-ai-key').textContent = '显示完整 Key';
-  $('#clear-ai-key').checked = false;
   $('#ai-test-result').textContent = '';
   $('#ai-test-result').className = '';
   $('#settings-dirty').textContent = '';
 }
 
 function settingsBody() {
-  const webhooks = [...$('#webhook-list').querySelectorAll('.webhook-row')].map((row) => ({
-    id: row.dataset.id,
-    name: row.querySelector('.hook-name').value.trim(),
-    url: row.querySelector('.hook-url').value.trim(),
-    enabled: row.querySelector('.hook-enabled').checked,
-    format: row.querySelector('.hook-format').value,
-    priority: Number(priorityValue(row.querySelector('.hook-priority')) || 3)
-  })).filter((hook) => hook.name || hook.url);
-  return { webhooks, aiBaseUrl: $('#ai-base-url').value.trim(), aiModel: $('#ai-model').value.trim(), aiKey: $('#ai-key').value.trim(), clearAiKey: $('#clear-ai-key').checked };
+  const webhooks = draftHooks.map((hook) => ({ ...hook }));
+  return { webhooks, aiBaseUrl: $('#ai-base-url').value.trim(), aiModel: $('#ai-model').value.trim(), aiKey: $('#ai-key').value.trim() };
 }
 
 async function saveSettings(silent = false) {
   const currentOptions = $('#send-targets').querySelectorAll('input[type="checkbox"]');
   const previouslySelected = currentOptions.length ? selectedIds($('#send-targets')) : null;
   appState = await api('/api/settings', 'PUT', settingsBody());
+  draftHooks = (appState.settings.webhooks || []).map((hook) => ({ ...hook }));
   renderWebhooks();
   renderSendTargets(previouslySelected);
   $('#ai-key').value = '';
-  $('#saved-ai-key-value').value = '';
-  $('#saved-ai-key-value').classList.add('hidden');
-  $('#reveal-ai-key').textContent = '显示完整 Key';
-  $('#clear-ai-key').checked = false;
+
   $('#settings-dirty').textContent = '';
   render(true);
   if (!silent) toast('设置已保存');
@@ -273,7 +300,7 @@ async function ensureSettings() {
 }
 
 function assistantPhase(status) {
-  const labels = { generating: '正在理解你的需求…', need_more_info: '等待你补充信息', ready: '规则已生成，等待确认', created: '监控已创建', failed: '处理遇到问题，可以继续补充' };
+  const labels = { generating: '正在理解你的需求…', need_more_info: '等待你补充信息', ready: '规则已生成，等待确认', created: '任务已创建', failed: '处理遇到问题，可以继续补充' };
   $('#assistant-dialog').dataset.status = status;
   $('#assistant-phase').textContent = labels[status] || '等待需求';
   $('#assistant-reply-button').disabled = status === 'generating';
@@ -281,7 +308,7 @@ function assistantPhase(status) {
 
 function renderAssistantMessages() {
   const list = $('#assistant-messages');
-  list.innerHTML = assistantMessages.map((message) => `<div class="assistant-message ${message.role}"><small>${message.role === 'user' ? '你' : 'AI 监控助手'}</small>${escapeHtml(message.content)}</div>`).join('');
+  list.innerHTML = assistantMessages.map((message) => `<div class="assistant-message ${message.role}"><small>${message.role === 'user' ? '你' : 'AI 创建助手'}</small>${escapeHtml(message.content)}</div>`).join('');
   list.scrollTop = list.scrollHeight;
 }
 
@@ -314,13 +341,20 @@ async function askAssistant() {
   assistantPhase('generating');
   try {
     await prepareAiSettings();
-    assistantConversation = assistantConversation.slice(-10);
-    const result = await api('/api/parse', 'POST', { instruction: assistantInstruction, sourceUrl: $('#instruction-url').value.trim(), conversation: assistantConversation });
+    assistantConversation = assistantConversation.slice(-6);
+    const result = await api('/api/parse', 'POST', { instruction: assistantInstruction, sourceUrl: $('#instruction-url').value.trim(), conversation: assistantConversation, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    if (result.status === 'answer') {
+      addAssistantMessage('assistant', result.message);
+      assistantConversation.push({ role: 'assistant', content: result.message });
+      assistantPhase('need_more_info');
+      $('#assistant-reply').focus();
+      return;
+    }
     if (result.status === 'need_more_info') {
       previewMonitor = null;
       $('#preview').classList.add('hidden');
       const reply = result.questions.map((question, index) => `${index + 1}. ${question}`).join('\n');
-      addAssistantMessage('assistant', `为了生成准确的监控规则，我还需要确认：\n${reply}`);
+      addAssistantMessage('assistant', `还需要确认：\n${reply}`);
       assistantConversation.push({ role: 'assistant', content: reply });
       assistantPhase('need_more_info');
       $('#assistant-reply').focus();
@@ -328,8 +362,8 @@ async function askAssistant() {
     }
     if (result.status !== 'ready' || !result.monitor) throw new Error('AI 未返回可确认的监控规则');
     previewMonitor = { ...result.monitor, sourceNote: result.sourceNote || '' };
-    addAssistantMessage('assistant', '信息已齐，规则已生成。请核对下方的监控来源、条件和通知渠道，然后确认创建；需要调整可继续告诉我。');
-    assistantConversation.push({ role: 'assistant', content: ('已生成规则：' + JSON.stringify(result.monitor)).slice(0, 1900) });
+    addAssistantMessage('assistant', result.monitor.kind === 'reminder' ? '提醒已准备好。请核对发送时间、内容和通知渠道，然后确认创建；需要调整可继续告诉我。' : '信息已齐，规则已生成。请核对下方的监控来源、条件和通知渠道，然后确认创建；需要调整可继续告诉我。');
+
     renderPreview(previewMonitor);
     assistantPhase('ready');
     $('#preview').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -340,9 +374,37 @@ async function askAssistant() {
   }
 }
 
+function reminderDate(value) {
+  return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'full', timeStyle: 'short' }).format(new Date(value));
+}
+
+function reminderInput(value) {
+  const date = new Date(value);
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function renderPreview(monitor) {
   const element = $('#preview');
   element.classList.remove('hidden');
+  if (monitor.kind === 'reminder') {
+    element.innerHTML = '<div class="preview-head"><span>✦ &nbsp; 提醒预览</span><span>AI 本次生成 · 待确认</span></div>'
+      + '<div class="preview-grid"><div class="preview-item"><small>提醒名称</small><strong>' + escapeHtml(monitor.label) + '</strong></div>'
+      + '<div class="preview-item"><small>发送时间</small><strong>' + escapeHtml(reminderDate(monitor.remindAt)) + '</strong></div>'
+      + '<div class="preview-item"><small>提醒内容</small><strong>' + escapeHtml(monitor.message) + '</strong></div></div>'
+      + '<p class="preview-note">一次性提醒。时间按此设备的本地时区显示；请确认后再创建。</p>'
+      + '<div class="field-label">通知到</div><div id="preview-targets" class="target-options">' + targetOptions() + '</div>'
+      + '<details class="rule-editor"><summary>调整提醒</summary><div class="rule-fields">'
+      + '<label>提醒名称<input id="rule-label" type="text" maxlength="60" value="' + escapeHtml(monitor.label) + '"></label>'
+      + '<label>发送时间<input id="rule-remind-at" type="datetime-local" value="' + reminderInput(monitor.remindAt) + '"></label>'
+      + '<label>提醒内容<textarea id="rule-message" rows="3" maxlength="2000">' + escapeHtml(monitor.message) + '</textarea></label>'
+      + '<div class="priority-field"><span>ntfy 优先级</span>' + priorityPicker('rule-priority', monitor.priority) + '</div></div></details>'
+      + '<div id="preview-result" class="preview-result" aria-live="polite"></div>'
+      + '<div class="preview-actions"><button class="button button-outline" id="preview-revise-button" type="button">修改需求</button>'
+      + '<button class="button button-primary" id="create-button" type="button">确认创建提醒 <span>↗</span></button></div>';
+    updatePriorityVisibility(element, '#preview-targets');
+    return;
+  }
   const planLabels = { compare: '字段条件', changed: '字段变化', any: '任意条目符合', 'item-transition': '逐项状态变化', contains: '文字出现', absent: '文字消失', 'new-item': '新条目', unavailable: '服务不可用', available: '服务恢复', slow: '响应变慢', 'new-line': '新增日志行' };
   element.innerHTML = `<div class="preview-head"><span>✦ &nbsp; 监控规则预览</span><span>AI 本次生成 · 待确认</span></div>
     <div class="preview-grid"><div class="preview-item"><small>监控对象</small><strong>${escapeHtml(monitor.label)}</strong></div><div class="preview-item"><small>检查频率</small><strong>每 ${monitor.intervalMinutes} 分钟</strong></div><div class="preview-item"><small>触发条件</small><strong>${escapeHtml(monitor.description)}</strong></div><div class="preview-item"><small>监控来源</small><strong>${escapeHtml(monitor.url)}</strong></div><div class="preview-item"><small>告警级别</small><strong>${monitor.severity === 'critical' ? '紧急' : monitor.severity === 'info' ? '提示' : '警告（默认）'}</strong></div>${monitor.kind === 'generated' ? `<div class="preview-item"><small>首次检查</small><strong>${monitor.plan.initial === 'notify' ? '若条件满足，立即通知' : '只记录当前状态'}</strong></div><div class="preview-item"><small>执行逻辑</small><strong>${escapeHtml(monitor.plan.sourceType.toUpperCase())} · ${escapeHtml(planLabels[monitor.plan.mode] || monitor.plan.mode)}</strong></div>` : ''}</div>
@@ -378,7 +440,15 @@ function collectPreviewRule() {
   const options = $('#preview-targets').querySelectorAll('input[type="checkbox"]');
   const chosen = options.length ? selectedIds($('#preview-targets')) : null;
   const webhookIds = chosen ?? activeHooks().map((hook) => hook.id);
-  const rule = { ...previewMonitor, label: $('#rule-label').value.trim(), intervalMinutes: Number($('#rule-interval').value), priority: hasNtfyTarget(webhookIds) ? priorityValue($('#rule-priority')) : null, webhookIds };
+  const rule = { ...previewMonitor, label: $('#rule-label').value.trim(), priority: hasNtfyTarget(webhookIds) ? priorityValue($('#rule-priority')) : null, webhookIds };
+  if (rule.kind === 'reminder') {
+    const time = new Date($('#rule-remind-at').value);
+    if (!Number.isFinite(time.getTime())) throw new Error('请填写有效的提醒时间');
+    rule.remindAt = time.toISOString();
+    rule.message = $('#rule-message').value.trim();
+    return rule;
+  }
+  rule.intervalMinutes = Number($('#rule-interval').value);
   if ($('#rule-url')) rule.url = $('#rule-url').value.trim();
   if (rule.kind === 'generated') { try { rule.plan = JSON.parse($('#rule-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
   if (rule.kind === 'dmit') { rule.triggerMode = $('#rule-trigger-mode').value; rule.description = rule.triggerMode === 'any-available' ? '第三方库存列表中，任意套餐有货时通知；首次检查如有货会立即通知' : '第三方库存列表中，套餐由无货变为有货时通知'; }
@@ -401,9 +471,7 @@ function showAuth() {
   resetAssistant();
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
-  for (const selector of ['#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code', '#saved-ai-key-value']) $(selector).value = '';
-  $('#saved-ai-key-value').classList.add('hidden');
-  $('#reveal-ai-key').textContent = '显示完整 Key';
+  for (const selector of ['#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code']) $(selector).value = '';
   $('#ai-test-result').textContent = '';
   $('#settings-dirty').textContent = '';
   for (const input of document.querySelectorAll('#email-password, #current-password, #new-password, #rotate-code-password')) input.value = '';
@@ -542,46 +610,72 @@ $('#logout-button').addEventListener('click', async () => {
 });
 
 $('#add-webhook').addEventListener('click', () => {
-  const blank = [...$('#webhook-list').querySelectorAll('.webhook-row')].find((row) => !row.querySelector('.hook-name').value.trim() && !row.querySelector('.hook-url').value.trim());
-  if (blank) return blank.querySelector('.hook-name').focus();
-  if ($('#webhook-list').querySelectorAll('.webhook-row').length >= 20) return toast('最多添加 20 个 Webhook 地址', true);
-  $('#webhook-list').insertAdjacentHTML('beforeend', webhookRow());
-  $('#webhook-list .webhook-row:last-child .hook-name').focus();
-  $('#settings-dirty').textContent = '未保存';
+  if (draftHooks.length >= 20) return toast('最多添加 20 个 Webhook 地址', true);
+  openWebhookDrawer();
 });
-
 $('#webhook-list').addEventListener('click', (event) => {
-  const button = event.target.closest('[data-hook-action]');
+  const button = event.target.closest('[data-hook-action="edit"]');
   if (!button) return;
-  const row = button.closest('.webhook-row');
-  const id = row.dataset.id;
-  if (button.dataset.hookAction === 'delete') {
-    const usedBy = appState.monitors.filter((monitor) => monitor.webhookIds?.includes(id)).length;
-    if (usedBy && !confirm(`这个渠道被 ${usedBy} 个监控任务使用。删除后这些任务的接收渠道会更新，继续吗？`)) return;
-    row.remove();
-    if (!$('#webhook-list .webhook-row')) $('#webhook-list').innerHTML = webhookRow();
-    $('#settings-dirty').textContent = '未保存';
-    toast('地址已从列表移除，点击“保存设置”生效');
-    return;
-  }
-  withButton(button, async () => {
-    if (!row.querySelector('.hook-url').value.trim()) throw new Error('请先填写要测试的 Webhook 地址');
-    await saveSettings(true);
-    const report = await api('/api/test-webhook', 'POST', { webhookId: id });
-    appState = await api('/api/state');
-    render(true);
-    toast(report.failed.length ? `${report.failed[0].name}：${report.failed[0].error}` : '测试通知已发送', Boolean(report.failed.length));
-  });
+  const hook = draftHooks.find((item) => item.id === button.closest('.webhook-row').dataset.id);
+  if (hook) openWebhookDrawer(hook);
 });
-
-function updateHookPriorityVisibility(row) {
-  const format = row.querySelector('.hook-format').value;
-  const url = row.querySelector('.hook-url').value.trim();
-  row.querySelector('.hook-priority-line').classList.toggle('hidden', !(format === 'ntfy' || format === 'auto' && /^https?:\/\/ntfy\.sh\//i.test(url)));
+$('#drawer-close').addEventListener('click', closeWebhookDrawer);
+$('#drawer-backdrop').addEventListener('click', closeWebhookDrawer);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !$('#webhook-drawer').classList.contains('hidden')) closeWebhookDrawer();
+});
+function updateHookPriorityVisibility() {
+  const fields = $('#drawer-fields');
+  if (!fields.querySelector('.hook-format')) return;
+  const format = fields.querySelector('.hook-format').value;
+  const url = fields.querySelector('.hook-url').value;
+  fields.querySelector('.hook-priority-line').classList.toggle('hidden', !(format === 'ntfy' || format === 'auto' && /^https?:\/\/ntfy\.sh\//i.test(url)));
 }
-$('#webhook-list').addEventListener('input', (event) => { const row = event.target.closest('.webhook-row'); if (row) updateHookPriorityVisibility(row); });
-$('#webhook-list').addEventListener('change', (event) => { const row = event.target.closest('.webhook-row'); if (row) updateHookPriorityVisibility(row); });
-
+$('#drawer-fields').addEventListener('input', updateHookPriorityVisibility);
+$('#drawer-fields').addEventListener('change', updateHookPriorityVisibility);
+async function saveDrawer() {
+  if (!editingHookDraft) return null;
+  const fields = $('#drawer-fields');
+  const hook = {
+    ...editingHookDraft,
+    name: fields.querySelector('.hook-name').value.trim(),
+    url: fields.querySelector('.hook-url').value.trim(),
+    enabled: fields.querySelector('.hook-enabled').checked,
+    format: fields.querySelector('.hook-format').value,
+    priority: Number(priorityValue(fields.querySelector('.hook-priority')) || 3)
+  };
+  if (!hook.url) throw new Error('请填写 Webhook 地址');
+  const index = draftHooks.findIndex((item) => item.id === hook.id);
+  const previous = draftHooks.map((item) => ({ ...item }));
+  if (index < 0) draftHooks.push(hook);
+  else draftHooks[index] = hook;
+  try { await saveSettings(true); }
+  catch (error) { draftHooks = previous; renderWebhooks(); throw error; }
+  closeWebhookDrawer();
+  toast('渠道已保存');
+  return hook.id;
+}
+$('#drawer-save').addEventListener('click', () => withButton($('#drawer-save'), saveDrawer));
+$('#drawer-test').addEventListener('click', () => withButton($('#drawer-test'), async () => {
+  const id = await saveDrawer();
+  if (!id) return;
+  const report = await api('/api/test-webhook', 'POST', { webhookId: id });
+  appState = await api('/api/state');
+  render(true);
+  toast(report.failed.length ? report.failed[0].name + '：' + report.failed[0].error : '测试通知已发送', Boolean(report.failed.length));
+}));
+$('#drawer-delete').addEventListener('click', () => withButton($('#drawer-delete'), async () => {
+  if (!editingHookDraft) return;
+  const id = editingHookDraft.id;
+  const usedBy = appState.monitors.filter((monitor) => monitor.webhookIds?.includes(id)).length;
+  if (usedBy && !confirm('这个渠道被 ' + usedBy + ' 个任务使用。删除后这些任务的接收渠道会更新，继续吗？')) return;
+  const previous = draftHooks.map((item) => ({ ...item }));
+  draftHooks = draftHooks.filter((hook) => hook.id !== id);
+  try { await saveSettings(true); }
+  catch (error) { draftHooks = previous; renderWebhooks(); throw error; }
+  closeWebhookDrawer();
+  toast('渠道已删除');
+}));
 $('#settings-form').addEventListener('input', () => { $('#settings-dirty').textContent = '未保存'; });
 $('#settings-form').addEventListener('change', () => { $('#settings-dirty').textContent = '未保存'; });
 
@@ -607,22 +701,15 @@ $('#ai-test-button').addEventListener('click', () => {
     }
   });
 });
-$('#reveal-ai-key').addEventListener('click', () => {
-  withButton($('#reveal-ai-key'), async () => {
-    const value = $('#saved-ai-key-value');
-    if (!value.classList.contains('hidden')) {
-      value.value = '';
-      value.classList.add('hidden');
-      $('#reveal-ai-key').textContent = '显示完整 Key';
-      return;
-    }
-    const result = await api('/api/ai/key');
-    value.value = result.key;
-    value.classList.remove('hidden');
-    $('#reveal-ai-key').textContent = '隐藏 Key';
+$('#clear-ai-key-button').addEventListener('click', () => {
+  withButton($('#clear-ai-key-button'), async () => {
+    appState = await api('/api/ai/key', 'DELETE');
+    $('#ai-key').value = '';
+    render();
+    toast('已清除保存的 API Key');
   });
 });
-for (const selector of ['#ai-base-url', '#ai-model', '#ai-key', '#clear-ai-key']) {
+for (const selector of ['#ai-base-url', '#ai-model', '#ai-key']) {
   $(selector).addEventListener('input', () => { $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; });
 }
 
@@ -654,7 +741,7 @@ $('#parse-form').addEventListener('submit', (event) => {
     previewMonitor = null;
     $('#preview').classList.add('hidden');
     if (!instruction) {
-      addAssistantMessage('assistant', '先告诉我想监控什么。我会根据你的描述追问必要信息。');
+      addAssistantMessage('assistant', '告诉我你想关注什么，或者希望什么时候收到提醒。');
       assistantPhase('need_more_info');
       $('#assistant-reply').focus();
       return;
@@ -664,7 +751,14 @@ $('#parse-form').addEventListener('submit', (event) => {
   });
 });
 
-$('#assistant-reply-form').addEventListener('submit', (event) => {
+$('#assistant-reset').addEventListener('click', () => {
+  resetAssistant();
+  previewMonitor = null;
+  $('#preview').classList.add('hidden');
+  $('#instruction').value = '';
+  $('#instruction-url').value = '';
+  $('#instruction').focus();
+});$('#assistant-reply-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#assistant-reply-button'), async () => {
     const reply = $('#assistant-reply').value.trim();
@@ -714,14 +808,13 @@ $('#preview').addEventListener('click', (event) => {
     const created = appState.monitors[0];
     previewMonitor = null;
     $('#preview').classList.add('hidden');
-    addAssistantMessage('assistant', `监控“${created.label}”已创建，之后会按规则自动检查。`);
+    resetAssistant();
+    addAssistantMessage('assistant', created.kind === 'reminder' ? '提醒已创建，将在' + reminderDate(created.remindAt) + '发送。' : '监控“' + created.label + '”已创建，之后会按规则自动检查。');
     assistantPhase('created');
-    assistantInstruction = '';
-    assistantConversation = [];
     $('#instruction').value = '';
     $('#instruction-url').value = '';
     render(true);
-    toast(created.lastError ? `监控已创建，首次检查失败：${created.lastError}` : '监控已创建，首次检查已完成', Boolean(created.lastError));
+    toast(created.kind === 'reminder' ? '提醒已创建，等待发送时间' : created.lastError ? '监控已创建，首次检查失败：' + created.lastError : '监控已创建，首次检查已完成', Boolean(created.lastError));
     $('#monitor-list').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
 });
@@ -738,7 +831,13 @@ $('#monitor-list').addEventListener('click', (event) => {
     if (action === 'save-rule') {
       const editor = button.closest('.monitor-route');
       const ids = selectedIds(editor.querySelector('.target-options'));
-      const rule = { label: editor.querySelector('.edit-label').value.trim(), intervalMinutes: Number(editor.querySelector('.edit-interval').value), priority: hasNtfyTarget(ids) ? priorityValue(editor.querySelector('.edit-priority')) : null };
+      const rule = { label: editor.querySelector('.edit-label').value.trim(), priority: hasNtfyTarget(ids) ? priorityValue(editor.querySelector('.edit-priority')) : null };
+      if (monitor.kind === 'reminder') {
+        const time = new Date(editor.querySelector('.edit-remind-at').value);
+        if (!Number.isFinite(time.getTime())) throw new Error('请填写有效的提醒时间');
+        rule.remindAt = time.toISOString();
+        rule.message = editor.querySelector('.edit-message').value.trim();
+      } else rule.intervalMinutes = Number(editor.querySelector('.edit-interval').value);
       if (monitor.kind === 'generated') { try { rule.plan = JSON.parse(editor.querySelector('.edit-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
       if (editor.querySelector('.edit-url')) rule.url = editor.querySelector('.edit-url').value.trim();
       if (monitor.kind === 'webpage') {
@@ -764,10 +863,10 @@ $('#monitor-list').addEventListener('click', (event) => {
       else toast('检查完成，没有发现新变化');
     } else if (action === 'toggle') {
       appState = await api(path, 'PATCH', { enabled: !monitor.enabled });
-      toast(monitor.enabled ? '监控已暂停' : '监控已继续');
+      toast(monitor.kind === 'reminder' ? monitor.enabled ? '提醒已暂停' : '提醒已继续' : monitor.enabled ? '监控已暂停' : '监控已继续');
     } else if (action === 'delete') {
       appState = await api(path, 'DELETE');
-      toast('监控已删除');
+      toast(monitor.kind === 'reminder' ? '提醒已删除' : '监控已删除');
     }
     render(true);
   });

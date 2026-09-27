@@ -173,6 +173,9 @@ input::placeholder, textarea::placeholder { color: #9daabb; }
 .mini-button.danger:hover { border-color: #e8c7cb; color: #a34751; background: #fff7f7; }
 .settings-actions { align-items: center; justify-content: flex-end; }
 .settings-actions .button { flex: 0 0 auto; min-width: 146px; }
+.ai-key-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 9px; }
+.ai-key-actions .field-help { margin: 0; }
+.ai-key-actions .mini-button { flex: none; }
 .source-optional { margin-top: 20px; padding: 15px 0 0; border-top: 1px solid #e9edf2; }
 .source-optional summary { color: #64758c; font-size: 12px; font-weight: 600; cursor: pointer; }
 .source-optional[open] .field-label { margin-top: 16px; }
@@ -296,6 +299,7 @@ footer { color: #94a1b0; padding-top: 30px; }
   .card, .compose-card { padding: 27px; }
 }
 @media (max-width: 620px) {
+  .ai-key-actions { align-items: flex-start; flex-direction: column; }
   .assistant-dialog { padding: 18px; }
   .assistant-reply-row { flex-direction: column; align-items: stretch; }
   .assistant-reply-row .button { align-self: flex-end; }

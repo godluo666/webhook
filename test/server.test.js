@@ -370,3 +370,120 @@ test('AI 对话补充信息、自动修正模型遗漏并在确认后创建规�
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test('AI 一次性提醒无需监控来源，到点重试且不会重复发送；API Key 不回显', async () => {
+  const notifications = [];
+  let failWebhook = true;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url === '/hook') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      if (failWebhook) { res.writeHead(500); res.end('temporary failure'); return; }
+      notifications.push(JSON.parse(raw));
+      res.writeHead(200); res.end('ok');
+      return;
+    }
+    if (req.url === '/v1/chat/completions') {
+      let raw = '';
+      for await (const chunk of req) raw += chunk;
+      const due = new Date(Date.now() + 1600).toISOString();
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+        status: 'ready', kind: 'reminder', label: '开会提醒', message: '去会议室开会', remindAt: due
+      }) } }] }));
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-reminder-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    const saved = await request(base, '/api/settings', 'PUT', {
+      webhooks: [{ id: 'hook', name: '通知', url: 'http://127.0.0.1:' + port + '/hook', enabled: true }],
+      aiBaseUrl: 'http://127.0.0.1:' + port + '/v1', aiModel: 'test-model', aiKey: 'private-test-key'
+    });
+    assert.equal(saved.settings.hasAiKey, true);
+    assert.equal('aiKeyHint' in saved.settings, false);
+    assert.equal(JSON.stringify(saved).includes('private-test-key'), false);
+    const keyRead = await fetch(base + '/api/ai/key', { headers: { cookie: cookies.get(base) } });
+    assert.equal(keyRead.status, 404);
+    const draft = await request(base, '/api/parse', 'POST', { instruction: '两分钟后提醒我开会', timeZone: 'Asia/Shanghai' });
+    assert.equal(draft.status, 'ready');
+    assert.equal(draft.monitor.kind, 'reminder');
+    assert.equal(draft.monitor.message, '去会议室开会');
+    assert.equal((await request(base, '/api/state')).monitors.length, 0);
+    const created = await request(base, '/api/monitors', 'POST', { ...draft.monitor, webhookIds: ['hook'] });
+    const id = created.monitors[0].id;
+    assert.equal(created.monitors[0].kind, 'reminder');
+    assert.equal(created.monitors[0].firedAt, undefined);
+    assert.equal(notifications.length, 0);
+    const waitMs = Math.max(0, Date.parse(draft.monitor.remindAt) - Date.now() + 1200);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    const scheduled = await request(base, '/api/state');
+    assert.ok(scheduled.monitors[0].firedAt);
+    assert.equal(scheduled.monitors[0].pendingNotifications.length, 1);
+    assert.equal(scheduled.monitors[0].completedAt, undefined);
+    failWebhook = false;
+    const sent = await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(sent.monitors[0].pendingNotifications.length, 0);
+    assert.ok(sent.monitors[0].completedAt);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].message, '去会议室开会');
+    await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(notifications.length, 1);
+    const cleared = await request(base, '/api/ai/key', 'DELETE');
+    assert.equal(cleared.settings.hasAiKey, false);
+    assert.equal(JSON.stringify(cleared).includes('private-test-key'), false);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mock.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+test('AI 重复追问时会修正一次，仍重复则给出新的业务化提问', async () => {
+  let calls = 0;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url !== '/v1/chat/completions') { res.writeHead(404); res.end(); return; }
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    calls++;
+    const latest = JSON.parse(raw).messages.at(-1).content;
+    const reply = latest.includes('为什么')
+      ? { status: 'answer', message: '需要知道从哪里读取状态。你可以提供接口地址，也可以使用本机日志。' }
+      : { status: 'need_more_info', questions: ['什么情况需要提醒？'] };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }));
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-repeat-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', {
+      webhooks: [], aiBaseUrl: 'http://127.0.0.1:' + port + '/v1',
+      aiModel: 'test-model', aiKey: 'test-key'
+    });
+    const instruction = '帮我监控支付系统';
+    const first = await request(base, '/api/parse', 'POST', { instruction });
+    assert.equal(first.status, 'need_more_info');
+    const second = await request(base, '/api/parse', 'POST', {
+      instruction, conversation: [
+        { role: 'assistant', content: first.questions[0] },
+        { role: 'user', content: '只要支付失败就提醒我' }
+      ]
+    });
+    assert.equal(second.status, 'need_more_info');
+    assert.notEqual(second.questions[0], first.questions[0]);
+    assert.equal(calls, 3);
+    const answer = await request(base, '/api/parse', 'POST', {
+      instruction, conversation: [{ role: 'user', content: '为什么一定要接口地址？' }]
+    });
+    assert.equal(answer.status, 'answer');
+    assert.match(answer.message, /本机日志/);
+    assert.equal(calls, 4);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mock.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

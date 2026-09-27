@@ -89,13 +89,22 @@ function selectedWebhookIds(user, ids) {
   return unique;
 }
 
-function validateMonitor(candidate) {
-  if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated'].includes(candidate.kind)) throw new Error('无法识别监控类型');
+function validateMonitor(candidate, options = {}) {
+  if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated', 'reminder'].includes(candidate.kind)) throw new Error('无法识别监控类型');
   const minInterval = candidate.kind === 'generated' && ['service', 'log'].includes(candidate.plan?.sourceType) ? 1 : 5;
   const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 5));
   const label = String(candidate.label || '未命名监控').trim().slice(0, 60);
   const description = String(candidate.description || '').trim().slice(0, 180);
   const severity = ['info', 'warning', 'critical'].includes(candidate.severity) ? candidate.severity : 'warning';
+  if (candidate.kind === 'reminder') {
+    const rawTime = String(candidate.remindAt || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/i.test(rawTime)) throw new Error('提醒时间需要包含日期、时刻和时区');
+    const timestamp = Date.parse(rawTime);
+    if (!Number.isFinite(timestamp) || timestamp <= Date.now() && !options.allowPastReminder) throw new Error('提醒时间已过，请提供未来的具体时间');
+    const message = String(candidate.message || '').trim();
+    if (!message || message.length > 2000) throw new Error('请告诉我到时提醒什么内容');
+    return { kind: 'reminder', label, description: message.slice(0, 180), message, remindAt: new Date(timestamp).toISOString(), severity };
+  }
   if (candidate.kind === 'dmit') return { kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
   if (candidate.kind === 'generated') {
     const plan = validateGeneratedPlan(candidate.plan);
@@ -199,12 +208,49 @@ async function flushPending(user, monitor) {
     failedCount += report.failed.length;
     const sentIds = new Set(report.sent.map((hook) => hook.id));
     pending.remainingIds = pending.remainingIds.filter((id) => !sentIds.has(id));
-    if (report.sent.length) addEvent(user, 'success', '监控通知已发送', `${monitor.label} → ${report.sent.map((hook) => hook.name).join('、')}`, monitor.id);
+    if (report.sent.length) addEvent(user, 'success', monitor.kind === 'reminder' ? '提醒已发送' : '监控通知已发送', `${monitor.label} → ${report.sent.map((hook) => hook.name).join('、')}`, monitor.id);
     if (report.failed.length) addEvent(user, 'error', '通知发送失败，稍后重试', report.failed.map((hook) => `${hook.name}：${hook.error}`).join('；'), monitor.id);
   }
   monitor.pendingNotifications = monitor.pendingNotifications.filter((pending) => pending.remainingIds.length);
   persist();
   return { sentCount, failedCount };
+}
+
+async function checkReminder(user, reminder) {
+  if (activeChecks.has(reminder.id)) return { checked: false, skipped: true };
+  if (reminder.completedAt || Date.parse(reminder.remindAt) > Date.now()) return { checked: false, notDue: true };
+  activeChecks.add(reminder.id);
+  try {
+    if (!reminder.firedAt) {
+      reminder.firedAt = new Date().toISOString();
+      reminder.pendingNotifications.push({
+        id: randomUUID(),
+        payload: { event: 'reminder.due', title: reminder.label, message: reminder.message, monitorId: reminder.id, priority: reminder.priority, severity: reminder.severity },
+        remainingIds: [...reminder.webhookIds]
+      });
+      persist();
+    }
+    const report = await flushPending(user, reminder);
+    reminder.lastCheckAt = new Date().toISOString();
+    if (!reminder.pendingNotifications.length) {
+      reminder.completedAt = reminder.lastCheckAt;
+      reminder.lastResult = '提醒已发送';
+      reminder.lastError = '';
+      addLog(user, 'reminder', 'success', reminder.label + ' · 已发送', null, 0, reminder.id);
+    } else {
+      reminder.lastError = '提醒已到时间，部分渠道发送失败或停用，将重试';
+      addLog(user, 'reminder', 'error', reminder.label + ' · ' + reminder.lastError, null, 0, reminder.id);
+    }
+    persist();
+    return { checked: true, triggered: true, sentCount: report.sentCount, failedCount: report.failedCount, pendingCount: reminder.pendingNotifications.length };
+  } catch (error) {
+    reminder.lastCheckAt = new Date().toISOString();
+    reminder.lastError = error.message;
+    addLog(user, 'reminder', 'error', reminder.label + ' · ' + error.message, null, 0, reminder.id);
+    return { checked: false, error: error.message };
+  } finally {
+    activeChecks.delete(reminder.id);
+  }
 }
 
 function currentStateMatches(monitor, current) {
@@ -218,6 +264,7 @@ function currentStateMatches(monitor, current) {
 }
 
 async function checkMonitor(user, monitor, { manual = false } = {}) {
+  if (monitor.kind === 'reminder') return checkReminder(user, monitor);
   if (activeChecks.has(monitor.id)) return { checked: false, skipped: true };
   activeChecks.add(monitor.id);
   const started = Date.now();
@@ -332,14 +379,14 @@ function invalidAiRule(message) {
 
 function missingRuleQuestion(error, plan) {
   const detail = String(error.message || '');
-  if (/来源|地址/.test(detail)) return '请提供实际可访问的监控地址：HTTP 接口、网页、tcp://主机:端口或 log:文件名。';
-  if (/字段|列表路径|比较值/.test(detail)) return '接口返回的数据中，应该检查哪个字段或哪种状态？';
-  if (/监控文字|日志关键词/.test(detail)) return plan?.sourceType === 'log' ? '新增日志里出现什么文字时通知？' : '页面出现或消失什么文字时通知？';
-  if (/阈值/.test(detail)) return '响应超过多少毫秒时需要通知？';
+  if (/来源|地址/.test(detail)) return '请告诉我从哪里查看这个目标；可以贴网址，或说明要读的本机日志文件名。';
+  if (/字段|列表路径|比较值/.test(detail)) return '什么业务情况算需要提醒？可以举个例子；如果方便，也可以贴一小段接口返回的样例。';
+  if (/监控文字|日志关键词/.test(detail)) return plan?.sourceType === 'log' ? '新日志里出现哪句话时提醒？直接复制那句话即可。' : '页面出现或消失哪句话时提醒？直接复制那句话即可。';
+  if (/阈值/.test(detail)) return '多慢算异常？例如响应超过 3 秒。';
   return null;
 }
 
-async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput = [], repairFeedback = '') {
+async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput = [], repairFeedback = '', timeZoneInput = '') {
   const input = String(instruction || '').trim();
   trace.instruction = input;
   if (!input || input.length > 2000) throw new Error('指令长度需要在 1 到 2000 字之间');
@@ -358,15 +405,20 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   if (!user.settings.aiKey) throw new Error('按需生成监控逻辑需要先在设置中填写 AI API Key');
   if (!user.settings.aiModel) throw new Error('请先填写 AI 模型名称');
   const dmit = /\bdmit\b/i.test(fullInput);
+  let timeZone = String(timeZoneInput || '').slice(0, 80);
+  try { new Intl.DateTimeFormat('en-US', { timeZone }); } catch { timeZone = 'Asia/Shanghai'; }
+  if (!timeZone) timeZone = 'Asia/Shanghai';
+  trace.timeZone = timeZone;
   const endpoint = aiEndpoint(user.settings.aiBaseUrl || 'https://api.openai.com/v1');
   trace.model = user.settings.aiModel;
   trace.apiEndpoint = new URL(endpoint).origin + new URL(endpoint).pathname;
   const aiRequest = {
       model: user.settings.aiModel,
       messages: [
-        { role: 'system', content: `你是监控助手。结合本次对话判断能否创建可执行监控。仅输出 JSON，不要 Markdown。信息不足时返回 {"status":"need_more_info","questions":["只问缺失的关键信息"]}，最多 3 个简短问题。信息充足时返回 {"status":"ready","url":"真实来源","label":"任务名称","intervalMinutes":5,"severity":"warning","plan":{}}。默认每 5 分钟检查，告警级别 warning；用户未要求其他频率或级别时不要为此提问。通知渠道由界面选择。不能用 auto、unknown 或臆造地址作为真实来源。顶层字段：url,label,intervalMinutes,severity,plan。plan 必填 sourceType=json/html/rss，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；缺少实际地址、字段或触发条件时应返回 need_more_info 和具体问题。` },
+        { role: 'system', content: `你是监控与提醒助手。结合本次对话判断任务是监控还是一次性定时提醒，并生成可执行规则。仅输出 JSON，不要 Markdown。信息不足时返回 {"status":"need_more_info","questions":["只问缺失的关键信息"]}，最多 3 个简短问题。监控类信息充足时返回 {"status":"ready","url":"真实来源","label":"任务名称","intervalMinutes":5,"severity":"warning","plan":{}}。默认每 5 分钟检查，告警级别 warning；用户未要求其他频率或级别时不要为此提问。通知渠道由界面选择。监控来源不能用 auto、unknown 或臆造地址。监控类顶层字段：url,label,intervalMinutes,severity,plan。plan 必填 sourceType=json/html/rss，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；监控缺少实际地址、字段或触发条件时应返回 need_more_info 和具体问题。一次性提醒无需这些监控字段，按后续要求生成。` },
         { role: 'system', content: '如果使用 DMIT 第三方库存来源，plan.path 必须为 products；filters 必须包括 provider equals "dmit"、stale equals 0、last_check_at withinMinutes 120。任意有货模式还必须筛选 status in ["有货","available","in stock"]；补货模式使用 item-transition，idPath=product_key、statePath=status、fromValues=["无货","缺货","out of stock"]、toValues=["有货","available","in stock"]，且不要在 filters 中筛选 status。' },
         { role: 'system', content: '来源类型除上文 json/html/rss 外，还支持 service/log。HTTP 服务或 TCP 端口的可用性使用 plan.sourceType="service"，mode="unavailable"（故障时）、"available"（恢复可用时）或 "slow"（响应时间超过 thresholdMs 毫秒）；url 使用 http(s):// 或 tcp://主机:端口。本地日志使用 plan.sourceType="log"，mode="new-line"，keyword 为新日志行要包含的文字，可选 caseSensitive；url 使用 log:相对路径，例如 log:app.log。日志默认 initial="baseline"，只检查创建后新增的行；用户明确要求现有日志也触发才用 initial="notify"。服务和日志 intervalMinutes 可为 1 到 1440，默认 5。服务不可用监控如要求连续失败 N 次才告警，使用 plan.failureThreshold=N（1 到 10），默认 1。当前只支持 HTTP 或 TCP 可用性，不支持 ICMP Ping；缺少主机端口或健康检查地址时请追问。不得输出脚本、命令或未获用户提供的文件路径。' },
+        { role: 'system', content: '追问时只说用户能理解的业务问题，不要求用户填写 sourceType、metric、path、字段名、表达式等技术参数。用户给出业务条件后，优先据此推断；确实需要了解接口结构时，邀请用户粘贴一小段返回样例。认真整合最新回复，不得重复询问已经回答的问题。每轮最多问两个最关键的问题，不要机械复述原话。若最新回复是在问你为什么需要某项信息、能否实现某种方式或规则如何工作，先直接回答，再返回 {"status":"answer","message":"简短、具体的回答，可在末尾提出一个必要的业务问题"}；不要重发上一轮提问，也不要假装规则已创建。' },        { role: 'system', content: '当前时刻：' + new Date().toISOString() + '（UTC）；用户时区：' + timeZone + '。如果用户只要求在某个时间提醒，不需要监控来源。此类请求输出 {"status":"ready","kind":"reminder","label":"简短标题","message":"到时发送的具体提醒内容","remindAt":"包含时区偏移的 ISO 8601 日期时间","severity":"warning"}，不要输出 url 或 plan。必须明确未来的日期和时刻；未给时刻或日期有歧义时返回 need_more_info 追问。按用户时区解释相对日期和时间，预览由用户确认。普通监控仍按前述规则生成。不要把提醒误判成网页监控。' },
         { role: 'system', content: fixedSourceUrl ? `用户已单独填写监控来源地址：${sourceUrl}。输出的 url 必须与此地址完全一致。` : sourceInput && !followupUrl ? `用户填写的来源地址“${sourceInput}”无法识别。请根据对话中的后续地址修正；仍不明确就追问。` : '上文要求使用用户提供的 URL，指真实网址部分。如果网址后紧贴中文指令文字，辨别网址和自然语言的边界；不要把“存在”“包含”“通知”等句子当作网址路径。' },
         ...(repairFeedback ? [{ role: 'system', content: `上次生成的规则未通过校验：${repairFeedback}。请根据用户已提供的信息修正并重新输出 JSON；仅当确实缺少用户才能提供的信息时才返回 need_more_info。` }] : []),
         { role: 'user', content: input },
@@ -387,14 +439,37 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     const content = String(result.choices?.[0]?.message?.content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     parsed = JSON.parse(content);
   } catch { const error = new Error('AI 返回内容无法解析'); error.repairable = true; throw error; }
-  if (parsed?.status === 'need_more_info') return needMoreInfo(parsed.questions || parsed.message);
+  if (parsed?.status === 'answer') {
+    const message = String(parsed.message || '').trim().slice(0, 1200);
+    if (message) return { status: 'answer', message };
+    return needMoreInfo(['请再告诉我你想了解的地方。']);
+  }
+  if (parsed?.status === 'need_more_info') {
+    const followup = needMoreInfo(parsed.questions || parsed.message);
+    const lastQuestion = turns.filter((turn) => turn.role === 'assistant').at(-1)?.content || '';
+    if (lastQuestion && followup.questions.every((question) => lastQuestion.includes(question))) {
+      const error = new Error('AI 重复追问了用户已经回答的问题');
+      error.repairable = true;
+      error.question = '我可能没理解刚才的补充。可以换一种说法，举一个触发提醒的例子吗？';
+      throw error;
+    }
+    return followup;
+  }
   if (parsed?.error) {
     if (/补充|提供|缺少|不明确|不清楚/.test(String(parsed.error))) return needMoreInfo(parsed.error);
     throw new Error(String(parsed.error));
   }
-  if (!sourceUrl && !dmit) return needMoreInfo(['请提供实际监控地址，例如健康检查接口、网页、tcp://主机:端口或账户日志文件 log:文件名。']);
   const output = parsed?.status === 'ready' && parsed.monitor ? parsed.monitor : parsed;
-  if (!output || typeof output !== 'object' || Array.isArray(output)) { const error = new Error('AI 未返回有效监控规则'); error.repairable = true; throw error; }
+  if (!output || typeof output !== 'object' || Array.isArray(output)) { const error = new Error('AI 未返回有效规则'); error.repairable = true; throw error; }
+  if (output.kind === 'reminder' || output.remindAt) {
+    try { return { status: 'ready', monitor: validateMonitor({ ...output, kind: 'reminder' }), parser: 'ai', sourceNote: '' }; }
+    catch (error) {
+      if (/提醒时间|提醒什么/.test(error.message)) return needMoreInfo([error.message]);
+      error.repairable = true;
+      throw error;
+    }
+  }
+  if (!sourceUrl && !dmit) return needMoreInfo(['请提供实际监控地址，例如健康检查接口、网页、tcp://主机:端口或账户日志文件 log:文件名。']);
   const expectedUrl = sourceUrl || DMIT_STOCK_URL;
   let expected;
   try { expected = sourceOf(expectedUrl); }
@@ -453,13 +528,13 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   return { status: 'ready', monitor: candidate, parser: 'ai', sourceNote };
 }
 
-async function parseInstruction(user, instruction, sourceUrlInput, trace, conversationInput = []) {
-  try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput); }
+async function parseInstruction(user, instruction, sourceUrlInput, trace, conversationInput = [], timeZone = '') {
+  try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, '', timeZone); }
   catch (error) {
     if (!error.repairable) throw error;
     trace.firstModelError = error.message;
     trace.firstModelResponse = trace.aiResponse || '';
-    try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, error.message); }
+    try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, error.message, timeZone); }
     catch (retryError) {
       if (retryError.question) return needMoreInfo([retryError.question]);
       throw retryError;
@@ -560,9 +635,10 @@ async function handler(request, response) {
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
       if (request.method === 'GET' && pathname === '/api/logs') return sendJson(response, 200, { logs: user.logs.slice(0, 300) });
-      if (request.method === 'GET' && pathname === '/api/ai/key') {
-        if (!user.settings.aiKey) return sendJson(response, 404, { error: '当前账户没有保存 API Key' });
-        return sendJson(response, 200, { key: user.settings.aiKey });
+      if (request.method === 'DELETE' && pathname === '/api/ai/key') {
+        user.settings.aiKey = '';
+        persist();
+        return sendJson(response, 200, publicState(user));
       }
       if (request.method === 'POST' && pathname === '/api/ai/test') {
         const body = await readJson(request);
@@ -595,7 +671,7 @@ async function handler(request, response) {
         const webhooks = validateWebhooks(body.webhooks ?? user.settings.webhooks);
         const aiBaseUrl = body.aiBaseUrl ? urlOf(body.aiBaseUrl, 'AI API 地址') : 'https://api.openai.com/v1';
         const aiModel = String(body.aiModel || '').trim().slice(0, 100);
-        const aiKey = body.clearAiKey ? '' : body.aiKey ? String(body.aiKey).trim().slice(0, 500) : user.settings.aiKey;
+        const aiKey = body.aiKey ? String(body.aiKey).trim().slice(0, 500) : user.settings.aiKey;
         user.settings = { webhooks, aiBaseUrl, aiModel, aiKey };
         const keptIds = new Set(webhooks.map((hook) => hook.id));
         for (const monitor of user.monitors) {
@@ -620,7 +696,12 @@ async function handler(request, response) {
         const trace = {};
         const safeTrace = () => Object.fromEntries(Object.entries(trace).map(([name, value]) => [name, typeof value === 'string' && user.settings.aiKey ? value.replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : value]));
         try {
-          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace, body.conversation);
+          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace, body.conversation, body.timeZone);
+          if (parsed.status === 'answer') {
+            trace.validation = '已回答用户问题';
+            addLog(user, 'parse', 'success', 'AI 已回答本轮问题，等待用户继续', null, Date.now() - started, null, safeTrace());
+            return sendJson(response, 200, parsed);
+          }
           if (parsed.status === 'need_more_info') {
             trace.validation = '需要补充信息';
             addLog(user, 'parse', 'success', `AI 需要补充信息：${parsed.questions.join('；')}`, null, Date.now() - started, null, safeTrace());
@@ -699,7 +780,7 @@ async function handler(request, response) {
         const monitor = { ...spec, priority, webhookIds, pendingNotifications: [], id: randomUUID(), enabled: true, createdAt: new Date().toISOString(), baselined: false, snapshot: null, lastCheckAt: null, lastResult: '', lastError: '' };
         user.monitors.unshift(monitor);
         persist();
-        await checkMonitor(user, monitor);
+        if (monitor.kind !== 'reminder') await checkMonitor(user, monitor);
         return sendJson(response, 201, { status: 'created', ...publicState(user) });
       }
       const match = pathname.match(/^\/api\/monitors\/([^/]+)(?:\/(check))?$/);
@@ -714,12 +795,22 @@ async function handler(request, response) {
           const body = await readJson(request);
           let resetBaseline = false;
           if (body.rule) {
-            const next = validateMonitor({ ...monitor, ...body.rule, kind: monitor.kind });
+            const unchangedReminderTime = monitor.kind === 'reminder' && Date.parse(body.rule.remindAt || monitor.remindAt) === Date.parse(monitor.remindAt);
+            const next = validateMonitor({ ...monitor, ...body.rule, kind: monitor.kind }, { allowPastReminder: unchangedReminderTime });
             if (body.rule.priority !== undefined) {
               next.priority = body.rule.priority === '' || body.rule.priority == null ? null : Number(body.rule.priority);
               if (next.priority != null && (!Number.isInteger(next.priority) || next.priority < 1 || next.priority > 5)) throw new Error('ntfy 优先级必须在 1 到 5 之间');
             }
-            resetBaseline = ['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan);
+            if (monitor.kind === 'reminder' && next.remindAt !== monitor.remindAt) {
+              monitor.firedAt = null;
+              monitor.completedAt = null;
+              monitor.pendingNotifications = [];
+              monitor.lastCheckAt = null;
+              monitor.lastError = '';
+              monitor.lastResult = '';
+              monitor.enabled = true;
+            }
+            resetBaseline = monitor.kind !== 'reminder' && (['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan));
             Object.assign(monitor, next);
             if (resetBaseline) {
               monitor.snapshot = null;
@@ -737,6 +828,7 @@ async function handler(request, response) {
             monitor.pendingNotifications = monitor.pendingNotifications.filter((pending) => pending.remainingIds.length);
           }
           if (body.enabled !== undefined) {
+            if (body.enabled && monitor.kind === 'reminder' && monitor.completedAt) throw new Error('已完成的提醒请先设置新的时间');
             if (body.enabled) selectedWebhookIds(user, monitor.webhookIds);
             monitor.enabled = Boolean(body.enabled);
           }
@@ -755,7 +847,7 @@ async function handler(request, response) {
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: '不支持的请求方法' });
     const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-    if (!['index.html', 'app.js', 'style.css', 'extra.css', 'spatial.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
+    if (!['index.html', 'app.js', 'style.css', 'extra.css', 'spatial.css', 'premium.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
     const file = path.join(root, 'public', filename);
     response.writeHead(200, { 'content-type': contentTypes[path.extname(file)], 'content-security-policy': "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'" });
     fs.createReadStream(file).pipe(response);
@@ -772,6 +864,16 @@ setInterval(() => {
   for (const user of store.state.users) for (const monitor of user.monitors) {
     if (activeChecks.size >= maxScheduledChecks) return;
     const lastCheck = Date.parse(monitor.lastCheckAt);
-    if (monitor.enabled && (!Number.isFinite(lastCheck) || now - lastCheck >= monitor.intervalMinutes * 60_000)) checkMonitor(user, monitor);
+    if (monitor.kind !== 'reminder' && monitor.enabled && (!Number.isFinite(lastCheck) || now - lastCheck >= monitor.intervalMinutes * 60_000)) checkMonitor(user, monitor);
   }
 }, 20_000).unref();
+
+setInterval(() => {
+  const now = Date.now();
+  for (const user of store.state.users) for (const reminder of user.monitors) {
+    if (activeChecks.size >= maxScheduledChecks) return;
+    if (reminder.kind !== 'reminder' || !reminder.enabled || reminder.completedAt) continue;
+    const lastCheck = Date.parse(reminder.lastCheckAt);
+    if (Date.parse(reminder.remindAt) <= now && (!Number.isFinite(lastCheck) || now - lastCheck >= 60_000)) checkReminder(user, reminder);
+  }
+}, 1000).unref();
