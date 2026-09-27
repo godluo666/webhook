@@ -297,7 +297,7 @@ test('AI 对话补充信息、自动修正模型遗漏并在确认后创建规�
   const aiCalls = [];
   const notifications = [];
   const mock = http.createServer(async (req, res) => {
-    if (req.url === '/health') { res.writeHead(503); res.end('unavailable'); return; }
+    if (req.url === '/health') { res.writeHead(503, { 'content-type': 'text/plain' }); res.end('private-source-marker-91a7'); return; }
     if (req.url === '/hook') {
       let body = '';
       for await (const chunk of req) body += chunk;
@@ -346,6 +346,8 @@ test('AI 对话补充信息、自动修正模型遗漏并在确认后创建规�
     const ready = await request(base, '/api/parse', 'POST', { instruction, conversation });
     assert.equal(ready.status, 'ready');
     assert.equal(ready.monitor.url, `http://127.0.0.1:${port}/health`);
+    assert.match(ready.sourceCheck, /HTTP 503/);
+    assert.equal(JSON.stringify(aiCalls).includes('private-source-marker-91a7'), false);
     assert.equal(ready.monitor.intervalMinutes, 5);
     assert.equal(ready.monitor.severity, 'warning');
     assert.equal(ready.monitor.plan.failureThreshold, 3);
@@ -481,6 +483,125 @@ test('AI 重复追问时会修正一次，仍重复则给出新的业务化提�
     assert.equal(answer.status, 'answer');
     assert.match(answer.message, /本机日志/);
     assert.equal(calls, 4);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mock.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+test('循环提醒按间隔安排下次发送，失败只重试本轮', async () => {
+  const notifications = [];
+  let failWebhook = true;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url !== '/hook') { res.writeHead(404); res.end(); return; }
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    if (failWebhook) { res.writeHead(500); res.end('temporary failure'); return; }
+    notifications.push(JSON.parse(raw));
+    res.writeHead(200); res.end('ok');
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-recurring-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', {
+      webhooks: [{ id: 'hook', name: '提醒渠道', url: 'http://127.0.0.1:' + port + '/hook', enabled: true }]
+    });
+    const firstDue = new Date(Date.now() + 1600).toISOString();
+    const created = await request(base, '/api/monitors', 'POST', {
+      kind: 'reminder', label: '喝水', message: '该喝水了', remindAt: firstDue,
+      repeatMinutes: 60, webhookIds: ['hook']
+    });
+    const id = created.monitors[0].id;
+    assert.equal(created.monitors[0].repeatMinutes, 60);
+    await new Promise((resolve) => setTimeout(resolve, Math.max(0, Date.parse(firstDue) - Date.now() + 1200)));
+    const failed = (await request(base, '/api/state')).monitors[0];
+    assert.equal(failed.remindAt, firstDue);
+    assert.equal(failed.pendingNotifications.length, 1);
+    failWebhook = false;
+    const sent = await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(sent.check.sentCount, 1);
+    assert.equal(notifications.length, 1);
+    assert.equal(sent.monitors[0].pendingNotifications.length, 0);
+    assert.equal(sent.monitors[0].completedAt, null);
+    assert.equal(sent.monitors[0].repeatMinutes, 60);
+    assert.ok(Date.parse(sent.monitors[0].remindAt) > Date.now());
+    await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(notifications.length, 1);
+    const edited = await request(base, '/api/monitors/' + id, 'PATCH', {
+      rule: { repeatMinutes: 0, remindAt: new Date(Date.now() + 3600000).toISOString() }
+    });
+    assert.equal(edited.monitors[0].repeatMinutes, 0);
+    assert.equal(edited.monitors[0].completedAt, null);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mock.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+test('AI 漏掉循环提醒首次时间时按间隔自动安排', async () => {
+  const mock = http.createServer(async (req, res) => {
+    if (req.url !== '/v1/chat/completions') { res.writeHead(404); res.end(); return; }
+    for await (const chunk of req) { void chunk; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      status: 'ready', kind: 'reminder', label: '喝水提醒', message: '该喝水了', repeatMinutes: 90
+    }) } }] }));
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-ai-interval-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', {
+      webhooks: [], aiBaseUrl: 'http://127.0.0.1:' + port + '/v1',
+      aiModel: 'test-model', aiKey: 'test-key'
+    });
+    const before = Date.now();
+    const draft = await request(base, '/api/parse', 'POST', { instruction: '每隔90分钟提醒我喝水' });
+    assert.equal(draft.status, 'ready');
+    assert.equal(draft.monitor.kind, 'reminder');
+    assert.equal(draft.monitor.repeatMinutes, 90);
+    assert.ok(Date.parse(draft.monitor.remindAt) >= before + 90 * 60_000);
+    assert.ok(Date.parse(draft.monitor.remindAt) <= Date.now() + 90 * 60_000);
+  } finally {
+    child.kill();
+    await new Promise((resolve) => mock.close(resolve));
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+test('已有地址时 AI 索要技术字段会改为可执行的服务监控', async () => {
+  let calls = 0;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url === '/health') { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return; }
+    if (req.url !== '/v1/chat/completions') { res.writeHead(404); res.end(); return; }
+    let raw = '';
+    for await (const chunk of req) raw += chunk;
+    calls++;
+    const url = 'http://127.0.0.1:' + mock.address().port + '/health';
+    const repairing = JSON.parse(raw).messages.some((message) =>
+      message.role === 'system' && message.content.includes('已有来源地址，却要求用户猜测技术字段'));
+    const reply = repairing
+      ? { status: 'ready', url, label: '服务可用性', plan: { sourceType: 'service', mode: 'unavailable' } }
+      : { status: 'need_more_info', questions: ['请告诉我 JSON 字段名和 path'] };
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }));
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'webhook-radar-field-repair-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', {
+      webhooks: [], aiBaseUrl: 'http://127.0.0.1:' + port + '/v1',
+      aiModel: 'test-model', aiKey: 'test-key'
+    });
+    const draft = await request(base, '/api/parse', 'POST', {
+      instruction: '帮我看这个服务有没有挂',
+      sourceUrl: 'http://127.0.0.1:' + port + '/health'
+    });
+    assert.equal(draft.status, 'ready');
+    assert.equal(draft.monitor.plan.sourceType, 'service');
+    assert.match(draft.sourceCheck, /HTTP 200/);
+    assert.equal(calls, 2);
   } finally {
     child.kill();
     await new Promise((resolve) => mock.close(resolve));

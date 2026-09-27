@@ -213,7 +213,6 @@ footer { color: #a1a7b0; padding: 18px 0; }
 .app-shell[data-view="activity"] #activity,
 .app-shell[data-view="account"] #account { display: block !important; }
 .app-shell[data-view="channels"] #ai-settings,
-.app-shell[data-view="channels"] .settings-actions,
 .app-shell[data-view="ai-settings"] #channels { display: none !important; }
 .page-inner { min-height: calc(100vh - 62px); }
 .overview-page { max-width: 1080px; margin: 0 auto; }
@@ -270,4 +269,50 @@ footer { max-width: 1080px; margin-top: 75px; }
   .side-nav::-webkit-scrollbar-thumb { background: #d9dde2; border-radius: 3px; }
   .side-nav .nav-link, .sidebar-collapsed .side-nav .nav-link { gap: 7px; padding: 8px 11px; font-size: 12px; }
   .side-nav .nav-text, .sidebar-collapsed .side-nav .nav-text { display: inline; }
+}
+/* Shared action rhythm across settings, editors, and drawers. */
+.button, .mini-button {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 42px; padding: 10px 18px; border-radius: 8px;
+  font-size: 13px; font-weight: 600; line-height: 1.25;
+}
+.mini-button { min-height: 38px; padding: 9px 14px; font-size: 12px; }
+.button-dark, .button-primary { border: 1px solid #252a33; background: #252a33; color: #fff; }
+.button-outline { border: 1px solid #dfe2e7; background: #fff; color: #3b4350; }
+.settings-actions {
+  display: flex; align-items: center; gap: 18px; justify-content: space-between;
+  margin-top: 38px; padding-top: 24px; border-top: 1px solid #eceef0;
+}
+.settings-actions .button { flex: 0 0 auto; min-width: 152px; margin-left: auto; }
+.settings-group-head .button { flex: none; }
+.drawer-actions { gap: 12px; padding-top: 24px; border-top: 1px solid #eceef0; }
+#drawer-test { margin-left: auto; }
+.drawer-actions .button { min-width: 105px; }
+.drawer-actions #drawer-save { margin-left: 0; }
+.monitor-route > button[data-action="save-rule"] {
+  display: flex; width: max-content; min-width: 145px;
+  margin: 25px 0 0 auto;
+}
+.monitor-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
+.monitor-actions .mini-button { min-width: 92px; }
+.form-actions .button { min-width: 152px; }
+.monitor-actions .danger { margin-left: auto; }
+.preview-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: flex-end; margin-top: 26px; }
+#preview-revise-button { margin-right: auto; }
+.preview-actions .button { min-width: 122px; }
+.form-actions { justify-content: flex-end; margin-top: 26px; }
+.account-detail .stacked-form > .button { display: flex; min-width: 150px; margin: 26px 0 8px auto; }
+.account-detail summary, .monitor-route summary, .log-panel summary, .rule-editor summary { color: #38414d; }
+.source-check-result {
+  margin: 22px 0 0; padding: 11px 15px; border-left: 2px solid #a9b0ba;
+  background: #f5f6f7; color: #606977; font-size: 12px; line-height: 1.6;
+}
+.repeat-interval { display: grid; grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) 150px; gap: 16px; max-width: 480px; }
+.repeat-interval label { min-width: 0; }
+@media (max-width: 620px) {
+  .drawer-actions { gap: 9px; }
+  .drawer-actions .button { min-width: 0; }
+  .preview-actions .button { flex: 1 1 auto; }
+  #create-button { flex-basis: 100%; }
+  .repeat-interval { grid-template-columns: minmax(0, 1fr) 110px; }
 }

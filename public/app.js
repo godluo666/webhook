@@ -56,6 +56,7 @@ function syncNavigation(resetScroll = false) {
   $('#current-page-label').textContent = pageNames[view];
   $('#settings-page-title').textContent = view === 'ai-settings' ? 'AI 设置' : '通知渠道';
   $('#settings-page-subtitle').textContent = view === 'ai-settings' ? '配置生成规则所用的模型与 API。' : '管理 Webhook 接收地址与发送方式。';
+  $('#save-button').textContent = view === 'ai-settings' ? '保存 AI 设置' : '保存渠道';
   document.title = pageNames[view] + ' · Webhook Radar';
   if (resetScroll) requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'instant' }));
 }
@@ -121,21 +122,22 @@ function renderMonitors() {
   }
   list.innerHTML = appState.monitors.map((monitor) => {
     if (monitor.kind === 'reminder') {
-      const status = monitor.completedAt ? ['已发送', ''] : !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastError ? ['发送待重试', 'error'] : ['等待提醒', 'paused'];
+      const status = monitor.completedAt ? ['已发送', ''] : !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastError ? ['发送待重试', 'error'] : monitor.repeatMinutes && monitor.lastSentAt ? ['循环中', ''] : ['等待提醒', 'paused'];
       const recipients = (monitor.webhookIds || []).map((id) => appState.settings.webhooks.find((hook) => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
       return '<article class="monitor-item">'
         + '<div class="monitor-top"><div><div class="monitor-name">' + escapeHtml(monitor.label) + '</div><div class="monitor-description">' + escapeHtml(monitor.message) + '</div></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
-        + '<div class="monitor-meta">一次性提醒 · ' + escapeHtml(reminderDate(monitor.remindAt)) + '</div>'
+        + '<div class="monitor-meta">' + escapeHtml(repeatLabel(monitor.repeatMinutes)) + ' · ' + (monitor.repeatMinutes ? '下次 ' : '发送时间 ') + escapeHtml(reminderDate(monitor.remindAt)) + '</div>'
         + '<div class="monitor-result">接收渠道：' + escapeHtml(recipients) + '</div>'
         + (monitor.lastError ? '<div class="monitor-result monitor-error">' + escapeHtml(monitor.lastError) + '</div>' : '')
         + '<details class="monitor-route" data-id="' + escapeHtml(monitor.id) + '"><summary>编辑提醒</summary><div class="rule-fields">'
         + '<label>提醒名称<input class="edit-label" type="text" maxlength="60" value="' + escapeHtml(monitor.label) + '"></label>'
-        + '<label>发送时间<input class="edit-remind-at" type="datetime-local" value="' + reminderInput(monitor.remindAt) + '"></label>'
+        + '<label>首次发送时间<input class="edit-remind-at" type="datetime-local" value="' + reminderInput(monitor.remindAt) + '"></label>'
+        + repeatFields('edit', monitor.repeatMinutes)
         + '<label>提醒内容<textarea class="edit-message" rows="3" maxlength="2000">' + escapeHtml(monitor.message) + '</textarea></label>'
         + '<div class="priority-field ' + (hasNtfyTarget(monitor.webhookIds || []) ? '' : 'hidden') + '"><span>ntfy 优先级</span>' + priorityPicker('edit-priority-' + monitor.id, monitor.priority, true, 'edit-priority') + '</div></div>'
         + '<div class="field-label">通知到</div><div class="target-options">' + targetOptions(monitor.webhookIds || []) + '</div>'
-        + '<p class="edit-hint">修改发送时间会重新安排一次性提醒。</p>'
-        + '<button class="mini-button" data-action="save-rule" data-id="' + escapeHtml(monitor.id) + '" type="button">保存提醒</button></details>'
+        + '<p class="edit-hint">修改首次时间或重复间隔会重新安排提醒；发送失败会重试同一轮。</p>'
+        + '<button class="button button-dark" data-action="save-rule" data-id="' + escapeHtml(monitor.id) + '" type="button">保存提醒</button></details>'
         + '<div class="monitor-actions">'
         + (monitor.completedAt ? '' : '<button class="mini-button" data-action="toggle" data-id="' + escapeHtml(monitor.id) + '">' + (monitor.enabled ? '暂停' : '继续') + '</button>')
         + '<button class="mini-button danger" data-action="delete" data-id="' + escapeHtml(monitor.id) + '">删除</button></div></article>';
@@ -161,7 +163,7 @@ function renderMonitors() {
         </div>
         <div class="field-label">通知到</div><div class="target-options">${targetOptions(monitor.webhookIds || [])}</div>
         <p class="edit-hint">修改地址或监控文字后会重新建立基线，取消旧的待发送提醒。</p>
-        <button class="mini-button" data-action="save-rule" data-id="${escapeHtml(monitor.id)}" type="button">保存任务</button>
+        <button class="button button-dark" data-action="save-rule" data-id="${escapeHtml(monitor.id)}" type="button">保存任务</button>
       </details>
       <div class="monitor-actions"><button class="mini-button" data-action="check" data-id="${escapeHtml(monitor.id)}">立即检查</button><button class="mini-button" data-action="toggle" data-id="${escapeHtml(monitor.id)}">${monitor.enabled ? '暂停' : '继续'}</button><button class="mini-button danger" data-action="delete" data-id="${escapeHtml(monitor.id)}">删除</button></div>
     </article>`;
@@ -184,7 +186,7 @@ function renderLogs() {
   const list = $('#log-list');
   const scrollTop = list.scrollTop;
   const expanded = new Set([...list.querySelectorAll('.raw-log[open]')].map((details) => details.dataset.id));
-  const labels = { instruction: '用户原始指令', conversation: '对话记录', firstModelError: '首次生成校验错误', firstModelResponse: '首次 AI 原始响应', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
+  const labels = { instruction: '用户原始指令', conversation: '对话记录', firstModelError: '首次生成校验错误', firstModelResponse: '首次 AI 原始响应', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', sourceCheck: '本地来源检查', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
   const rawHtml = (entry) => `<details class="raw-log" data-id="${escapeHtml(entry.id)}" ${expanded.has(entry.id) ? 'open' : ''}><summary>查看原始记录</summary><button type="button" class="mini-button copy-log" data-copy-log="${escapeHtml(entry.id)}">复制原始记录</button>${Object.entries(entry.raw).filter(([, value]) => value != null && value !== '').map(([name, value]) => {
     let display = String(value ?? '');
     if (name === 'aiRequest' || name === 'aiResponse' || name === 'responseBody') { try { display = JSON.stringify(JSON.parse(display), null, 2); } catch { /* display the original text */ } }
@@ -340,6 +342,8 @@ function resetAssistant(instruction = '') {
   $('#assistant-dialog').classList.toggle('hidden', !instruction);
   $('#assistant-reply').value = '';
   $('#assistant-messages').innerHTML = '';
+  $('#source-check-result').textContent = '';
+  $('#source-check-result').classList.add('hidden');
   assistantPhase('idle');
 }
 
@@ -357,6 +361,10 @@ async function askAssistant() {
     await prepareAiSettings();
     assistantConversation = assistantConversation.slice(-6);
     const result = await api('/api/parse', 'POST', { instruction: assistantInstruction, sourceUrl: $('#instruction-url').value.trim(), conversation: assistantConversation, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    if (result.sourceCheck) {
+      $('#source-check-result').textContent = result.sourceCheck;
+      $('#source-check-result').classList.remove('hidden');
+    }
     if (result.status === 'answer') {
       addAssistantMessage('assistant', result.message);
       assistantConversation.push({ role: 'assistant', content: result.message });
@@ -376,7 +384,7 @@ async function askAssistant() {
     }
     if (result.status !== 'ready' || !result.monitor) throw new Error('AI 未返回可确认的监控规则');
     previewMonitor = { ...result.monitor, sourceNote: result.sourceNote || '' };
-    addAssistantMessage('assistant', result.monitor.kind === 'reminder' ? '提醒已准备好。请核对发送时间、内容和通知渠道，然后确认创建；需要调整可继续告诉我。' : '信息已齐，规则已生成。请核对下方的监控来源、条件和通知渠道，然后确认创建；需要调整可继续告诉我。');
+    addAssistantMessage('assistant', result.monitor.kind === 'reminder' ? '提醒已准备好。请核对首次时间、重复方式、内容和通知渠道，然后确认创建；需要调整可继续告诉我。' : '信息已齐，规则已生成。请核对下方的监控来源、条件和通知渠道，然后确认创建；需要调整可继续告诉我。');
 
     renderPreview(previewMonitor);
     assistantPhase('ready');
@@ -388,6 +396,45 @@ async function askAssistant() {
   }
 }
 
+function repeatLabel(minutes) {
+  const value = Number(minutes) || 0;
+  if (!value) return '仅一次';
+  if (value % 10080 === 0) return '每 ' + value / 10080 + ' 周';
+  if (value % 1440 === 0) return '每 ' + value / 1440 + ' 天';
+  if (value % 60 === 0) return '每 ' + value / 60 + ' 小时';
+  return '每 ' + value + ' 分钟';
+}
+
+function repeatParts(minutes) {
+  const value = Number(minutes) || 0;
+  if (value && value % 10080 === 0) return [value / 10080, 10080];
+  if (value && value % 1440 === 0) return [value / 1440, 1440];
+  if (value && value % 60 === 0) return [value / 60, 60];
+  return [value || 1, 1];
+}
+
+function repeatFields(scope, minutes) {
+  const [value, unit] = repeatParts(minutes);
+  const repeating = Number(minutes) > 0;
+  return '<label>重复方式<select class="' + scope + '-repeat-mode"><option value="once" ' + (repeating ? '' : 'selected') + '>仅提醒一次</option><option value="interval" ' + (repeating ? 'selected' : '') + '>按固定间隔重复</option></select></label>'
+    + '<div class="repeat-interval ' + (repeating ? '' : 'hidden') + '"><label>间隔<input class="' + scope + '-repeat-value" type="number" min="1" max="525600" step="1" value="' + value + '"></label><label>单位<select class="' + scope + '-repeat-unit">'
+    + [[1, '分钟'], [60, '小时'], [1440, '天'], [10080, '周']].map(([amount, text]) => '<option value="' + amount + '" ' + (unit === amount ? 'selected' : '') + '>' + text + '</option>').join('')
+    + '</select></label></div>';
+}
+
+function repeatMinutesFrom(root, scope) {
+  if (root.querySelector('.' + scope + '-repeat-mode').value === 'once') return 0;
+  const value = Number(root.querySelector('.' + scope + '-repeat-value').value);
+  const unit = Number(root.querySelector('.' + scope + '-repeat-unit').value);
+  const minutes = value * unit;
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 525600) throw new Error('重复间隔需在 1 分钟到 1 年之间');
+  return minutes;
+}
+
+function toggleRepeatFields(root, scope) {
+  const mode = root.querySelector('.' + scope + '-repeat-mode');
+  if (mode) root.querySelector('.repeat-interval').classList.toggle('hidden', mode.value !== 'interval');
+}
 function reminderDate(value) {
   return new Intl.DateTimeFormat('zh-CN', { dateStyle: 'full', timeStyle: 'short' }).format(new Date(value));
 }
@@ -404,13 +451,15 @@ function renderPreview(monitor) {
   if (monitor.kind === 'reminder') {
     element.innerHTML = '<div class="preview-head"><span>✦ &nbsp; 提醒预览</span><span>AI 本次生成 · 待确认</span></div>'
       + '<div class="preview-grid"><div class="preview-item"><small>提醒名称</small><strong>' + escapeHtml(monitor.label) + '</strong></div>'
-      + '<div class="preview-item"><small>发送时间</small><strong>' + escapeHtml(reminderDate(monitor.remindAt)) + '</strong></div>'
+      + '<div class="preview-item"><small>首次发送</small><strong>' + escapeHtml(reminderDate(monitor.remindAt)) + '</strong></div>'
+      + '<div class="preview-item"><small>重复方式</small><strong>' + escapeHtml(repeatLabel(monitor.repeatMinutes)) + '</strong></div>'
       + '<div class="preview-item"><small>提醒内容</small><strong>' + escapeHtml(monitor.message) + '</strong></div></div>'
-      + '<p class="preview-note">一次性提醒。时间按此设备的本地时区显示；请确认后再创建。</p>'
+      + '<p class="preview-note">时间按此设备的本地时区显示。重复提醒在每轮成功送达后安排下一次；请确认后再创建。</p>'
       + '<div class="field-label">通知到</div><div id="preview-targets" class="target-options">' + targetOptions() + '</div>'
       + '<details class="rule-editor"><summary>调整提醒</summary><div class="rule-fields">'
       + '<label>提醒名称<input id="rule-label" type="text" maxlength="60" value="' + escapeHtml(monitor.label) + '"></label>'
-      + '<label>发送时间<input id="rule-remind-at" type="datetime-local" value="' + reminderInput(monitor.remindAt) + '"></label>'
+      + '<label>首次发送时间<input id="rule-remind-at" type="datetime-local" value="' + reminderInput(monitor.remindAt) + '"></label>'
+      + repeatFields('rule', monitor.repeatMinutes)
       + '<label>提醒内容<textarea id="rule-message" rows="3" maxlength="2000">' + escapeHtml(monitor.message) + '</textarea></label>'
       + '<div class="priority-field"><span>ntfy 优先级</span>' + priorityPicker('rule-priority', monitor.priority) + '</div></div></details>'
       + '<div id="preview-result" class="preview-result" aria-live="polite"></div>'
@@ -444,10 +493,10 @@ function updatePriorityVisibility(container, targetsSelector) {
   const priority = container.querySelector('.priority-field');
   if (targets && priority) priority.classList.toggle('hidden', !hasNtfyTarget(selectedIds(targets)));
 }
-$('#preview').addEventListener('change', () => updatePriorityVisibility($('#preview'), '#preview-targets'));
+$('#preview').addEventListener('change', () => { updatePriorityVisibility($('#preview'), '#preview-targets'); toggleRepeatFields($('#preview'), 'rule'); });
 $('#monitor-list').addEventListener('change', (event) => {
   const editor = event.target.closest('.monitor-route');
-  if (editor) updatePriorityVisibility(editor, '.target-options');
+  if (editor) { updatePriorityVisibility(editor, '.target-options'); toggleRepeatFields(editor, 'edit'); }
 });
 
 function collectPreviewRule() {
@@ -460,6 +509,7 @@ function collectPreviewRule() {
     if (!Number.isFinite(time.getTime())) throw new Error('请填写有效的提醒时间');
     rule.remindAt = time.toISOString();
     rule.message = $('#rule-message').value.trim();
+    rule.repeatMinutes = repeatMinutesFrom($('#preview'), 'rule');
     return rule;
   }
   rule.intervalMinutes = Number($('#rule-interval').value);
@@ -695,8 +745,7 @@ $('#settings-form').addEventListener('change', () => { $('#settings-dirty').text
 
 $('#settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  const button = sidebarShell.dataset.view === 'channels' ? $('.settings-save-inline') : $('#save-button');
-  withButton(button, () => saveSettings());
+  withButton($('#save-button'), () => saveSettings());
 });
 
 $('#ai-test-button').addEventListener('click', () => {
@@ -824,12 +873,12 @@ $('#preview').addEventListener('click', (event) => {
     previewMonitor = null;
     $('#preview').classList.add('hidden');
     resetAssistant();
-    addAssistantMessage('assistant', created.kind === 'reminder' ? '提醒已创建，将在' + reminderDate(created.remindAt) + '发送。' : '监控“' + created.label + '”已创建，之后会按规则自动检查。');
+    addAssistantMessage('assistant', created.kind === 'reminder' ? '提醒已创建，' + (created.repeatMinutes ? repeatLabel(created.repeatMinutes) + '，首次 ' : '将在 ') + reminderDate(created.remindAt) + '发送。' : '监控“' + created.label + '”已创建，之后会按规则自动检查。');
     assistantPhase('created');
     $('#instruction').value = '';
     $('#instruction-url').value = '';
     render(true);
-    toast(created.kind === 'reminder' ? '提醒已创建，等待发送时间' : created.lastError ? '监控已创建，首次检查失败：' + created.lastError : '监控已创建，首次检查已完成', Boolean(created.lastError));
+    toast(created.kind === 'reminder' ? '提醒已创建，等待首次发送' : created.lastError ? '监控已创建，首次检查失败：' + created.lastError : '监控已创建，首次检查已完成', Boolean(created.lastError));
     location.hash = '#monitors';
   });
 });
@@ -852,6 +901,7 @@ $('#monitor-list').addEventListener('click', (event) => {
         if (!Number.isFinite(time.getTime())) throw new Error('请填写有效的提醒时间');
         rule.remindAt = time.toISOString();
         rule.message = editor.querySelector('.edit-message').value.trim();
+        rule.repeatMinutes = repeatMinutesFrom(editor, 'edit');
       } else rule.intervalMinutes = Number(editor.querySelector('.edit-interval').value);
       if (monitor.kind === 'generated') { try { rule.plan = JSON.parse(editor.querySelector('.edit-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
       if (editor.querySelector('.edit-url')) rule.url = editor.querySelector('.edit-url').value.trim();
@@ -870,6 +920,7 @@ $('#monitor-list').addEventListener('click', (event) => {
       const updated = appState.monitors.find((item) => item.id === id);
       const check = appState.check;
       if (check.skipped) toast('任务正在检查，请稍后查看结果');
+      else if (check.notDue && updated.kind === 'reminder') toast('尚未到提醒时间：' + reminderDate(updated.remindAt));
       else if (!check.checked) toast(check.error || updated.lastError || '检查失败', true);
       else if (check.sentCount > 0) toast(check.pendingCount ? `已发送至 ${check.sentCount} 个渠道，其余通知待重试` : `条件满足，已发送至 ${check.sentCount} 个渠道`, Boolean(check.pendingCount));
       else if (check.triggered) toast(updated.lastError || '条件满足，但通知未送达', true);
