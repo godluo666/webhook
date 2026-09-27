@@ -48,8 +48,9 @@
                 <label for="instruction" class="field-label">告诉我你希望发生什么</label>
                 <textarea id="instruction" rows="4" placeholder="例如：订单接口连续失败 3 次通知我；或明天上午 9 点提醒我开会"></textarea>
                 <details class="source-optional"><summary>我知道具体监控地址（选填）</summary><label for="instruction-url" class="field-label">来源地址</label><input id="instruction-url" type="text" placeholder="https://example.com/health、tcp://主机:端口 或 log:app.log" autocomplete="off"><p id="local-source-hint" class="field-help"></p></details>
-                <div class="composer-bottom"><span id="ai-status">仅当前任务保留最近 6 条对话；创建或重新开始后清空</span><button class="button button-primary" type="submit" id="parse-button"><span>开始创建</span><span>↗</span></button></div>
+                <div class="composer-bottom"><span id="ai-status">AI 会在信息不足时追问；预览由你确认后创建</span><button class="button button-primary" type="submit" id="parse-button"><span>开始创建</span><span>↗</span></button></div>
               </form>
+              <p class="assistant-context-note">对话只保留在当前创建草稿中。每次仅向 AI 发送最近 6 条对话；创建、重新开始或退出后清空。</p>
               <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong>AI 创建助手</strong><span id="assistant-phase" role="status">等待需求</span></div><button id="assistant-reset" class="mini-button assistant-reset" type="button">重新开始</button></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">补充信息或修改要求</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="直接回答上面的问题，也可以说出想修改的地方"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送补充 ↗</button></div></form></section>
               <div id="preview" class="preview hidden" aria-live="polite"></div>
             </section>

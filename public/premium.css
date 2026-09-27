@@ -200,3 +200,4 @@ footer { color: #a1a7b0; padding: 18px 0; }
   .stat-card { flex: 1 1 100%; border-right: 0; border-bottom: 1px solid #eceef0; }
   .stat-card:last-child { border-bottom: 0; }
 }
+.assistant-context-note { margin: 11px 2px 0; color: #8d949e; font-size: 12px; line-height: 1.6; }
