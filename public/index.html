@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/extra.css">
   <link rel="stylesheet" href="/spatial.css">
   <link rel="stylesheet" href="/premium.css">
+  <link rel="stylesheet" href="/controls.css">
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -50,15 +51,15 @@
         <div class="workspace-flow">
 <section id="create" class="workspace-section compose-card">
               <div class="card-title-row"><div><div class="eyebrow">SMART MONITOR</div><h2>描述你想关注的事</h2></div><div class="section-icon purple" aria-hidden="true">✦</div></div>
-              <p class="section-subtitle">描述需要监控的变化，或指定时间的一次性提醒。AI 会追问必要信息，确认预览后创建。</p>
+              <p class="section-subtitle">说出你想关注的事。AI 会先拟好方案，自动试跑；确认后开始监控或定时提醒。</p>
               <form id="parse-form">
                 <label for="instruction" class="field-label">告诉我你希望发生什么</label>
                 <textarea id="instruction" rows="4" placeholder="例如：订单接口连续失败 3 次通知我；或明天上午 9 点提醒我开会"></textarea>
                 <details class="source-optional"><summary>我知道具体监控地址（选填）</summary><label for="instruction-url" class="field-label">来源地址</label><input id="instruction-url" type="text" placeholder="https://example.com/health、tcp://主机:端口 或 log:app.log" autocomplete="off"><p id="local-source-hint" class="field-help"></p></details>
-                <div class="composer-bottom"><span id="ai-status">AI 会在信息不足时追问；预览由你确认后创建</span><button class="button button-primary" type="submit" id="parse-button"><span>开始创建</span><span>↗</span></button></div>
+                <div class="composer-bottom"><span id="ai-status">先生成方案，参数可以之后调整</span><button class="button button-primary" type="submit" id="parse-button"><span>生成方案</span><span>↗</span></button></div>
               </form>
-              <p class="assistant-context-note">对话只保留在当前创建草稿中。每次仅向 AI 发送最近 6 条对话；创建、重新开始或退出后清空。</p>
-              <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong>AI 创建助手</strong><span id="assistant-phase" role="status">等待需求</span></div><button id="assistant-reset" class="mini-button assistant-reset" type="button">重新开始</button></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">补充信息或修改要求</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="直接回答上面的问题，也可以说出想修改的地方"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送补充 ↗</button></div></form></section>
+              <p class="assistant-context-note">对话只保留在当前创建草稿中。每次仅发送原始需求、当前规则草稿和最近 6 条对话；创建、重新开始或退出后清空。</p>
+              <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong>AI 创建助手</strong><span id="assistant-phase" role="status">等待需求</span></div><button id="assistant-reset" class="mini-button assistant-reset" type="button">重新开始</button></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">继续聊，或告诉我想改哪里</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="不确定也没关系，可以问我原因，或直接说出你的想法"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送消息</button></div></form></section>
               <p id="source-check-result" class="source-check-result hidden" role="status"></p><div id="preview" class="preview hidden" aria-live="polite"></div>
             </section>
 
@@ -85,7 +86,7 @@
               <div class="settings-layout"><form id="settings-form" class="stacked-form settings-content">
                 <section id="channels" class="settings-group"><div class="settings-group-head"><div><h3>接收地址</h3><p>添加和管理 Webhook 接收地址。</p></div><button type="button" id="add-webhook" class="button button-outline">添加渠道</button></div>
                 <div class="channel-table-wrap"><table class="channel-table"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>地址</th><th></th></tr></thead><tbody id="webhook-list"></tbody></table></div><div id="channel-empty" class="channel-empty hidden">还没有通知渠道。添加一个 Webhook 地址开始使用。</div><aside id="webhook-drawer" class="webhook-drawer hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div><span class="eyebrow">CHANNEL</span><h3 id="drawer-title">添加渠道</h3></div><button type="button" id="drawer-close" class="mini-button" aria-label="关闭编辑面板">关闭</button></div><div id="drawer-fields"></div><div class="drawer-actions"><button type="button" id="drawer-delete" class="mini-button danger hidden">删除渠道</button><button type="button" id="drawer-test" class="button button-outline">测试连接</button><button type="button" id="drawer-save" class="button button-dark">保存渠道</button></div></aside><div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
-                <p class="field-help">支持最多 20 个地址。ntfy.sh 可自动识别，自建 ntfy 可手动选择；优先级 1–5，3 为普通。停用渠道仍可单独测试。</p>
+                <p class="field-help">最多可添加 20 个渠道。点击编辑可设置发送格式和渠道专属选项。</p>
                 </section>
                 <section id="ai-settings" class="ai-settings settings-group" aria-labelledby="ai-settings-title"><div class="ai-settings-heading"><h3 id="ai-settings-title">AI 生成设置</h3><p>自然语言生成规则需要你的 OpenAI 兼容 Chat Completions API</p></div>
                   <label for="ai-base-url" class="field-label">API 地址</label><input id="ai-base-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="off">
@@ -108,6 +109,7 @@
       </div>
     </main>
   </div>
+  <dialog id="notification-dialog" class="notification-dialog" aria-labelledby="notification-dialog-title"><header class="notification-dialog-head"><div><span class="eyebrow">NOTIFICATION</span><h2 id="notification-dialog-title"></h2></div><button type="button" class="mini-button" id="notification-close">关闭</button></header><div id="notification-dialog-body"></div><footer class="notification-dialog-footer"><span>保存后用于之后的通知，已在重试队列中的消息保持原样。</span><button type="button" class="button button-primary" id="notification-save">保存通知</button></footer></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
 </html>

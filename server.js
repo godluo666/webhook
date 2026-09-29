@@ -3,10 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
-import { DMIT_PRICING_URL, DMIT_STOCK_URL, inspectPage, isTransition, restockedItems } from './lib/monitor.js';
+import { DMIT_PRICING_URL, DMIT_STOCK_URL, inspectPage, isTransition } from './lib/monitor.js';
 import { validateGeneratedPlan, inspectGenerated, transitionGenerated, describeGeneratedPlan } from './lib/generated.js';
 import { validateLocalSource, inspectLog, inspectService, userLogDirectory } from './lib/sources.js';
 import { WEBHOOK_FORMATS, createWebhookPayload, assertWebhookAccepted } from './lib/webhook.js';
+import { validateNotification, renderNotification, notificationSample } from './lib/notification.js';
+import { assistantMessages } from './lib/assistant.js';
 import { createStore } from './lib/store.js';
 import { createEmailCodeService } from './lib/email.js';
 
@@ -19,6 +21,7 @@ const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
 const activeChecks = new Set();
 const sourceCheckCache = new Map();
+const notificationPreviews = new Map();
 if ((process.env.HTTP_PROXY || process.env.HTTPS_PROXY) && typeof http.setGlobalProxyFromEnv === 'function') {
   http.setGlobalProxyFromEnv({ ...process.env, NO_PROXY: [process.env.NO_PROXY, 'localhost', '127.0.0.1', '::1'].filter(Boolean).join(',') });
 }
@@ -91,6 +94,7 @@ function selectedWebhookIds(user, ids) {
 }
 
 function validateMonitor(candidate, options = {}) {
+  const notification = validateNotification(candidate?.notification);
   if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated', 'reminder'].includes(candidate.kind)) throw new Error('无法识别监控类型');
   const minInterval = candidate.kind === 'generated' && ['service', 'log'].includes(candidate.plan?.sourceType) ? 1 : 5;
   const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 5));
@@ -106,26 +110,26 @@ function validateMonitor(candidate, options = {}) {
     if (!message || message.length > 2000) throw new Error('请告诉我到时提醒什么内容');
     const repeatMinutes = candidate.repeatMinutes == null || candidate.repeatMinutes === '' ? 0 : Number(candidate.repeatMinutes);
     if (!Number.isInteger(repeatMinutes) || repeatMinutes < 0 || repeatMinutes > 525600) throw new Error('重复间隔需为 1 到 525600 分钟，或选择仅提醒一次');
-    return { kind: 'reminder', label, description: message.slice(0, 180), message, remindAt: new Date(timestamp).toISOString(), repeatMinutes, severity };
+    return { notification, kind: 'reminder', label, description: message.slice(0, 180), message, remindAt: new Date(timestamp).toISOString(), repeatMinutes, severity };
   }
-  if (candidate.kind === 'dmit') return { kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
+  if (candidate.kind === 'dmit') return { notification, kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
   if (candidate.kind === 'generated') {
     const plan = validateGeneratedPlan(candidate.plan);
-    const url = sourceOf(candidate.url, plan.sourceType);
-    if (plan.sourceType === 'log' && !url.startsWith('log:') || plan.sourceType === 'service' && !url.startsWith('tcp://') && !/^https?:\/\//.test(url) || !['log', 'service'].includes(plan.sourceType) && !/^https?:\/\//.test(url)) throw new Error('来源与监控规则类型不匹配');
-    return { kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, severity, plan };
+    const url = options.allowMissingSource && !candidate.url ? '' : sourceOf(candidate.url, plan.sourceType);
+    if (url && (plan.sourceType === 'log' && !url.startsWith('log:') || plan.sourceType === 'service' && !url.startsWith('tcp://') && !/^https?:\/\//.test(url) || !['log', 'service'].includes(plan.sourceType) && !/^https?:\/\//.test(url))) throw new Error('来源与监控规则类型不匹配');
+    return { notification, kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, severity, plan };
   }
   const url = urlOf(candidate.url, '监控地址');
   if (candidate.kind === 'dmit-product') {
     const parsed = new URL(url);
     if (!/(^|\.)dmit\.io$/i.test(parsed.hostname) || !/^\/(cart|aff)\.php$/i.test(parsed.pathname)) throw new Error('DMIT 套餐监控需要官方购买链接');
-    return { kind: 'dmit-product', url, label, description, intervalMinutes };
+    return { notification, kind: 'dmit-product', url, label, description, intervalMinutes };
   }
   if (candidate.kind === 'github') {
     if (!/^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/releases\/latest$/.test(url)) throw new Error('GitHub Release 地址无效');
-    return { kind: 'github', url, label, description, intervalMinutes };
+    return { notification, kind: 'github', url, label, description, intervalMinutes };
   }
-  if (candidate.kind === 'rss') return { kind: 'rss', url, label, description, intervalMinutes, keyword: String(candidate.keyword || '').trim().slice(0, 80) };
+  if (candidate.kind === 'rss') return { notification, kind: 'rss', url, label, description, intervalMinutes, keyword: String(candidate.keyword || '').trim().slice(0, 80) };
   if (candidate.kind === 'json') {
     const jsonPath = String(candidate.jsonPath || '').trim();
     if (!/^[\w-]+(?:\.[\w-]+)*$/.test(jsonPath) || jsonPath.length > 120) throw new Error('JSON 字段路径无效，请使用 a.b.c 格式');
@@ -133,11 +137,45 @@ function validateMonitor(candidate, options = {}) {
     if (!['equals', 'notEquals', 'contains', 'gt', 'gte', 'lt', 'lte'].includes(operator)) throw new Error('JSON 比较方式无效');
     const expected = String(candidate.expected ?? '').trim();
     if (!expected || expected.length > 120) throw new Error('请填写 JSON 比较值');
-    return { kind: 'json', url, label, description, intervalMinutes, jsonPath, operator, expected };
+    return { notification, kind: 'json', url, label, description, intervalMinutes, jsonPath, operator, expected };
   }
   const keyword = String(candidate.keyword || '').trim();
   if (keyword.length < 2 || keyword.length > 80) throw new Error('监控文字长度需要在 2 到 80 字之间');
-  return { kind: 'webpage', url, label, description, intervalMinutes, keyword, mode: candidate.mode === 'absent' ? 'absent' : 'contains' };
+  return { notification, kind: 'webpage', url, label, description, intervalMinutes, keyword, mode: candidate.mode === 'absent' ? 'absent' : 'contains' };
+}
+
+function previewSourceSignature(monitor) {
+  return JSON.stringify([monitor.kind, monitor.url, monitor.plan, monitor.keyword, monitor.mode, monitor.jsonPath, monitor.operator, monitor.expected, monitor.triggerMode]);
+}
+
+function buildNotificationPreview(user, monitor, observed = null) {
+  const now = Date.now();
+  for (const [id, entry] of notificationPreviews) if (entry.expiresAt <= now) notificationPreviews.delete(id);
+  const own = [...notificationPreviews].filter(([, entry]) => entry.userId === user.id);
+  while (own.length >= 20) notificationPreviews.delete(own.shift()[0]);
+  while (notificationPreviews.size >= 200) notificationPreviews.delete(notificationPreviews.keys().next().value);
+  const sample = notificationSample(monitor, observed);
+  const payload = renderNotification(monitor, sample.current);
+  const simulation = { ...payload, event: 'monitor.simulation', title: '【模拟】' + payload.title };
+  const requestedIds = monitor.webhookIds ?? user.settings.webhooks.filter((hook) => hook.enabled).map((hook) => hook.id);
+  if (!Array.isArray(requestedIds)) throw new Error('通知渠道格式无效');
+  const hooks = user.settings.webhooks.filter((hook) => hook.enabled && requestedIds.includes(hook.id));
+  const channels = hooks.map((hook) => {
+    try {
+      const actual = createWebhookPayload(hook, payload);
+      const simulated = createWebhookPayload(hook, simulation);
+      return { id: hook.id, name: hook.name, format: actual.format, body: actual.body, headers: actual.headers || {}, simulationBody: simulated.body };
+    } catch (error) { return { id: hook.id, name: hook.name, error: error.message }; }
+  });
+  const id = randomUUID();
+  const expiresAt = now + 10 * 60_000;
+  notificationPreviews.set(id, {
+    userId: user.id, monitorId: monitor.id || null, payload: simulation, observed,
+    sourceSignature: previewSourceSignature(monitor), expiresAt,
+    hooks: hooks.map((hook) => ({ id: hook.id, signature: JSON.stringify(hook) }))
+  });
+  return { id, expiresAt: new Date(expiresAt).toISOString(), payload, basis: sample.basis, note: sample.note,
+    simulationTitle: simulation.title, channels, canSend: hooks.length > 0 && channels.every((channel) => !channel.error) };
 }
 
 async function readLimited(response, maxBytes) {
@@ -184,9 +222,9 @@ async function deliver(user, payload, ids, { includeDisabled = false } = {}) {
         onResponse: (code) => { status = code; }
       });
       assertWebhookAccepted(formatted.format, responseText);
-      addLog(user, 'webhook', 'success', `${hook.name} · HTTP ${status}`, hook.url, Date.now() - started, payload.monitorId);
+      addLog(user, 'webhook', 'success', `${hook.name} · HTTP ${status}`, hook.url, Date.now() - started, payload.monitorId, { notification: JSON.stringify(payload), format: formatted.format });
     } catch (error) {
-      addLog(user, 'webhook', 'error', `${hook.name} · ${error.message}`, hook.url, Date.now() - started, payload.monitorId);
+      addLog(user, 'webhook', 'error', `${hook.name} · ${error.message}`, hook.url, Date.now() - started, payload.monitorId, { notification: JSON.stringify(payload), format: formatted.format, httpStatus: status || error.responseStatus || null, responseBody: error.responseBody || null });
       throw error;
     }
   }));
@@ -233,7 +271,7 @@ async function checkReminder(user, reminder) {
       reminder.firedAt = new Date().toISOString();
       reminder.pendingNotifications.push({
         id: randomUUID(),
-        payload: { event: 'reminder.due', title: reminder.label, message: reminder.message, monitorId: reminder.id, priority: reminder.priority, severity: reminder.severity },
+        payload: renderNotification(reminder),
         remainingIds: [...reminder.webhookIds]
       });
       persist();
@@ -315,18 +353,9 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
         persist();
         return { checked: true, triggered, conditionSatisfied, sentCount, failedCount };
       }
-      const message = monitor.kind === 'dmit'
-        ? monitor.triggerMode === 'any-available'
-          ? `DMIT 库存列表检测到有货：${Object.values(current.items).filter((item) => item.status === 'available').map((item) => item.name).join('、')}。请以官方购买页为准：${DMIT_PRICING_URL}`
-          : `DMIT 库存列表检测到补货：${restockedItems(monitor.snapshot, current).map((item) => item.name).join('、')}。请以官方购买页为准：${DMIT_PRICING_URL}`
-        : monitor.kind === 'dmit-product' ? '指定的 DMIT 套餐购买页已从缺货变为可购买。'
-        : monitor.kind === 'rss' ? `订阅源出现新条目：${current.entries.filter((entry) => !monitor.snapshot.entries.some((old) => old.link === entry.link) && (!monitor.keyword || entry.title.includes(monitor.keyword))).map((entry) => entry.title).slice(0, 3).join('、')}`
-        : monitor.kind === 'github' ? `发布了新版本 ${current.tag}：${current.link}`
-        : monitor.kind === 'generated' ? `${monitor.description}。当前结果：${current.summary}`
-        : monitor.description || current.summary;
       monitor.pendingNotifications.push({
         id: randomUUID(),
-        payload: { event: 'monitor.triggered', title: `${monitor.label} · 条件已满足`, message, url: monitor.url, monitorId: monitor.id, priority: monitor.priority, severity: monitor.severity || 'warning' },
+        payload: renderNotification(monitor, current, monitor.snapshot),
         remainingIds: [...monitor.webhookIds]
       });
       persist();
@@ -372,7 +401,7 @@ function instructionUrl(input) {
 }
 
 function needMoreInfo(questions) {
-  const list = (Array.isArray(questions) ? questions : [questions]).map((item) => String(item || '').trim().slice(0, 180)).filter(Boolean).slice(0, 3);
+  const list = (Array.isArray(questions) ? questions : [questions]).map((item) => String(item || '').trim().slice(0, 180)).filter(Boolean).slice(0, 1);
   return { status: 'need_more_info', questions: list.length ? list : ['请补充要监控的目标地址，以及希望在什么情况下收到通知。'] };
 }
 
@@ -402,6 +431,14 @@ function missingRuleQuestion(error, plan) {
   return null;
 }
 
+function draftPresentation(parsed) {
+  return {
+    message: String(parsed.explanation || (parsed.kind === 'reminder' || parsed.remindAt ? '' : parsed.message) || '').trim().slice(0, 1200),
+    assumptions: (Array.isArray(parsed.assumptions) ? parsed.assumptions : [])
+      .map((item) => String(item || '').trim().slice(0, 180)).filter(Boolean).slice(0, 4)
+  };
+}
+
 async function checkSourceConnection(user, source) {
   if (!source) return '';
   const cacheKey = user.id + ':' + source;
@@ -429,7 +466,7 @@ async function checkSourceConnection(user, source) {
   if (sourceCheckCache.size > 64) sourceCheckCache.delete(sourceCheckCache.keys().next().value);
   return summary;
 }
-async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput = [], repairFeedback = '', timeZoneInput = '') {
+async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput = [], repairFeedback = '', timeZoneInput = '', draftInput = null) {
   const input = String(instruction || '').trim();
   trace.instruction = input;
   if (!input || input.length > 2000) throw new Error('指令长度需要在 1 到 2000 字之间');
@@ -456,18 +493,11 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   const endpoint = aiEndpoint(user.settings.aiBaseUrl || 'https://api.openai.com/v1');
   trace.model = user.settings.aiModel;
   trace.apiEndpoint = new URL(endpoint).origin + new URL(endpoint).pathname;
+  let draft = null;
+  try { if (draftInput) draft = validateMonitor(draftInput, { allowMissingSource: true, allowPastReminder: true }); } catch { /* the latest user instruction can repair an incomplete draft */ }
   const aiRequest = {
       model: user.settings.aiModel,
-      messages: [
-        { role: 'system', content: `你是监控与提醒助手。结合本次对话判断任务是监控、一次性提醒还是固定间隔重复提醒，并生成可执行规则。仅输出 JSON，不要 Markdown。信息不足时返回 {"status":"need_more_info","questions":["只问缺失的关键信息"]}，最多 3 个简短问题。监控类信息充足时返回 {"status":"ready","url":"真实来源","label":"任务名称","intervalMinutes":5,"severity":"warning","plan":{}}。默认每 5 分钟检查，告警级别 warning；用户未要求其他频率或级别时不要为此提问。通知渠道由界面选择。监控来源不能用 auto、unknown 或臆造地址。监控类顶层字段：url,label,intervalMinutes,severity,plan。plan 必填 sourceType=json/html/rss/service/log，mode、initial=baseline/notify。json 可用 mode=compare：path,operator,expected；mode=changed：path，字段值变化时通知；mode=any：path 指向数组，filters 是 [{path,operator,expected}]，全部满足的条目数大于 0 时触发；mode=item-transition：path 指向数组、filters、idPath、statePath、fromValues、toValues。html 可用 mode=contains/absent 和 keyword。rss 可用 mode=new-item 和可选 keyword。operator 可用 equals/notEquals/contains/in/gt/gte/lt/lte；in 的 expected 必须为数组。initial=notify 表示首次检查条件满足时立即通知，baseline 表示首次只记录状态。用户说“任意有货”“只要有货”时，应使用条件匹配和 initial=notify，不得生成从无货到有货的状态变化规则。用户说“补货”且没有“任意有货”时，使用 item-transition、initial=baseline。JSON 列表条件示例：{ "sourceType":"json", "mode":"any", "initial":"notify", "path":"products", "filters":[{"path":"status","operator":"in","expected":["有货","available","in stock"]}] }。已知 DMIT 第三方库存数据地址：${DMIT_STOCK_URL}，返回 JSON {ok,products:[{provider,product_key,name,status,stale,last_check_at}]}，有货状态包括“有货”“available”“in stock”，缺货包括“无货”“缺货”“out of stock”。GitHub 公开仓库的最新 Release 数据地址为 https://api.github.com/repos/OWNER/REPO/releases/latest，tag_name 字段改变表示新版；只有用户明确给出 github.com/OWNER/REPO 时可转换为对应 API 地址。如用户给出了其他 URL，url 必须完全使用该 URL；仅在用户明确提到 DMIT 且未给 URL 时可使用上述 DMIT 地址。不得臆造来源、字段或关键词；监控缺少实际地址或业务触发条件时才追问。若已有 HTTP/TCP 地址且用户只想知道服务是否正常运行，优先创建 service 可用性规则，不要追问接口字段；若用户要看响应内容但没有样例，只用业务语言解释需要什么信息，不要猜测 JSON 字段。提醒无需这些监控字段，按后续要求生成。` },
-        { role: 'system', content: '如果使用 DMIT 第三方库存来源，plan.path 必须为 products；filters 必须包括 provider equals "dmit"、stale equals 0、last_check_at withinMinutes 120。任意有货模式还必须筛选 status in ["有货","available","in stock"]；补货模式使用 item-transition，idPath=product_key、statePath=status、fromValues=["无货","缺货","out of stock"]、toValues=["有货","available","in stock"]，且不要在 filters 中筛选 status。' },
-        { role: 'system', content: '来源类型除上文 json/html/rss 外，还支持 service/log。HTTP 服务或 TCP 端口的可用性使用 plan.sourceType="service"，mode="unavailable"（故障时）、"available"（恢复可用时）或 "slow"（响应时间超过 thresholdMs 毫秒）；url 使用 http(s):// 或 tcp://主机:端口。本地日志使用 plan.sourceType="log"，mode="new-line"，keyword 为新日志行要包含的文字，可选 caseSensitive；url 使用 log:相对路径，例如 log:app.log。日志默认 initial="baseline"，只检查创建后新增的行；用户明确要求现有日志也触发才用 initial="notify"。服务和日志 intervalMinutes 可为 1 到 1440，默认 5。服务不可用监控如要求连续失败 N 次才告警，使用 plan.failureThreshold=N（1 到 10），默认 1。当前只支持 HTTP 或 TCP 可用性，不支持 ICMP Ping；缺少主机端口或健康检查地址时请追问。不得输出脚本、命令或未获用户提供的文件路径。' },
-        { role: 'system', content: '追问时只说用户能理解的业务问题，不要求用户填写 sourceType、metric、path、字段名、表达式等技术参数。用户给出业务条件后，优先据此推断；不要让用户猜自己不知道的字段。若用户提供了地址，服务端会独立检查连接并在界面展示结果，但来源内容不会传给你；不要声称你已读到字段。确实无法判断业务含义时，可先解释常见监控方式和如何取得样例，等待用户选择或粘贴一小段返回内容。认真整合最新回复，不得重复询问已经回答的问题。每轮最多问两个最关键的问题，不要机械复述原话。若最新回复是在问你为什么需要某项信息、能否实现某种方式或规则如何工作，或用户只是探索能做什么，先直接给出有针对性的说明与可行选择，再返回 {"status":"answer","message":"简短、具体的回答，可在末尾提出一个必要的业务问题"}；不要重发上一轮提问，也不要假装规则已创建。' },        { role: 'system', content: '当前时刻：' + new Date().toISOString() + '（UTC）；用户时区：' + timeZone + '。如果用户要求在某个时间提醒，不需要监控来源。输出 {"status":"ready","kind":"reminder","label":"简短标题","message":"到时发送的内容","remindAt":"包含时区偏移的 ISO 8601 日期时间","repeatMinutes":0,"severity":"warning"}，不要输出 url 或 plan。一次性提醒 repeatMinutes=0；“每隔 N 分钟/小时/天/周”换算为整数分钟 1 到 525600。每天固定时刻可用 1440 分钟，首次时间取用户时区中下一个该时刻。只说“每隔 N 时间”而没指定起始时间时，首次发送设为当前时刻加一个间隔，不要追问日期。一次性提醒必须明确未来的日期和时刻；缺少时刻或日期有歧义时才追问。按用户时区解释相对日期和时间，预览由用户确认。普通监控仍按前述规则生成。不要把提醒误判成网页监控。' },
-        { role: 'system', content: fixedSourceUrl ? `用户已单独填写监控来源地址：${sourceUrl}。输出的 url 必须与此地址完全一致。` : sourceInput && !followupUrl ? `用户填写的来源地址“${sourceInput}”无法识别。请根据对话中的后续地址修正；仍不明确就追问。` : '上文要求使用用户提供的 URL，指真实网址部分。如果网址后紧贴中文指令文字，辨别网址和自然语言的边界；不要把“存在”“包含”“通知”等句子当作网址路径。' },
-        ...(repairFeedback ? [{ role: 'system', content: `上次生成的规则未通过校验：${repairFeedback}。请根据用户已提供的信息修正并重新输出 JSON；仅当确实缺少用户才能提供的信息时才返回 need_more_info。` }] : []),
-        { role: 'user', content: input },
-        ...turns
-      ]
+      messages: assistantMessages({ timeZone, sourceUrl, sourceInput, fixedSourceUrl, draft, instruction: input, turns, repairFeedback })
     };
   trace.aiRequest = JSON.stringify(aiRequest).slice(0, 16000);
   const text = await fetchText(endpoint, {
@@ -490,10 +520,15 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   }
   if (parsed?.status === 'need_more_info') {
     const followup = needMoreInfo(parsed.questions || parsed.message);
-    if (sourceUrl && followup.questions.some((question) => /字段|字段名|JSON 路径|path|metric|sourceType|表达式/i.test(question))) {
+    if (!repairFeedback && (sourceUrl || followup.questions.some((question) => /周期|频率|阈值|字段|sourceType|metric|path|表达式/i.test(question)))) {
+      const error = new Error('请先尝试生成可确认方案（目标地址可在草稿中补充），采用合理默认值并在 assumptions 中说明；不要把可推断的参数交给用户。只有确实无法决定业务含义时，才问一个通俗问题。原提问：' + followup.questions.join('；'));
+      error.repairable = true;
+      throw error;
+    }
+    if (followup.questions.some((question) => /字段|字段名|JSON 路径|path|metric|sourceType|表达式/i.test(question))) {
       const error = new Error('已有来源地址，却要求用户猜测技术字段；请优先考虑 HTTP/TCP 可用性，或用业务语言说明尚需什么样例');
       error.repairable = true;
-      error.question = '我已尝试检查来源连接，但无法从地址判断业务内容。你希望在服务无法访问时提醒，还是在返回内容出现某种业务情况时提醒？后者可以粘贴一小段示例。';
+      error.question = '你希望在系统打不开时收到提醒，还是在某个业务状态变化时提醒？说出你平时会怎么判断就可以。';
       throw error;
     }
     const lastQuestion = turns.filter((turn) => turn.role === 'assistant').at(-1)?.content || '';
@@ -509,21 +544,37 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     if (/补充|提供|缺少|不明确|不清楚/.test(String(parsed.error))) return needMoreInfo(parsed.error);
     throw new Error(String(parsed.error));
   }
-  const output = parsed?.status === 'ready' && parsed.monitor ? parsed.monitor : parsed;
+  const output = ['ready', 'draft'].includes(parsed?.status) && parsed.monitor ? parsed.monitor : parsed;
+  const presentation = draftPresentation(parsed);
+  if (output && typeof output === 'object' && !output.notification && draft && (output.kind || (output.remindAt ? 'reminder' : 'generated')) === draft.kind) output.notification = draft.notification;
   if (!output || typeof output !== 'object' || Array.isArray(output)) { const error = new Error('AI 未返回有效规则'); error.repairable = true; throw error; }
   if (output.kind === 'reminder' || output.remindAt) {
     const interval = Number(output.repeatMinutes);
     if (!output.remindAt && /每隔\s*\d+/.test(fullInput) && Number.isInteger(interval) && interval >= 1 && interval <= 525600) {
       output.remindAt = new Date(Date.now() + interval * 60_000).toISOString();
     }
-    try { return { status: 'ready', monitor: validateMonitor({ ...output, kind: 'reminder' }), parser: 'ai', sourceNote: '' }; }
+    try { return { status: 'ready', monitor: validateMonitor({ ...output, kind: 'reminder' }), parser: 'ai', sourceNote: '', ...presentation }; }
     catch (error) {
       if (/提醒时间|提醒什么/.test(error.message)) return needMoreInfo([error.message]);
       error.repairable = true;
       throw error;
     }
   }
-  if (!sourceUrl && !dmit) return needMoreInfo(['请提供实际监控地址，例如健康检查接口、网页、tcp://主机:端口或账户日志文件 log:文件名。']);
+  if (!sourceUrl && !dmit) {
+    let plan;
+    try { plan = validateGeneratedPlan(output.plan); }
+    catch (error) { error.repairable = true; error.question = '你希望什么时候收到提醒？可以说“打不开时”或“出现某种变化时”。'; throw error; }
+    const minimum = ['service', 'log'].includes(plan.sourceType) ? 1 : 5;
+    const monitor = {
+      kind: 'generated', url: '', plan, notification: validateNotification(output.notification),
+      label: String(output.label || '新监控').trim().slice(0, 60),
+      intervalMinutes: Math.max(minimum, Math.min(1440, Number(output.intervalMinutes) || 5)),
+      severity: ['info', 'warning', 'critical'].includes(output.severity) ? output.severity : 'warning',
+      description: describeGeneratedPlan(plan)
+    };
+    return { status: 'draft', monitor, parser: 'ai', missing: ['source'], ...presentation,
+      message: presentation.message || '我已拟好监控方案。填入你平时访问的网址，就可以试跑并确认创建。' };
+  }
   const expectedUrl = sourceUrl || DMIT_STOCK_URL;
   let expected;
   try { expected = sourceOf(expectedUrl); }
@@ -579,16 +630,16 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   if (dmit && !sourceUrl && anyAvailable && (candidate.plan.mode !== 'any' || candidate.plan.initial !== 'notify')) invalidAiRule('AI 没有按“任意有货”生成规则，请调整指令后重试');
   if (dmit && !sourceUrl && !anyAvailable && /补货|恢复供货|重新有货/.test(triggerIntent) && (candidate.plan.mode !== 'item-transition' || candidate.plan.initial !== 'baseline')) invalidAiRule('AI 没有按“补货变化”生成规则，请调整指令后重试');
   trace.validatedUrl = candidate.url;
-  return { status: 'ready', monitor: candidate, parser: 'ai', sourceNote };
+  return { status: 'ready', monitor: candidate, parser: 'ai', sourceNote, ...presentation };
 }
 
-async function parseInstruction(user, instruction, sourceUrlInput, trace, conversationInput = [], timeZone = '') {
-  try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, '', timeZone); }
+async function parseInstruction(user, instruction, sourceUrlInput, trace, conversationInput = [], timeZone = '', draftInput = null) {
+  try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, '', timeZone, draftInput); }
   catch (error) {
     if (!error.repairable) throw error;
     trace.firstModelError = error.message;
     trace.firstModelResponse = trace.aiResponse || '';
-    try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, error.message, timeZone); }
+    try { return await parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput, error.message, timeZone, draftInput); }
     catch (retryError) {
       if (retryError.question) return needMoreInfo([retryError.question]);
       throw retryError;
@@ -750,7 +801,7 @@ async function handler(request, response) {
         const trace = {};
         const safeTrace = () => Object.fromEntries(Object.entries(trace).map(([name, value]) => [name, typeof value === 'string' && user.settings.aiKey ? value.replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : value]));
         try {
-          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace, body.conversation, body.timeZone);
+          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace, body.conversation, body.timeZone, body.draft);
           if (trace.sourceCheck) parsed.sourceCheck = trace.sourceCheck;
           if (parsed.status === 'answer') {
             trace.validation = '已回答用户问题';
@@ -762,7 +813,7 @@ async function handler(request, response) {
             addLog(user, 'parse', 'success', `AI 需要补充信息：${parsed.questions.join('；')}`, null, Date.now() - started, null, safeTrace());
             return sendJson(response, 200, parsed);
           }
-          trace.validation = '通过';
+          trace.validation = parsed.status === 'draft' ? '草稿已生成，待补充目标' : '通过';
           addLog(user, 'parse', 'success', `AI 解析生成 ${parsed.monitor.kind} 规则`, null, Date.now() - started, null, safeTrace());
           return sendJson(response, 200, parsed);
         } catch (error) {
@@ -776,8 +827,38 @@ async function handler(request, response) {
           throw safeError;
         }
       }
+      if (request.method === 'POST' && pathname === '/api/notification-preview') {
+        const body = await readJson(request);
+        const saved = body.monitorId ? user.monitors.find((item) => item.id === body.monitorId) : null;
+        if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
+        const input = saved ? { ...saved, ...body.rule, kind: saved.kind } : body.rule;
+        const spec = { ...validateMonitor(input, { allowMissingSource: true, allowPastReminder: Boolean(saved) }), priority: input.priority,
+          webhookIds: input.webhookIds, id: saved?.id };
+        const previous = notificationPreviews.get(body.previousPreviewId);
+        const observed = previous?.userId === user.id && previous.expiresAt > Date.now() && previous.sourceSignature === previewSourceSignature(spec)
+          ? previous.observed : saved && previewSourceSignature(saved) === previewSourceSignature(spec) ? saved.snapshot : null;
+        return sendJson(response, 200, buildNotificationPreview(user, spec, observed));
+      }
+      if (request.method === 'POST' && pathname === '/api/notification-simulate') {
+        const body = await readJson(request);
+        const preview = notificationPreviews.get(body.previewId);
+        if (!preview || preview.userId !== user.id || preview.expiresAt <= Date.now()) return sendJson(response, 404, { error: '预览已失效，请刷新预览后再发送' });
+        if (preview.monitorId && !user.monitors.some((item) => item.id === preview.monitorId)) return sendJson(response, 404, { error: '任务已删除' });
+        if (!preview.hooks.length) throw new Error('请先选择至少一个接收渠道');
+        const ids = selectedWebhookIds(user, preview.hooks.map((hook) => hook.id));
+        if (preview.hooks.some((hook) => JSON.stringify(user.settings.webhooks.find((item) => item.id === hook.id)) !== hook.signature)) throw new Error('接收渠道已修改，请刷新预览后再发送');
+        // Consume before awaiting I/O, so repeated clicks cannot send the same simulation twice.
+        notificationPreviews.delete(body.previewId);
+        const report = await deliver(user, preview.payload, ids);
+        addLog(user, 'simulation', report.failed.length ? 'error' : 'success',
+          '模拟通知 · ' + report.sent.length + ' 个渠道成功，' + report.failed.length + ' 个失败', null, 0, preview.monitorId,
+          { notification: JSON.stringify(preview.payload), channels: JSON.stringify(report) });
+        addEvent(user, report.failed.length ? 'error' : 'success', '模拟通知', report.sent.length + ' 个渠道成功，' + report.failed.length + ' 个失败；任务状态不变', preview.monitorId);
+        return sendJson(response, 200, report);
+      }
       if (request.method === 'POST' && pathname === '/api/preview-check') {
-        const spec = validateMonitor(await readJson(request));
+        const input = await readJson(request);
+        const spec = { ...validateMonitor(input), priority: input.priority, webhookIds: input.webhookIds };
         const started = Date.now();
         let status;
         let responseSample = '';
@@ -794,7 +875,7 @@ async function handler(request, response) {
             result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
           }
           addLog(user, 'preview', 'success', `来源测试 · ${status ? `HTTP ${status} · ` : ''}${result.summary}`, spec.url, Date.now() - started);
-          return sendJson(response, 200, { status: status || null, healthy: result.healthy, summary: result.summary });
+          return sendJson(response, 200, { status: status || null, healthy: result.healthy, summary: result.summary, notificationPreview: buildNotificationPreview(user, spec, result) });
         } catch (error) {
           addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started, null, {
             requestUrl: spec.url, httpStatus: error.responseStatus || status || null,
@@ -903,7 +984,7 @@ async function handler(request, response) {
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: '不支持的请求方法' });
     const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-    if (!['index.html', 'app.js', 'style.css', 'extra.css', 'spatial.css', 'premium.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
+    if (!['index.html', 'app.js', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
     const file = path.join(root, 'public', filename);
     response.writeHead(200, { 'content-type': contentTypes[path.extname(file)], 'content-security-policy': "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'" });
     fs.createReadStream(file).pipe(response);
