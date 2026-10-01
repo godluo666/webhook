@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5f7">
+  <title>Webhook Radar · Apple Design 视觉效果演示</title>
+  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./extra.css">
+  <link rel="stylesheet" href="./spatial.css">
+  <link rel="stylesheet" href="./premium.css">
+  <link rel="stylesheet" href="./controls.css">
+</head>
+<body>
+  <div class="app-shell" data-view="top">
+    <!-- macOS 悬浮毛玻璃侧边栏 -->
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#top" aria-label="Webhook Radar 首页">
+        <span class="brand-mark">✳</span>
+        <span class="brand-name">webhook<span class="brand-light">radar</span></span>
+      </a>
+      <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-controls="sidebar" aria-label="展开导航" title="展开导航">
+        <span aria-hidden="true">‹</span>
+      </button>
+
+      <nav class="side-nav" aria-label="主导航">
+        <a class="nav-link active" href="#top" data-target="top">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/>
+              <rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>
+            </svg>
+          </span>
+          <span class="nav-text">概览</span>
+        </a>
+        <a class="nav-link" href="#create" data-target="create">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2"/>
+              <path d="M12 3.5v2M20.5 12h-2M12 20.5v-2M3.5 12h2"/>
+            </svg>
+          </span>
+          <span class="nav-text">智能创建</span>
+        </a>
+        <a class="nav-link" href="#monitors" data-target="monitors">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round">
+              <path d="M9 6h11M9 12h11M9 18h11"/>
+              <circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>
+            </svg>
+          </span>
+          <span class="nav-text">任务与提醒</span>
+        </a>
+        <a class="nav-link" href="#notifications" data-target="notifications">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 11.5 20 4l-5.7 16-3.2-6.8L3 11.5Z"/><path d="m11.1 13.2 4.8-4.5"/>
+            </svg>
+          </span>
+          <span class="nav-text">快速发送</span>
+        </a>
+        <div class="nav-divider"></div>
+        <a class="nav-link" href="#channels" data-target="channels">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round">
+              <path d="M3.5 7h17M3.5 17h17"/><circle cx="9" cy="7" r="2" fill="white"/><circle cx="16" cy="17" r="2" fill="white"/>
+            </svg>
+          </span>
+          <span class="nav-text">通知渠道</span>
+        </a>
+        <a class="nav-link" href="#ai-settings" data-target="ai-settings">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2Z"/>
+              <path d="m19 17 .6 2.4L22 20l-2.4.6L19 23l-.6-2.4L16 20l2.4-.6L19 17Z"/>
+            </svg>
+          </span>
+          <span class="nav-text">AI 设置</span>
+        </a>
+        <a class="nav-link" href="#activity" data-target="activity">
+          <span class="nav-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round">
+              <path d="M8 6h12M8 12h12M8 18h12"/>
+              <circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>
+            </svg>
+          </span>
+          <span class="nav-text">活动与日志</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-bottom">
+        <span class="live-dot"></span> 本地服务运行中 <span class="version">v1.0</span>
+      </div>
+    </aside>
+
+    <!-- 主展示区 -->
+    <main class="main-content">
+      <header class="topbar">
+        <span class="topbar-start">
+          <button type="button" id="sidebar-visibility" class="sidebar-visibility" aria-label="隐藏导航">
+            <span class="menu-lines"></span>
+          </button>
+          <span class="breadcrumb">Webhook Radar <span>/</span> <span id="current-page-label">概览</span></span>
+        </span>
+        <span class="topbar-right">
+          <span class="live-dot"></span> 系统在线 <span id="account-name">Apple ID: demo_user</span>
+          <button type="button" class="text-button" onclick="showToast('已退出演示账号')">退出</button>
+        </span>
+      </header>
+
+      <div class="page-inner">
+        <!-- 1. 概览模块 (Apple Bento Grid) -->
+        <section id="overview" class="overview-page">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">WEBHOOK RADAR</div>
+              <h1>通知工作台</h1>
+              <p>轻量敏捷的实时监控与自动化通知服务，优雅传递每一次变更。</p>
+            </div>
+          </div>
+
+          <section class="status-grid">
+            <div class="stat-card">
+              <div class="stat-label">通知渠道 <span class="stat-icon">↗</span></div>
+              <div class="stat-value">3 个已启用</div>
+              <div class="stat-foot">飞书机器人、企业微信、ntfy.sh</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">运行中的任务 <span class="stat-icon" style="color: var(--apple-green);">◉</span></div>
+              <div class="stat-value">5 个活跃</div>
+              <div class="stat-foot">3 个网页巡检 · 2 个定时提醒</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">已发送通知 <span class="stat-icon">↗</span></div>
+              <div class="stat-value">148 次</div>
+              <div class="stat-foot">本月累计成功送达率 100%</div>
+            </div>
+          </section>
+
+          <div class="overview-actions">
+            <a href="#create" onclick="switchTab('create')">
+              <span>开始使用</span>
+              <strong>创建监控或定时提醒 <span>↗</span></strong>
+              <small>用一句自然语言描述关注目标，AI 拟定方案并在沙盒试跑</small>
+            </a>
+            <a href="#channels" onclick="switchTab('channels')">
+              <span>通知准备</span>
+              <strong>管理通知渠道 <span>↗</span></strong>
+              <small>已接入企业微信、飞书、Telegram、Discord 及 ntfy 等</small>
+            </a>
+          </div>
+
+          <p class="overview-note">保持服务运行，监控和到期提醒才能持续发送；重启后会补发未完成的提醒。</p>
+        </section>
+
+        <!-- 2. 智能创建模块 (Apple iMessage 气泡对话) -->
+        <section id="create" class="workspace-section compose-card">
+          <div class="card-title-row">
+            <div>
+              <div class="eyebrow">SMART MONITOR</div>
+              <h2>描述你想关注的事</h2>
+            </div>
+          </div>
+          <p class="section-subtitle">说出你想关注的事。AI 会先拟好方案，自动试跑；确认后开始监控或定时提醒。</p>
+          
+          <form id="parse-form">
+            <label class="field-label" for="instruction">告诉我你希望发生什么</label>
+            <textarea id="instruction" rows="4" placeholder="例如：每 5 分钟检查一次接口响应，如果 HTTP 状态码不是 200 则通知我">https://api.github.com/repos/google/gemini 出现新的 Release 版本时通知我</textarea>
+            
+            <details class="source-optional">
+              <summary>我知道具体监控地址（选填）</summary>
+              <label for="instruction-url" class="field-label">来源地址</label>
+              <input id="instruction-url" type="text" value="https://api.github.com/repos/google/gemini/releases" autocomplete="off">
+            </details>
+            
+            <div class="composer-bottom">
+              <span id="ai-status">先生成方案，参数可以之后调整</span>
+              <button class="button button-primary" type="button" onclick="document.getElementById('demo-preview').classList.remove('hidden')">
+                <span>生成方案</span><span>↗</span>
+              </button>
+            </div>
+          </form>
+
+          <!-- Apple iMessage 对话流展示 -->
+          <div class="assistant-dialog" style="margin-top: 24px;">
+            <div class="assistant-dialog-head">
+              <span class="assistant-avatar">✦</span>
+              <div>
+                <strong>AI 创建助手</strong>
+                <span id="assistant-phase">方案已拟好，已为你设置最优参数</span>
+              </div>
+              <button class="mini-button assistant-reset" type="button">重新开始</button>
+            </div>
+            <div class="assistant-messages">
+              <div class="assistant-message">
+                <small>AI 创建助手</small>
+                我已经为你拟定了监控 GitHub Release 的规则方案：每 10 分钟自动检查一次版本列表，检测到新 tag 时立即推送更新摘要。
+              </div>
+              <div class="assistant-message user">
+                <small>你</small>
+                好的，给飞书和微信群发通知，标题写上【Gemini 新版发布】
+              </div>
+            </div>
+          </div>
+
+          <!-- Apple Tech Specs 方案工单卡 -->
+          <div id="demo-preview" class="preview" style="margin-top: 24px;">
+            <div class="preview-head">
+              <span>✦ &nbsp; 监控规则预览</span>
+              <span>AI 本次生成 · 待确认</span>
+            </div>
+            
+            <div class="preview-grid">
+              <div class="preview-item">
+                <small>任务名称</small>
+                <strong>Google Gemini 版本发布监控</strong>
+              </div>
+              <div class="preview-item">
+                <small>检查频率</small>
+                <strong>每 10 分钟</strong>
+              </div>
+              <div class="preview-item summary-wide">
+                <small>监控地址</small>
+                <strong>https://api.github.com/repos/google/gemini/releases</strong>
+              </div>
+            </div>
+
+            <!-- Apple iOS 推送卡片模拟器 -->
+            <div class="notification-render">
+              <div class="notification-preview-label">
+                <strong>模拟推送卡片效果 (iOS / macOS 风格)</strong>
+                <span class="notification-basis">真实检测预览</span>
+              </div>
+              <div class="notification-message">
+                <h4>【Gemini 新版发布】发现新版本 v2.5.0</h4>
+                <p>Google Gemini 刚刚发布了最新版本 v2.5.0。包含了推理性能优化与多模态流式响应改进。</p>
+                <small>https://github.com/google/gemini/releases/tag/v2.5.0</small>
+              </div>
+            </div>
+
+            <div class="preview-actions">
+              <button class="button button-outline" type="button">修改需求</button>
+              <button class="button button-outline" type="button">试跑一次</button>
+              <button class="button button-primary" type="button">确认并开始监控 ↗</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3. 任务与提醒模块 -->
+        <section id="monitors" class="workspace-section monitors-card">
+          <div class="card-title-row">
+            <div>
+              <div class="eyebrow">AUTOMATIONS</div>
+              <h2>任务与提醒</h2>
+            </div>
+            <span class="count-pill">3 个任务活跃中</span>
+          </div>
+
+          <div class="monitor-list">
+            <!-- 运行中 -->
+            <article class="monitor-item">
+              <div class="monitor-top">
+                <div>
+                  <div class="monitor-name">生产网关 API 状态巡查</div>
+                  <div class="monitor-description">连续 2 次 HTTP 状态码不等于 200 时立即告警</div>
+                </div>
+                <span class="monitor-status">运行中</span>
+              </div>
+              <div class="monitor-meta">
+                每 5 分钟检查 · 2 分钟前已检查 · <a href="#">https://api.internal.net/health ↗</a>
+              </div>
+              <div class="monitor-result">接收渠道：飞书告警群、技术团队 Webhook</div>
+              <div class="monitor-actions">
+                <button class="mini-button" type="button">通知内容与预览</button>
+                <button class="mini-button" type="button">立即检查</button>
+                <button class="mini-button" type="button">暂停</button>
+                <button class="mini-button danger" type="button">删除</button>
+              </div>
+            </article>
+
+            <!-- 循环提醒 -->
+            <article class="monitor-item">
+              <div class="monitor-top">
+                <div>
+                  <div class="monitor-name">每周一项目站会提醒</div>
+                  <div class="monitor-description">上午 09:30 开始周会，请提前整理上周核心交付与阻塞项</div>
+                </div>
+                <span class="monitor-status" style="background: var(--apple-blue-bg); color: var(--apple-blue); border-color: var(--info-border);">循环中</span>
+              </div>
+              <div class="monitor-meta">每 1 周重复 · 下次发送 2026/10/05 09:30</div>
+              <div class="monitor-result">接收渠道：企业微信群</div>
+              <div class="monitor-actions">
+                <button class="mini-button" type="button">编辑提醒</button>
+                <button class="mini-button" type="button">暂停</button>
+                <button class="mini-button danger" type="button">删除</button>
+              </div>
+            </article>
+
+            <!-- 已暂停 -->
+            <article class="monitor-item">
+              <div class="monitor-top">
+                <div>
+                  <div class="monitor-name">DMIT 美西 VPS 库存盯盘</div>
+                  <div class="monitor-description">由无货变为有货时通知</div>
+                </div>
+                <span class="monitor-status paused">已暂停</span>
+              </div>
+              <div class="monitor-meta">每 15 分钟检查 · 昨天已暂停</div>
+              <div class="monitor-result">接收渠道：Telegram Channel</div>
+              <div class="monitor-actions">
+                <button class="mini-button" type="button">通知内容与预览</button>
+                <button class="mini-button" type="button">继续运行</button>
+                <button class="mini-button danger" type="button">删除</button>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <!-- 4. 快速发送模块 -->
+        <section id="notifications" class="workspace-section quick-card">
+          <div class="card-title-row">
+            <div>
+              <div class="eyebrow">QUICK SEND</div>
+              <h2>快速发送</h2>
+            </div>
+          </div>
+          <p class="section-subtitle">写好内容，立即推送到已连接的 Webhook。</p>
+          
+          <form class="stacked-form" id="send-form">
+            <label class="field-label" for="send-title">通知标题</label>
+            <input id="send-title" type="text" value="服务上线通知">
+            
+            <label class="field-label" for="send-message">通知内容</label>
+            <textarea id="send-message" rows="3">Webhook Radar 苹果高级感设计已完全装载，界面柔和优雅。</textarea>
+            
+            <div class="field-label">ntfy 优先级 (macOS 分段选择器)</div>
+            <div class="priority-picker">
+              <label><input type="radio" name="p" value="1"><span>1 · 最低</span></label>
+              <label><input type="radio" name="p" value="2"><span>2 · 低</span></label>
+              <label><input type="radio" name="p" value="3" checked><span>3 · 普通</span></label>
+              <label><input type="radio" name="p" value="4"><span>4 · 高</span></label>
+              <label><input type="radio" name="p" value="5"><span>5 · 紧急</span></label>
+            </div>
+
+            <div class="field-label">发送到渠道</div>
+            <div class="target-options">
+              <label class="target-option"><input type="checkbox" checked><span>技术告警群 (飞书)</span></label>
+              <label class="target-option"><input type="checkbox" checked><span>运维值班 (企业微信)</span></label>
+              <label class="target-option"><input type="checkbox"><span>个人手机 (ntfy)</span></label>
+            </div>
+
+            <div class="form-actions" style="margin-top: 24px;">
+              <button class="button button-dark" type="button" onclick="showToast('通知已送达 2 个已选渠道！')">发送通知 <span>↗</span></button>
+            </div>
+          </form>
+        </section>
+
+        <!-- 5. 通知渠道模块 -->
+        <section id="channels" class="workspace-section settings-card">
+          <div class="section-heading">
+            <div>
+              <div class="eyebrow">PREFERENCES</div>
+              <h2>通知渠道</h2>
+              <p>管理 Webhook 接收地址与发送方式。</p>
+            </div>
+          </div>
+
+          <div class="channel-table-wrap" style="margin-top: 24px;">
+            <table class="channel-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>类型</th>
+                  <th>状态</th>
+                  <th>接收地址</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><strong>运维监控群</strong></td>
+                  <td>企业微信</td>
+                  <td><span class="channel-state is-active">已启用</span></td>
+                  <td class="channel-host">qyapi.weixin.qq.com</td>
+                  <td><button type="button" class="mini-button">编辑</button></td>
+                </tr>
+                <tr>
+                  <td><strong>技术核心组</strong></td>
+                  <td>飞书</td>
+                  <td><span class="channel-state is-active">已启用</span></td>
+                  <td class="channel-host">open.feishu.cn</td>
+                  <td><button type="button" class="mini-button">编辑</button></td>
+                </tr>
+                <tr>
+                  <td><strong>手机紧急推送</strong></td>
+                  <td>ntfy</td>
+                  <td><span class="channel-state is-active">已启用</span></td>
+                  <td class="channel-host">ntfy.sh</td>
+                  <td><button type="button" class="mini-button">编辑</button></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- 6. AI 设置模块 -->
+        <section id="ai-settings" class="workspace-section settings-card">
+          <div class="section-heading">
+            <div>
+              <div class="eyebrow">AI MODEL</div>
+              <h2>AI 生成设置</h2>
+              <p>自然语言生成规则需要 OpenAI 兼容 Chat Completions API</p>
+            </div>
+          </div>
+
+          <form class="stacked-form" style="max-width: 620px; margin-top: 24px;">
+            <label class="field-label">API 地址</label>
+            <input type="url" value="https://api.openai.com/v1">
+            
+            <label class="field-label">模型名称</label>
+            <input type="text" value="gpt-4o">
+            
+            <label class="field-label">API Key <span class="key-indicator">· 已安全配置 (sk-...)</span></label>
+            <input type="password" placeholder="留空则保持当前 Key">
+
+            <div class="ai-test-row">
+              <button type="button" class="button button-outline" onclick="showToast('API 连接测试成功，延迟 164ms')">测试 API 连接</button>
+            </div>
+          </form>
+        </section>
+
+        <!-- 7. 活动与日志模块 -->
+        <section id="activity" class="workspace-section activity-card">
+          <div class="card-title-row">
+            <div>
+              <div class="eyebrow">ACTIVITY</div>
+              <h2>最近活动与日志</h2>
+            </div>
+          </div>
+
+          <div class="activity-list">
+            <div class="activity-row">
+              <span class="event-dot success"></span>
+              <div>
+                <div class="event-title">生产网关 API 巡查正常</div>
+                <div class="event-detail">返回 HTTP 200，响应时间 48ms</div>
+                <div class="event-time">1 分钟前</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <span class="event-dot success"></span>
+              <div>
+                <div class="event-title">快速发送测试通知成功</div>
+                <div class="event-detail">已成功向 2 个渠道（飞书、企业微信）送达消息</div>
+                <div class="event-time">12 分钟前</div>
+              </div>
+            </div>
+            <div class="activity-row">
+              <span class="event-dot"></span>
+              <div>
+                <div class="event-title">AI 生成规则完成</div>
+                <div class="event-detail">根据提示词自动匹配 GitHub Release 监控模板</div>
+                <div class="event-time">25 分钟前</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <footer>Designed with Apple Human Interface Guidelines · Webhook Radar</footer>
+      </div>
+    </main>
+  </div>
+
+  <div id="demo-toast" class="toast"></div>
+
+  <script>
+    const shell = document.querySelector('.app-shell');
+    const links = document.querySelectorAll('.side-nav .nav-link');
+    const pageLabel = document.getElementById('current-page-label');
+    const titles = {
+      top: '概览',
+      create: '智能创建',
+      monitors: '任务与提醒',
+      notifications: '快速发送',
+      channels: '通知渠道',
+      'ai-settings': 'AI 设置',
+      activity: '活动与日志'
+    };
+
+    function switchTab(view) {
+      shell.dataset.view = view;
+      links.forEach(link => {
+        link.classList.toggle('active', link.dataset.target === view);
+      });
+      pageLabel.textContent = titles[view] || '概览';
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    links.forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchTab(link.dataset.target);
+      });
+    });
+
+    const toggle = document.getElementById('sidebar-toggle');
+    toggle.addEventListener('click', () => {
+      shell.classList.toggle('sidebar-collapsed');
+    });
+
+    const visibility = document.getElementById('sidebar-visibility');
+    visibility.addEventListener('click', () => {
+      shell.classList.toggle('sidebar-hidden');
+    });
+
+    function showToast(msg) {
+      const t = document.getElementById('demo-toast');
+      t.textContent = msg;
+      t.classList.add('visible');
+      setTimeout(() => t.classList.remove('visible'), 3200);
+    }
+  </script>
+</body>
+</html>

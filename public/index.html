@@ -34,7 +34,7 @@
     </aside>
 
     <main id="top" class="main-content">
-      <header class="topbar"><span class="topbar-start"><button type="button" id="sidebar-visibility" class="sidebar-visibility" aria-controls="sidebar" aria-expanded="true" aria-label="隐藏导航" title="隐藏导航"><span class="menu-lines" aria-hidden="true"></span></button><span class="breadcrumb">Webhook Radar <span>/</span> <span id="current-page-label">概览</span></span></span><span class="topbar-right"><span class="live-dot"></span> 系统在线 <span id="account-name"></span><button type="button" id="logout-button" class="text-button">退出</button></span></header>
+      <header class="topbar"><span class="topbar-start"><button type="button" id="sidebar-visibility" class="sidebar-visibility" aria-controls="sidebar" aria-expanded="true" aria-label="隐藏导航" title="隐藏导航"><span class="menu-lines" aria-hidden="true"></span></button><span class="breadcrumb"><span class="breadcrumb-brand">Webhook Radar</span><span class="breadcrumb-separator">/</span> <span id="current-page-label">概览</span></span></span><span class="topbar-right"><span class="system-status"><span class="live-dot"></span> 系统在线</span> <span id="account-name"></span><button type="button" id="logout-button" class="text-button">退出</button></span></header>
       <div class="page-inner">
         <section id="overview" class="overview-page">
         <div class="page-heading"><div><div class="eyebrow">WEBHOOK RADAR</div><h1>通知工作台</h1><p>创建监控与定时提醒，管理接收渠道，查看每一次发送。</p></div></div>
@@ -50,8 +50,9 @@
 
         <div class="workspace-flow">
 <section id="create" class="workspace-section compose-card">
-              <div class="card-title-row"><div><div class="eyebrow">SMART MONITOR</div><h2>描述你想关注的事</h2></div><div class="section-icon purple" aria-hidden="true">✦</div></div>
-              <p class="section-subtitle">说出你想关注的事。AI 会先拟好方案，自动试跑；确认后开始监控或定时提醒。</p>
+              <div class="card-title-row"><div><div class="eyebrow">SMART MONITOR</div><h2 id="create-heading">描述你想关注的事</h2></div><div class="section-icon purple" aria-hidden="true">✦</div></div>
+              <p id="create-subtitle" class="section-subtitle">说出你想关注的事。AI 会先拟好方案，自动试跑；确认后开始监控或定时提醒。</p>
+<section id="revision-context" class="revision-context hidden" aria-label="正在修改的任务"><div><span>正在修改</span><strong id="revision-task-name"></strong><p>AI 对话只属于本次修改，确认后更新原任务。</p></div><button id="cancel-revision" class="button button-outline" type="button">取消修改</button></section>
               <form id="parse-form">
                 <label for="instruction" class="field-label">告诉我你希望发生什么</label>
                 <textarea id="instruction" rows="4" placeholder="例如：订单接口连续失败 3 次通知我；或明天上午 9 点提醒我开会"></textarea>
@@ -59,7 +60,7 @@
                 <div class="composer-bottom"><span id="ai-status">先生成方案，参数可以之后调整</span><button class="button button-primary" type="submit" id="parse-button"><span>生成方案</span><span>↗</span></button></div>
               </form>
               <p class="assistant-context-note">对话只保留在当前创建草稿中。每次仅发送原始需求、当前规则草稿和最近 6 条对话；创建、重新开始或退出后清空。</p>
-              <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong>AI 创建助手</strong><span id="assistant-phase" role="status">等待需求</span></div><button id="assistant-reset" class="mini-button assistant-reset" type="button">重新开始</button></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">继续聊，或告诉我想改哪里</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="不确定也没关系，可以问我原因，或直接说出你的想法"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送消息</button></div></form></section>
+              <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong id="assistant-title">AI 创建助手</strong><span id="assistant-phase" role="status">等待需求</span></div><button id="assistant-reset" class="mini-button assistant-reset" type="button">重新开始</button></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">继续聊，或告诉我想改哪里</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="不确定也没关系，可以问我原因，或直接说出你的想法"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送消息</button></div></form></section>
               <p id="source-check-result" class="source-check-result hidden" role="status"></p><div id="preview" class="preview hidden" aria-live="polite"></div>
             </section>
 

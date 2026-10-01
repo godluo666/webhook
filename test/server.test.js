@@ -788,3 +788,93 @@ test('AI 调整文案继承当前草稿，未输出通知设置时保留用户�
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test('AI 修改已创建任务只生成草稿，确认后更新原 ID，并保护暂停状态、版本及账户隔离', async () => {
+  const calls = [];
+  const mock = http.createServer(async (req, res) => {
+    if (req.url === '/health') { res.end('healthy'); return; }
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    if (req.url === '/hook') { res.end('ok'); return; }
+    calls.push(JSON.parse(raw));
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+      status: 'ready', message: '已改为每15分钟检查，连续失败3次提醒，其他设置保留。',
+      monitor: { kind: 'generated', intervalMinutes: 15, plan: { failureThreshold: 3 } }
+    }) } }] }));
+  });
+  const port = await listen(mock);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'radar-refine-'));
+  const { base, child } = await startApp(dataDir);
+  const denied = async (endpoint, method, body, status) => {
+    const response = await fetch(base + endpoint, { method, headers: { cookie: cookies.get(base), 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal(response.status, status, await response.text());
+  };
+  try {
+    await request(base, '/api/settings', 'PUT', { aiBaseUrl: 'http://127.0.0.1:' + port, aiModel: 'test-model', aiKey: 'test-key', webhooks: [{ id: 'hook', name: '频道', url: 'http://127.0.0.1:' + port + '/hook' }] });
+    const created = await request(base, '/api/monitors', 'POST', { kind: 'generated', label: '订单服务', url: 'http://127.0.0.1:' + port + '/health', intervalMinutes: 10, plan: { sourceType: 'service', mode: 'unavailable', initial: 'baseline', failureThreshold: 1 }, notification: { title: '我的标题', body: '{{details}}' }, webhookIds: ['hook'] });
+    const id = created.monitors[0].id;
+    const paused = (await request(base, '/api/monitors/' + id, 'PATCH', { enabled: false })).monitors[0];
+    const draft = await request(base, '/api/parse', 'POST', { monitorId: id, expectedRevision: paused.revision, instruction: '每15分钟检查，连续失败3次再通知' });
+    assert.equal(draft.status, 'ready');
+    assert.equal(draft.editing.monitorId, id);
+    assert.equal(draft.monitor.plan.sourceType, 'service');
+    assert.equal(draft.monitor.plan.failureThreshold, 3);
+    assert.equal(draft.monitor.plan.initial, 'baseline');
+    assert.equal(draft.monitor.url, paused.url);
+    assert.deepEqual(draft.monitor.notification, paused.notification);
+    assert.match(JSON.stringify(calls[0]), /订单服务/);
+    assert.deepEqual((await request(base, '/api/state')).monitors[0], paused);
+    await denied('/api/monitors/' + id, 'PATCH', { rule: { label: '不应保存' }, webhookIds: ['unknown'], expectedRevision: paused.revision }, 400);
+    assert.deepEqual((await request(base, '/api/state')).monitors[0], paused);
+    const saved = await request(base, '/api/monitors/' + id, 'PATCH', { rule: draft.monitor, webhookIds: ['hook'], expectedRevision: paused.revision });
+    assert.equal(saved.monitors.length, 1);
+    assert.equal(saved.monitors[0].id, id);
+    assert.equal(saved.monitors[0].enabled, false);
+    assert.equal(saved.monitors[0].plan.failureThreshold, 3);
+    assert.equal(saved.monitors[0].revision, paused.revision + 1);
+    await denied('/api/monitors/' + id, 'PATCH', { rule: { intervalMinutes: 60 }, expectedRevision: paused.revision }, 409);
+    const count = calls.length;
+    await denied('/api/parse', 'POST', { monitorId: id, expectedRevision: paused.revision, instruction: '再改一下' }, 409);
+    assert.equal(calls.length, count);
+    await request(base, '/api/auth/register', 'POST', { username: 'bob', password: 'another-secure-password' });
+    await denied('/api/parse', 'POST', { monitorId: id, instruction: '修改这个规则' }, 404);
+    await denied('/api/monitors/' + id, 'PATCH', { rule: draft.monitor }, 404);
+    assert.equal(calls.length, count);
+  } finally { child.kill(); await new Promise((resolve) => mock.close(resolve)); await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test('旧规则可由 AI 转成新检测逻辑；循环提醒只改内容时保留时间与暂停状态', async () => {
+  let reply;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url === '/source') { res.end('<p>normal</p>'); return; }
+    for await (const chunk of req) { /* consume */ }
+    res.setHeader('content-type', 'application/json');
+    res.end(req.url === '/hook' ? '{}' : JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }));
+  });
+  const port = await listen(mock), dataDir = await mkdtemp(path.join(tmpdir(), 'radar-refine-legacy-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', { aiBaseUrl: 'http://127.0.0.1:' + port, aiModel: 'test', aiKey: 'test-key', webhooks: [{ id: 'hook', name: '频道', url: 'http://127.0.0.1:' + port + '/hook' }] });
+    const legacy = (await request(base, '/api/monitors', 'POST', { kind: 'webpage', label: '服务页面', url: 'http://127.0.0.1:' + port + '/source', intervalMinutes: 15, keyword: 'down', notification: { title: '服务异常', body: '保留文案：{{details}}' }, webhookIds: ['hook'] })).monitors[0];
+    reply = { status: 'ready', monitor: { kind: 'generated', notification: { title: '新的标题' }, plan: { sourceType: 'service', mode: 'unavailable', initial: 'baseline', failureThreshold: 3 } } };
+    const draft = await request(base, '/api/parse', 'POST', { monitorId: legacy.id, instruction: '改成访问失败3次后提醒' });
+    const saved = await request(base, '/api/monitors/' + legacy.id, 'PATCH', { rule: draft.monitor, expectedRevision: 0 });
+    assert.equal(saved.monitors[0].kind, 'generated');
+    assert.equal(saved.monitors[0].id, legacy.id);
+    assert.equal(saved.monitors[0].keyword, undefined);
+    assert.equal(saved.monitors[0].label, legacy.label);
+    assert.equal(saved.monitors[0].intervalMinutes, 15);
+    assert.deepEqual(saved.monitors[0].notification, { title: '新的标题', body: '保留文案：{{details}}' });
+    const remindAt = new Date(Date.now() + 86400123).toISOString();
+    const reminder = (await request(base, '/api/monitors', 'POST', { kind: 'reminder', label: '休息', message: '休息一下', remindAt, repeatMinutes: 90, webhookIds: ['hook'] })).monitors[0];
+    const paused = (await request(base, '/api/monitors/' + reminder.id, 'PATCH', { enabled: false })).monitors[0];
+    reply = { status: 'ready', message: '只调整提醒内容。', monitor: { kind: 'reminder', message: '站起来走一走' } };
+    const modified = await request(base, '/api/parse', 'POST', { monitorId: reminder.id, expectedRevision: paused.revision, instruction: '内容改成站起来走一走' });
+    assert.equal(modified.monitor.remindAt, remindAt);
+    assert.equal(modified.monitor.repeatMinutes, 90);
+    const result = (await request(base, '/api/monitors/' + reminder.id, 'PATCH', { rule: modified.monitor, expectedRevision: paused.revision })).monitors.find((item) => item.id === reminder.id);
+    assert.equal(result.enabled, false);
+    assert.equal(result.remindAt, remindAt);
+    assert.equal(result.message, '站起来走一走');
+  } finally { child.kill(); await new Promise((resolve) => mock.close(resolve)); await rm(dataDir, { recursive: true, force: true }); }
+});

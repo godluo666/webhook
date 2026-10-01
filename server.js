@@ -544,7 +544,13 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     if (/补充|提供|缺少|不明确|不清楚/.test(String(parsed.error))) return needMoreInfo(parsed.error);
     throw new Error(String(parsed.error));
   }
-  const output = ['ready', 'draft'].includes(parsed?.status) && parsed.monitor ? parsed.monitor : parsed;
+  let output = ['ready', 'draft'].includes(parsed?.status) && parsed.monitor ? parsed.monitor : parsed;
+  if (draft && output && typeof output === 'object' && !Array.isArray(output)) {
+    const kind = output.kind || (output.remindAt ? 'reminder' : output.plan ? 'generated' : draft.kind);
+    if (kind === draft.kind) output = { ...draft, ...output, kind, ...(kind === 'generated' ? { plan: output.plan ? { ...draft.plan, ...output.plan } : draft.plan } : {}) };
+    else if (kind === 'generated' && draft.kind !== 'reminder') output = { label: draft.label, url: draft.url, intervalMinutes: draft.intervalMinutes, severity: draft.severity, notification: draft.notification, ...output, kind };
+    if (output.notification && typeof output.notification === 'object' && !Array.isArray(output.notification)) output.notification = { ...draft.notification, ...output.notification };
+  }
   const presentation = draftPresentation(parsed);
   if (output && typeof output === 'object' && !output.notification && draft && (output.kind || (output.remindAt ? 'reminder' : 'generated')) === draft.kind) output.notification = draft.notification;
   if (!output || typeof output !== 'object' || Array.isArray(output)) { const error = new Error('AI 未返回有效规则'); error.repairable = true; throw error; }
@@ -553,7 +559,7 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     if (!output.remindAt && /每隔\s*\d+/.test(fullInput) && Number.isInteger(interval) && interval >= 1 && interval <= 525600) {
       output.remindAt = new Date(Date.now() + interval * 60_000).toISOString();
     }
-    try { return { status: 'ready', monitor: validateMonitor({ ...output, kind: 'reminder' }), parser: 'ai', sourceNote: '', ...presentation }; }
+    try { return { status: 'ready', monitor: validateMonitor({ ...output, kind: 'reminder' }, { allowPastReminder: draft?.kind === 'reminder' && Date.parse(output.remindAt) === Date.parse(draft.remindAt) }), parser: 'ai', sourceNote: '', ...presentation }; }
     catch (error) {
       if (/提醒时间|提醒什么/.test(error.message)) return needMoreInfo([error.message]);
       error.repairable = true;
@@ -611,7 +617,7 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     if (/(?:存在|包含|出现).*(?:通知|这两个字)/.test(decodedPath)) return needMoreInfo(['请确认真实网页地址。网址后面的中文描述可能被当成了路径。']);
   }
   let candidate;
-  try { candidate = validateMonitor({ ...output, kind: 'generated' }); }
+  try { candidate = validateMonitor({ ...output, kind: output.kind && output.kind === draft?.kind ? output.kind : 'generated' }); }
   catch (error) {
     const question = missingRuleQuestion(error, output.plan);
     error.repairable = true;
@@ -798,10 +804,22 @@ async function handler(request, response) {
       if (request.method === 'POST' && pathname === '/api/parse') {
         const body = await readJson(request);
         const started = Date.now();
+        const savedMonitor = body.monitorId ? user.monitors.find((item) => item.id === body.monitorId) : null;
+        if (body.monitorId && !savedMonitor) return sendJson(response, 404, { error: '任务不存在' });
+        const revision = savedMonitor?.revision || 0;
+        if (savedMonitor && body.expectedRevision != null && body.expectedRevision !== revision) return sendJson(response, 409, { error: '任务已被修改，请重新打开任务后再与 AI 调整' });
         const trace = {};
         const safeTrace = () => Object.fromEntries(Object.entries(trace).map(([name, value]) => [name, typeof value === 'string' && user.settings.aiKey ? value.replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : value]));
         try {
-          const parsed = await parseInstruction(user, body.instruction, body.sourceUrl, trace, body.conversation, body.timeZone, body.draft);
+          const draft = body.draft || savedMonitor;
+          const source = savedMonitor ? instructionUrl(String(body.instruction || '')) || body.sourceUrl || draft?.url : body.sourceUrl;
+          const parsed = await parseInstruction(user, body.instruction, source, trace, body.conversation, body.timeZone, draft);
+          if (savedMonitor) {
+            if (!user.monitors.includes(savedMonitor)) return sendJson(response, 404, { error: '任务已删除，本次方案未应用' });
+            if ((savedMonitor.revision || 0) !== revision) return sendJson(response, 409, { error: '任务在生成期间被修改，请重新打开后再调整' });
+            if (parsed.monitor && ((parsed.monitor.kind === 'reminder') !== (savedMonitor.kind === 'reminder'))) return sendJson(response, 200, { status: 'answer', message: '这会把任务改成另一种类别。当前修改保留原任务类别；你可以取消修改后创建新的监控或提醒。' });
+            parsed.editing = { monitorId: savedMonitor.id, revision };
+          }
           if (trace.sourceCheck) parsed.sourceCheck = trace.sourceCheck;
           if (parsed.status === 'answer') {
             trace.validation = '已回答用户问题';
@@ -831,7 +849,7 @@ async function handler(request, response) {
         const body = await readJson(request);
         const saved = body.monitorId ? user.monitors.find((item) => item.id === body.monitorId) : null;
         if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
-        const input = saved ? { ...saved, ...body.rule, kind: saved.kind } : body.rule;
+        const input = saved ? { ...saved, ...body.rule, kind: body.rule?.kind || saved.kind } : body.rule;
         const spec = { ...validateMonitor(input, { allowMissingSource: true, allowPastReminder: Boolean(saved) }), priority: input.priority,
           webhookIds: input.webhookIds, id: saved?.id };
         const previous = notificationPreviews.get(body.previousPreviewId);
@@ -929,47 +947,43 @@ async function handler(request, response) {
         }
         if (request.method === 'PATCH' && !match[2]) {
           const body = await readJson(request);
+          if (body.expectedRevision != null && body.expectedRevision !== (monitor.revision || 0)) return sendJson(response, 409, { error: '这个任务已在其他位置被修改。请重新打开任务，再确认本次调整。' });
+          if (activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '任务正在检查或发送，请稍后再次保存；本次修改已保留。' });
+          const updated = structuredClone(monitor);
           let resetBaseline = false;
           if (body.rule) {
+            const kind = body.rule.kind || monitor.kind;
+            if (kind !== monitor.kind && (kind !== 'generated' || monitor.kind === 'reminder')) throw new Error('本次修改需要保留任务类别；如需在监控和日历提醒之间切换，请另建任务');
             const unchangedReminderTime = monitor.kind === 'reminder' && Date.parse(body.rule.remindAt || monitor.remindAt) === Date.parse(monitor.remindAt);
-            const next = validateMonitor({ ...monitor, ...body.rule, kind: monitor.kind }, { allowPastReminder: unchangedReminderTime });
+            const next = validateMonitor({ ...monitor, ...body.rule, kind }, { allowPastReminder: unchangedReminderTime });
             if (body.rule.priority !== undefined) {
               next.priority = body.rule.priority === '' || body.rule.priority == null ? null : Number(body.rule.priority);
               if (next.priority != null && (!Number.isInteger(next.priority) || next.priority < 1 || next.priority > 5)) throw new Error('ntfy 优先级必须在 1 到 5 之间');
             }
             if (monitor.kind === 'reminder' && monitor.completedAt && next.repeatMinutes && Date.parse(next.remindAt) <= Date.now()) next.remindAt = nextRecurringTime(next.remindAt, next.repeatMinutes);
             if (monitor.kind === 'reminder' && (next.remindAt !== monitor.remindAt || next.repeatMinutes !== (monitor.repeatMinutes || 0))) {
-              monitor.firedAt = null;
-              monitor.completedAt = null;
-              monitor.pendingNotifications = [];
-              monitor.lastCheckAt = null;
-              monitor.lastError = '';
-              monitor.lastResult = '';
-              monitor.enabled = true;
+              Object.assign(updated, { firedAt: null, completedAt: null, pendingNotifications: [], lastCheckAt: null, lastError: '', lastResult: '' });
             }
-            resetBaseline = monitor.kind !== 'reminder' && (['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan));
-            Object.assign(monitor, next);
-            if (resetBaseline) {
-              monitor.snapshot = null;
-              monitor.baselined = false;
-              monitor.lastCheckAt = null;
-              monitor.lastResult = '';
-              monitor.pendingNotifications = [];
-              monitor.lastError = '';
-            }
+            resetBaseline = monitor.kind !== 'reminder' && (kind !== monitor.kind || ['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan));
+            if (kind !== monitor.kind) for (const key of ['keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'plan']) delete updated[key];
+            Object.assign(updated, next);
+            if (resetBaseline) Object.assign(updated, { snapshot: null, baselined: false, lastCheckAt: null, lastResult: '', pendingNotifications: [], lastError: '' });
           }
           if (body.webhookIds !== undefined) {
-            monitor.webhookIds = selectedWebhookIds(user, body.webhookIds);
-            const selected = new Set(monitor.webhookIds);
-            for (const pending of monitor.pendingNotifications) pending.remainingIds = pending.remainingIds.filter((id) => selected.has(id));
-            monitor.pendingNotifications = monitor.pendingNotifications.filter((pending) => pending.remainingIds.length);
+            updated.webhookIds = selectedWebhookIds(user, body.webhookIds);
+            const selected = new Set(updated.webhookIds);
+            for (const pending of updated.pendingNotifications) pending.remainingIds = pending.remainingIds.filter((id) => selected.has(id));
+            updated.pendingNotifications = updated.pendingNotifications.filter((pending) => pending.remainingIds.length);
           }
           if (body.enabled !== undefined) {
-            if (body.enabled && monitor.kind === 'reminder' && monitor.completedAt) throw new Error('已完成的提醒请先设置新的时间');
-            if (body.enabled) selectedWebhookIds(user, monitor.webhookIds);
-            monitor.enabled = Boolean(body.enabled);
+            if (body.enabled && updated.kind === 'reminder' && updated.completedAt) throw new Error('已完成的提醒请先设置新的时间');
+            if (body.enabled) selectedWebhookIds(user, updated.webhookIds);
+            updated.enabled = Boolean(body.enabled);
           }
-          if (/^(没有接收渠道|接收渠道均已停用)/.test(monitor.lastError || '')) monitor.lastError = '';
+          if (/^(没有接收渠道|接收渠道均已停用)/.test(updated.lastError || '')) updated.lastError = '';
+          updated.revision = (monitor.revision || 0) + 1;
+          for (const key of Object.keys(monitor)) if (!(key in updated)) delete monitor[key];
+          Object.assign(monitor, updated);
           persist();
           if (resetBaseline && monitor.enabled) await checkMonitor(user, monitor);
           return sendJson(response, 200, publicState(user));
