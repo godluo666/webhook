@@ -726,17 +726,17 @@ let notificationEditorCount = 0;
 function notificationFields(monitor) {
   const token = 'notification-' + (++notificationEditorCount);
   const template = monitor.notification || { title: '{{name}}', body: '{{details}}' };
-  const common = monitor.kind === 'reminder' ? [['message', '提醒内容'], ['name', '任务名称'], ['time', '发送时间']] : [['details', '本次详情'], ['name', '任务名称'], ['summary', '检测摘要']];
+  const common = monitor.kind === 'reminder' ? [['message', '提醒内容'], ['name', '任务名称'], ['time', '发送时间']] : [['details', '本次详情'], ['name', '任务名称'], ['summary', '检测摘要'], ['source', '监控地址'], ['time', '检测时间']];
   if (['any', 'item-transition', 'new-item'].includes(monitor.plan?.mode) || ['dmit', 'rss'].includes(monitor.kind)) common.push(['items', '匹配条目'], ['count', '条目数量']);
   if (['compare', 'changed', 'slow'].includes(monitor.plan?.mode)) common.push(['value', '当前值'], ['previous', '之前的值']);
   return '<section class="notification-editor" aria-label="通知内容与预览">'
-    + '<div class="notification-heading"><div><h3>通知内容</h3><p>按你的方式表达，动态内容在每次触发时自动填入。</p></div><span class="local-badge">本地预览 · 无 AI 消耗</span></div>'
-    + '<label class="field-label" for="' + token + '-title">标题</label><input class="notification-title" id="' + token + '-title" type="text" maxlength="200" value="' + escapeHtml(template.title) + '">'
+    + '<div class="notification-heading"><div><h3>通知内容</h3><p>标题和正文都由你决定，动态内容只在插入后填入。</p></div><span class="local-badge">本地预览 · 无 AI 消耗</span></div>'
+    + '<label class="field-label" for="' + token + '-title">标题（可留空）</label><input class="notification-title" id="' + token + '-title" type="text" maxlength="200" value="' + escapeHtml(template.title) + '">'
     + '<label class="field-label" for="' + token + '-body">正文</label><textarea class="notification-body" id="' + token + '-body" rows="4" maxlength="2000">' + escapeHtml(template.body) + '</textarea>'
     + '<div class="notification-variables" role="group" aria-label="插入动态内容"><span>插入内容</span>' + common.map(([key, label]) => '<button type="button" class="variable-button" data-variable="' + key + '">' + label + '</button>').join('') + '</div>'
-    + '<p class="field-help">也可以直接告诉 AI 想收到什么、如何表达。预览展示实际替换后的内容；需要真实检测结果时，保留“本次详情”。</p>'
+    + '<p class="field-help">监控地址、任务名称和时间不会在模板之外自动附加。需要时点击上方按钮插入，也可直接删除或替换。想自己组织文案，可删掉“本次详情”，改用条目名称、数值等单独内容。</p>'
     + '<div class="notification-render" aria-live="polite"><div class="notification-preview-label"><strong>接收效果</strong><span class="notification-basis">准备预览</span></div>'
-    + '<p class="notification-note"></p><div class="notification-message"><h4></h4><p></p><small></small></div><div class="notification-channel-list"></div>'
+    + '<p class="notification-note"></p><div class="notification-message"><h4></h4><p></p></div><div class="notification-channel-list"></div>'
     + '<details class="notification-wire"><summary>查看渠道发送内容</summary><div class="notification-wire-content"></div></details></div>'
     + '<div class="notification-feedback" role="status"></div><div class="notification-actions"><button type="button" class="button button-outline" data-notification-action="refresh">刷新预览</button>'
     + '<button type="button" class="button button-outline" data-notification-action="simulate" disabled>发送模拟通知</button></div>'
@@ -755,7 +755,8 @@ function showNotificationPreview(root, data) {
   root.querySelector('.notification-note').textContent = data.note;
   root.querySelector('.notification-message h4').textContent = data.payload.title;
   root.querySelector('.notification-message p').textContent = data.payload.message;
-  root.querySelector('.notification-message small').textContent = data.payload.url || '';
+  root.querySelector('.notification-message h4').classList.toggle('hidden', !data.payload.title);
+  root.querySelector('.notification-message p').classList.toggle('hidden', !data.payload.message);
   root.querySelector('.notification-channel-list').innerHTML = data.channels.length ? data.channels.map((channel) => '<span class="' + (channel.error ? 'channel-invalid' : '') + '">' + escapeHtml(channel.name) + ' · ' + escapeHtml(channel.error || channel.format + (channel.format === 'ntfy' ? ' · 优先级 ' + channel.headers['x-priority'] : '')) + '</span>').join('') : '<span>尚未选择接收渠道</span>';
   root.querySelector('.notification-wire-content').innerHTML = data.channels.map((channel) => '<h5>' + escapeHtml(channel.name) + '</h5><pre>' + escapeHtml(channel.error || (typeof channel.body === 'string' ? channel.body : JSON.stringify(channel.body, null, 2))) + '</pre>').join('');
   root.querySelector('[data-notification-action="simulate"]').disabled = !data.canSend || state.sending;
@@ -801,7 +802,7 @@ function attachNotification(root, getRule, monitorId) {
       const state = notificationEditors.get(root), field = state.field;
       field.setRangeText('{{' + variable.dataset.variable + '}}', field.selectionStart, field.selectionEnd, 'end');
       field.focus();
-      queueNotificationRefresh(root);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
       return;
     }
     const button = event.target.closest('[data-notification-action]');

@@ -878,3 +878,57 @@ test('旧规则可由 AI 转成新检测逻辑；循环提醒只改内容时保�
     assert.equal(result.message, '站起来走一走');
   } finally { child.kill(); await new Promise((resolve) => mock.close(resolve)); await rm(dataDir, { recursive: true, force: true }); }
 });
+
+test('保存纯自定义通知后，预览、模拟和正式发送均无固定地址；地址可插入、替换和删除', async () => {
+  const messages = [];
+  let stock = false;
+  const mock = http.createServer(async (req, res) => {
+    if (req.url === '/source') { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ products: [{ name: '产品 A', available: stock }] })); return; }
+    let body = ''; for await (const chunk of req) body += chunk;
+    messages.push({ path: req.url, body, headers: req.headers });
+    res.end('ok');
+  });
+  const port = await listen(mock), dataDir = await mkdtemp(path.join(tmpdir(), 'radar-editable-notification-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    const source = 'http://127.0.0.1:' + port + '/source';
+    await request(base, '/api/settings', 'PUT', { webhooks: [
+      { id: 'ntfy', name: '手机', url: 'http://127.0.0.1:' + port + '/ntfy', format: 'ntfy' },
+      { id: 'generic', name: '自定义接口', url: 'http://127.0.0.1:' + port + '/generic', format: 'generic' }
+    ] });
+    const monitor = (await request(base, '/api/monitors', 'POST', {
+      kind: 'generated', label: '内部任务名称', url: source, intervalMinutes: 5, webhookIds: ['ntfy', 'generic'],
+      plan: { sourceType: 'json', mode: 'any', initial: 'baseline', path: 'products', filters: [{ path: 'available', operator: 'equals', expected: true }] }
+    })).monitors[0];
+    const notification = { title: '', body: '仅发送我写的内容' };
+    await request(base, '/api/monitors/' + monitor.id, 'PATCH', { rule: { notification } });
+    const preview = await request(base, '/api/notification-preview', 'POST', { monitorId: monitor.id });
+    assert.equal(preview.payload.title, '');
+    assert.equal(preview.payload.message, notification.body);
+    assert.equal(preview.payload.url, undefined);
+    assert.equal(preview.channels.find(h => h.id === 'ntfy').headers['x-title'], undefined);
+    assert.ok(preview.channels.every(h => !JSON.stringify(h.body).includes(source)));
+    await request(base, '/api/notification-simulate', 'POST', { previewId: preview.id });
+    assert.equal(messages.find(m => m.path === '/ntfy').body, notification.body);
+    assert.equal(JSON.parse(messages.find(m => m.path === '/generic').body).text, '【模拟】\n' + notification.body);
+    messages.length = 0;
+    stock = true;
+    const checked = await request(base, '/api/monitors/' + monitor.id + '/check', 'POST');
+    assert.equal(checked.check.sentCount, 2);
+    const ntfy = messages.find(m => m.path === '/ntfy'), generic = JSON.parse(messages.find(m => m.path === '/generic').body);
+    assert.equal(ntfy.body, notification.body);
+    assert.equal(ntfy.headers['x-title'], undefined);
+    assert.equal(generic.text, notification.body);
+    assert.equal(generic.url, undefined);
+    assert.ok(messages.every(m => !m.body.includes(source)));
+    for (const body of ['型号：{{items}}\n{{source}}', '型号：{{items}}\nhttps://example.com/buy', '型号：{{items}}']) {
+      await request(base, '/api/monitors/' + monitor.id, 'PATCH', { rule: { notification: { title: '', body } } });
+      const updated = await request(base, '/api/notification-preview', 'POST', { monitorId: monitor.id });
+      assert.equal(updated.channels.find(h => h.id === 'ntfy').body, body.replace('{{items}}', '产品 A').replace('{{source}}', source));
+    }
+    const saved = (await request(base, '/api/state')).monitors[0];
+    assert.equal(saved.url, source);
+    assert.deepEqual(saved.notification, { title: '', body: '型号：{{items}}' });
+    assert.deepEqual(saved.snapshot, checked.monitors[0].snapshot);
+  } finally { child.kill(); await new Promise(resolve => mock.close(resolve)); await rm(dataDir, { recursive: true, force: true }); }
+});

@@ -55,3 +55,26 @@ test('动态变量仅作文本替换，禁止任意模板变量并限制消息�
   assert.match(payload.message, /截断/);
   assert.equal(validateGeneratedPlan({ sourceType: 'service', mode: 'slow' }).thresholdMs, 3000);
 });
+
+test('通知仅包含可编辑模板内容，地址必须显式插入，空标题不会恢复任务名', () => {
+  const source = 'https://vps.thairath.eu.org/api/products';
+  const monitor = { kind: 'generated', id: 'monitor-a', label: '内部任务名', url: source, plan: { mode: 'any' }, notification: { title: '', body: '{{items}}' } };
+  const current = { count: 1, names: ['产品 A'] };
+  const payload = renderNotification(monitor, current);
+  assert.equal(payload.title, '');
+  assert.equal(payload.message, '产品 A');
+  assert.equal(Object.hasOwn(payload, 'url'), false);
+  assert.doesNotMatch(JSON.stringify(payload), /thairath|内部任务名/);
+  const included = renderNotification({ ...monitor, notification: { title: '', body: '已恢复：{{items}}\n{{source}}' } }, current);
+  assert.equal(included.message, '已恢复：产品 A\n' + source);
+  const replaced = renderNotification({ ...monitor, notification: { title: '自定义标题', body: '去这里查看：https://example.com/shop' } }, current);
+  assert.equal(replaced.message, '去这里查看：https://example.com/shop');
+  assert.doesNotMatch(JSON.stringify(replaced), /thairath/);
+  assert.equal(renderNotification({ ...monitor, notification: { title: '只发这个标题', body: '' } }, current).message, '');
+  assert.deepEqual(validateNotification({ title: '', body: '只发正文' }), { title: '', body: '只发正文' });
+  assert.throws(() => validateNotification({ title: '', body: '' }), /不能同时为空/);
+  assert.throws(() => renderNotification(monitor, { count: 0, names: [] }), /内容为空/);
+  const legacy = renderNotification({ kind: 'dmit', url: source, label: '旧规则', triggerMode: 'any-available' }, { items: { a: { name: '产品 A', status: 'available' } } });
+  assert.equal(legacy.message, 'DMIT 有货：\n• 产品 A');
+  assert.doesNotMatch(JSON.stringify(legacy), /https:|购买前/);
+});
