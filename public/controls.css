@@ -822,3 +822,41 @@ input[role=switch]:checked::before {
   .monitor-actions > [data-action="refine"] { margin-right: 0; }
   .monitor-actions > :is(.button, .mini-button) { flex: 1 1 130px; }
 }
+
+/* Focused rule editing and account source access */
+.app-shell[data-view="fetch-settings"] #fetch-settings { display: block !important; }
+.rule-panel-editor { margin-top: 24px; }
+.rule-tabs { display: flex; gap: 24px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.rule-tab { flex: none; border: 0; background: transparent; color: var(--muted); padding: 14px 0; font: inherit; font-size: 14px; cursor: pointer; border-bottom: 2px solid transparent; transition: color 150ms, border-color 150ms; }
+.rule-tab:hover, .rule-tab.selected { color: var(--ink); }
+.rule-tab.selected { border-bottom-color: var(--ink); }
+.rule-tab:focus-visible { outline: 2px solid var(--apple-blue); outline-offset: -3px; border-radius: 4px; }
+.rule-pane { padding: 32px 0 16px; }
+.rule-pane h3, .source-settings-section h3 { font-size: 16px; font-weight: 600; margin: 0 0 24px; }
+.rule-pane .rule-fields { grid-template-columns: minmax(0, 1fr); gap: 24px; max-width: 720px; }
+.rule-pane :is(label, .priority-field) { display: block; font-size: 14px; }
+.rule-pane label > :is(input, select, textarea) { display: block; margin-top: 10px; width: 100%; }
+.rule-pane .plain-plan-fields, .rule-pane .plain-condition { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.rule-pane .field-help { margin-block: 16px; }
+.rule-pane .priority-field { margin-block: 28px; }
+.editor-wide { grid-column: 1 / -1; }
+.editor-section-actions { margin-top: 28px; }
+.editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-top: 24px; margin-top: 24px; border-top: 1px solid var(--border); }
+.editor-footer > span { font-size: 13px; color: var(--muted); }
+.editor-footer .button { min-width: 144px; }
+.source-settings { max-width: 900px; }
+.source-settings-form, #source-settings-form { max-width: 680px; margin-top: 36px; }
+.source-settings-section + .source-settings-section { margin-top: 48px; padding-top: 32px; border-top: 1px solid var(--border); }
+.source-proxy-status { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; margin: 24px 0; }
+.source-settings .settings-actions { justify-content: flex-end; }
+.source-settings .settings-actions > .danger { margin-right: auto; }
+.source-test-actions { margin-top: 24px; }
+.source-settings :is(.settings-actions, .source-test-actions) .button { min-width: 144px; }
+#source-proxy-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 620px) {
+  .rule-tabs { gap: 20px; }
+  .rule-tab { font-size: 13px; }
+  .rule-pane { padding-top: 24px; }
+  .editor-footer > span { max-width: 48%; }
+  .editor-footer .button { min-width: 128px; }
+}

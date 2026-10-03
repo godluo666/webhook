@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -931,4 +932,110 @@ test('保存纯自定义通知后，预览、模拟和正式发送均无固定�
     assert.deepEqual(saved.notification, { title: '', body: '型号：{{items}}' });
     assert.deepEqual(saved.snapshot, checked.monitors[0].snapshot);
   } finally { child.kill(); await new Promise(resolve => mock.close(resolve)); await rm(dataDir, { recursive: true, force: true }); }
+});
+
+test('Cloudflare 验证保留有效状态、延迟重试；手动检查可恢复且不会误发库存通知', async () => {
+  let challenge = false, stock = false;
+  const deliveries = [];
+  const source = http.createServer(async (req, res) => {
+    if (req.url === '/stock') {
+      if (challenge) { res.writeHead(200, { 'cf-mitigated': 'challenge', 'content-type': 'text/html', 'cf-ray': 'test-ray' }); res.end('<html><title>Just a moment</title><script>_cf_chl_opt={}</script>Buy now</html>'); }
+      else { res.setHeader('content-type', 'text/html'); res.end(stock ? '<p>Buy now</p>' : '<p>Out of stock</p>'); }
+      return;
+    }
+    let data = ''; for await (const part of req) data += part;
+    deliveries.push(JSON.parse(data)); res.end('ok');
+  });
+  const port = await listen(source);
+  const dir = await mkdtemp(path.join(tmpdir(), 'radar-cf-test-'));
+  const { base, child } = await startApp(dir, { env: { MONITOR_BROWSER_ENABLED: '0' } });
+  try {
+    await request(base, '/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: 'Hook', url: 'http://127.0.0.1:' + port + '/hook', format: 'generic' }] });
+    const created = await request(base, '/api/monitors', 'POST', { kind: 'webpage', label: 'Stock', url: 'http://127.0.0.1:' + port + '/stock', keyword: 'Buy now', mode: 'contains', intervalMinutes: 5, fetch: { mode: 'http' }, webhookIds: ['hook'] });
+    const id = created.monitors[0].id, before = created.monitors[0].snapshot;
+    challenge = true;
+    const failed = await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(failed.check.checked, false);
+    assert.equal(failed.check.errorCode, 'SOURCE_CHALLENGE');
+    assert.deepEqual(failed.monitors[0].snapshot, before);
+    assert.equal(failed.monitors[0].baselined, true);
+    assert.ok(Date.parse(failed.monitors[0].sourceRetryAt) > Date.now());
+    assert.equal(deliveries.length, 0);
+    const raw = failed.logs.find((item) => item.kind === 'monitor' && item.status === 'error').raw;
+    assert.equal(raw.fetch.cfRay, 'test-ray');
+    assert.equal(raw.fetch.attempts[0].outcome, 'challenge');
+    const again = await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(again.monitors[0].sourceFailures, 2);
+    challenge = false; stock = true;
+    const recovered = await request(base, '/api/monitors/' + id + '/check', 'POST');
+    assert.equal(recovered.check.sentCount, 1);
+    assert.equal(recovered.monitors[0].sourceRetryAt, null);
+    assert.equal(recovered.monitors[0].lastSourceError, '');
+    assert.equal(deliveries.length, 1);
+    const patched = await request(base, '/api/monitors/' + id, 'PATCH', { expectedRevision: recovered.monitors[0].revision, rule: { fetch: { mode: 'auto', proxy: 'direct' } } });
+    assert.deepEqual(patched.monitors[0].snapshot, recovered.monitors[0].snapshot);
+    assert.equal(deliveries.length, 1);
+  } finally {
+    child.kill(); source.closeAllConnections(); await new Promise((resolve) => source.close(resolve));
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
+});
+
+test('账户代理覆盖监控与试跑，通知不走代理；公开状态和日志不泄露凭据', async () => {
+  const proxyRequests = [], deliveries = [];
+  const source = http.createServer(async (req, res) => {
+    if (req.url === '/source') { res.setHeader('content-type', 'text/html'); res.end('<p>Buy now</p>'); return; }
+    let data = ''; for await (const part of req) data += part; deliveries.push(data); res.end('ok');
+  });
+  const sourcePort = await listen(source);
+  const proxy = http.createServer();
+  const sockets = new Set();
+  proxy.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  proxy.on('connect', (req, socket, head) => {
+    proxyRequests.push({ target: req.url, auth: req.headers['proxy-authorization'] });
+    const upstream = net.connect(sourcePort, '127.0.0.1', () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) upstream.write(head);
+      socket.pipe(upstream); upstream.pipe(socket);
+    });
+    upstream.on('error', () => socket.destroy());
+    socket.on('close', () => upstream.destroy());
+  });
+  const proxyPort = await listen(proxy);
+  const dir = await mkdtemp(path.join(tmpdir(), 'radar-proxy-test-'));
+  const { base, child } = await startApp(dir);
+  try {
+    const proxyUrl = 'http://proxy-user:super-private-pass@127.0.0.1:' + proxyPort;
+    const saved = await request(base, '/api/source-proxy', 'PUT', { proxyUrl });
+    assert.equal(saved.settings.hasSourceProxy, true);
+    assert.equal(saved.settings.sourceProxy, undefined);
+    assert.equal(saved.settings.sourceProxyEndpoint, 'http://127.0.0.1:' + proxyPort);
+    assert.equal(JSON.stringify(saved).includes('super-private-pass'), false);
+    await request(base, '/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: 'Hook', url: 'http://127.0.0.1:' + sourcePort + '/hook', format: 'generic' }] });
+    assert.equal((await request(base, '/api/state')).settings.hasSourceProxy, true);
+    const result = await request(base, '/api/source-proxy/test', 'POST', { targetUrl: 'http://127.0.0.1:' + sourcePort + '/source' });
+    assert.equal(result.status, 200);
+    assert.equal(proxyRequests[0].auth, 'Basic ' + Buffer.from('proxy-user:super-private-pass').toString('base64'));
+    const created = await request(base, '/api/monitors', 'POST', { kind: 'webpage', label: 'Stock', url: 'http://127.0.0.1:' + sourcePort + '/source', keyword: 'Buy now', intervalMinutes: 5, webhookIds: ['hook'] });
+    assert.equal(created.monitors[0].lastFetch.route, 'proxy');
+    const monitorId = created.monitors[0].id, calls = proxyRequests.length;
+    await request(base, '/api/monitors/' + monitorId + '/check', 'POST');
+    assert.equal(proxyRequests.length, calls + 1);
+    assert.equal(deliveries.length, 1);
+    await request(base, '/api/monitors/' + monitorId, 'PATCH', { rule: { fetch: { mode: 'http', proxy: 'direct' } } });
+    assert.equal(proxyRequests.length, calls + 1);
+    assert.equal(JSON.stringify(await request(base, '/api/state')).includes('super-private-pass'), false);
+    const aliceCookie = cookies.get(base);
+    await request(base, '/api/auth/logout', 'POST');
+    const bob = await request(base, '/api/auth/register', 'POST', { username: 'bob', password: 'another-long-password' });
+    assert.equal(bob.settings.hasSourceProxy, false);
+    assert.equal(bob.monitors.length, 0);
+    cookies.set(base, aliceCookie);
+    const cleared = await request(base, '/api/source-proxy', 'DELETE');
+    assert.equal(cleared.settings.hasSourceProxy, false);
+  } finally {
+    child.kill(); source.closeAllConnections(); for (const socket of sockets) socket.destroy();
+    await Promise.all([new Promise((resolve) => source.close(resolve)), new Promise((resolve) => proxy.close(resolve))]);
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  }
 });

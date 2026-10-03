@@ -11,6 +11,9 @@ import { validateNotification, renderNotification, notificationSample } from './
 import { assistantMessages } from './lib/assistant.js';
 import { createStore } from './lib/store.js';
 import { createEmailCodeService } from './lib/email.js';
+import { createSourceFetcher, validateFetchOptions } from './lib/source-fetch.js';
+import { createBrowserSource } from './lib/browser-source.js';
+import { validateSourceProxy, proxyEndpoint } from './lib/source-proxy.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -22,6 +25,11 @@ const host = process.env.HOST || '127.0.0.1';
 const activeChecks = new Set();
 const sourceCheckCache = new Map();
 const notificationPreviews = new Map();
+const fetchSource = createSourceFetcher({ browserFetch: createBrowserSource({ dataDir }), browserEnabled: process.env.MONITOR_BROWSER_ENABLED !== '0' });
+function sourceOptions(user, monitor = {}) {
+  const options = validateFetchOptions(monitor.fetch);
+  return { userId: user.id, mode: options.mode, direct: options.proxy === 'direct', proxyUrl: options.proxy === 'direct' ? '' : user.settings.sourceProxy || '' };
+}
 if ((process.env.HTTP_PROXY || process.env.HTTPS_PROXY) && typeof http.setGlobalProxyFromEnv === 'function') {
   http.setGlobalProxyFromEnv({ ...process.env, NO_PROXY: [process.env.NO_PROXY, 'localhost', '127.0.0.1', '::1'].filter(Boolean).join(',') });
 }
@@ -96,6 +104,7 @@ function selectedWebhookIds(user, ids) {
 function validateMonitor(candidate, options = {}) {
   const notification = validateNotification(candidate?.notification);
   if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated', 'reminder'].includes(candidate.kind)) throw new Error('无法识别监控类型');
+  const fetchOptions = validateFetchOptions(candidate.fetch);
   const minInterval = candidate.kind === 'generated' && ['service', 'log'].includes(candidate.plan?.sourceType) ? 1 : 5;
   const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 5));
   const label = String(candidate.label || '未命名监控').trim().slice(0, 60);
@@ -112,24 +121,24 @@ function validateMonitor(candidate, options = {}) {
     if (!Number.isInteger(repeatMinutes) || repeatMinutes < 0 || repeatMinutes > 525600) throw new Error('重复间隔需为 1 到 525600 分钟，或选择仅提醒一次');
     return { notification, kind: 'reminder', label, description: message.slice(0, 180), message, remindAt: new Date(timestamp).toISOString(), repeatMinutes, severity };
   }
-  if (candidate.kind === 'dmit') return { notification, kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
+  if (candidate.kind === 'dmit') return { notification, fetch: fetchOptions, kind: 'dmit', url: DMIT_STOCK_URL, label, description, intervalMinutes, triggerMode: candidate.triggerMode === 'any-available' ? 'any-available' : 'restock' };
   if (candidate.kind === 'generated') {
     const plan = validateGeneratedPlan(candidate.plan);
     const url = options.allowMissingSource && !candidate.url ? '' : sourceOf(candidate.url, plan.sourceType);
     if (url && (plan.sourceType === 'log' && !url.startsWith('log:') || plan.sourceType === 'service' && !url.startsWith('tcp://') && !/^https?:\/\//.test(url) || !['log', 'service'].includes(plan.sourceType) && !/^https?:\/\//.test(url))) throw new Error('来源与监控规则类型不匹配');
-    return { notification, kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, severity, plan };
+    return { notification, fetch: fetchOptions, kind: 'generated', url, label, description: describeGeneratedPlan(plan), intervalMinutes, severity, plan };
   }
   const url = urlOf(candidate.url, '监控地址');
   if (candidate.kind === 'dmit-product') {
     const parsed = new URL(url);
     if (!/(^|\.)dmit\.io$/i.test(parsed.hostname) || !/^\/(cart|aff)\.php$/i.test(parsed.pathname)) throw new Error('DMIT 套餐监控需要官方购买链接');
-    return { notification, kind: 'dmit-product', url, label, description, intervalMinutes };
+    return { notification, fetch: fetchOptions, kind: 'dmit-product', url, label, description, intervalMinutes };
   }
   if (candidate.kind === 'github') {
     if (!/^https:\/\/api\.github\.com\/repos\/[^/]+\/[^/]+\/releases\/latest$/.test(url)) throw new Error('GitHub Release 地址无效');
-    return { notification, kind: 'github', url, label, description, intervalMinutes };
+    return { notification, fetch: fetchOptions, kind: 'github', url, label, description, intervalMinutes };
   }
-  if (candidate.kind === 'rss') return { notification, kind: 'rss', url, label, description, intervalMinutes, keyword: String(candidate.keyword || '').trim().slice(0, 80) };
+  if (candidate.kind === 'rss') return { notification, fetch: fetchOptions, kind: 'rss', url, label, description, intervalMinutes, keyword: String(candidate.keyword || '').trim().slice(0, 80) };
   if (candidate.kind === 'json') {
     const jsonPath = String(candidate.jsonPath || '').trim();
     if (!/^[\w-]+(?:\.[\w-]+)*$/.test(jsonPath) || jsonPath.length > 120) throw new Error('JSON 字段路径无效，请使用 a.b.c 格式');
@@ -137,15 +146,15 @@ function validateMonitor(candidate, options = {}) {
     if (!['equals', 'notEquals', 'contains', 'gt', 'gte', 'lt', 'lte'].includes(operator)) throw new Error('JSON 比较方式无效');
     const expected = String(candidate.expected ?? '').trim();
     if (!expected || expected.length > 120) throw new Error('请填写 JSON 比较值');
-    return { notification, kind: 'json', url, label, description, intervalMinutes, jsonPath, operator, expected };
+    return { notification, fetch: fetchOptions, kind: 'json', url, label, description, intervalMinutes, jsonPath, operator, expected };
   }
   const keyword = String(candidate.keyword || '').trim();
   if (keyword.length < 2 || keyword.length > 80) throw new Error('监控文字长度需要在 2 到 80 字之间');
-  return { notification, kind: 'webpage', url, label, description, intervalMinutes, keyword, mode: candidate.mode === 'absent' ? 'absent' : 'contains' };
+  return { notification, fetch: fetchOptions, kind: 'webpage', url, label, description, intervalMinutes, keyword, mode: candidate.mode === 'absent' ? 'absent' : 'contains' };
 }
 
 function previewSourceSignature(monitor) {
-  return JSON.stringify([monitor.kind, monitor.url, monitor.plan, monitor.keyword, monitor.mode, monitor.jsonPath, monitor.operator, monitor.expected, monitor.triggerMode]);
+  return JSON.stringify([monitor.kind, monitor.url, monitor.plan, monitor.keyword, monitor.mode, monitor.jsonPath, monitor.operator, monitor.expected, monitor.triggerMode, validateFetchOptions(monitor.fetch)]);
 }
 
 function buildNotificationPreview(user, monitor, observed = null) {
@@ -319,6 +328,7 @@ function currentStateMatches(monitor, current) {
 
 async function checkMonitor(user, monitor, { manual = false } = {}) {
   if (monitor.kind === 'reminder') return checkReminder(user, monitor);
+  if (!manual && Date.parse(monitor.sourceRetryAt) > Date.now()) return { checked: false, skipped: true, retryAt: monitor.sourceRetryAt };
   if (activeChecks.has(monitor.id)) return { checked: false, skipped: true };
   activeChecks.add(monitor.id);
   const started = Date.now();
@@ -327,6 +337,7 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
   let failedCount = 0;
   let responseStatus;
   let responseSample = '';
+  let fetchDetails;
   try {
     const retried = await flushPending(user, monitor);
     sentCount += retried.sentCount;
@@ -339,7 +350,10 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
       current = inspectLog(logRoot, user, monitor, monitor.snapshot);
     } else {
       const expectsJson = ['dmit', 'json', 'github'].includes(monitor.kind) || monitor.kind === 'generated' && monitor.plan.sourceType === 'json';
-      const html = await fetchText(monitor.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { responseStatus = code; } });
+      const source = await fetchSource(monitor.url, { ...sourceOptions(user, monitor), expectsJson });
+      const html = source.body;
+      responseStatus = source.status;
+      fetchDetails = source.metadata;
       responseSample = html.slice(0, 4000);
       current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
     }
@@ -363,10 +377,14 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
       sentCount += delivery.sentCount;
       failedCount += delivery.failedCount;
     }
+    monitor.sourceFailures = 0;
+    monitor.sourceRetryAt = null;
+    monitor.lastSourceError = '';
+    if (fetchDetails) monitor.lastFetch = { method: fetchDetails.method, route: fetchDetails.route, at: new Date().toISOString() };
     monitor.snapshot = current;
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastResult = current.summary;
-    addLog(user, 'monitor', 'success', `${monitor.label} · ${responseStatus ? `HTTP ${responseStatus} · ` : ''}${current.summary}`, monitor.url, Date.now() - started, monitor.id);
+    addLog(user, 'monitor', 'success', `${monitor.label} · ${responseStatus ? `HTTP ${responseStatus} · ` : ''}${current.summary}`, monitor.url, Date.now() - started, monitor.id, fetchDetails ? { fetch: fetchDetails } : null);
     const hasActiveRecipient = monitor.webhookIds.some((id) => user.settings.webhooks.some((hook) => hook.id === id && hook.enabled));
     monitor.lastError = monitor.pendingNotifications.length ? '有通知待发送，将在下次检查时重试' : hasActiveRecipient ? '' : '接收渠道均已停用，请启用至少一个渠道';
     if (!monitor.baselined) {
@@ -378,13 +396,20 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
   } catch (error) {
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastError = error.message;
+    if (error.code?.startsWith('SOURCE_')) {
+      monitor.sourceFailures = Math.min(20, (monitor.sourceFailures || 0) + 1);
+      monitor.lastSourceError = error.code;
+      const delay = error.code === 'SOURCE_CHALLENGE' ? Math.min(15 * 60_000, 60_000 * 2 ** (monitor.sourceFailures - 1)) : Math.max(monitor.intervalMinutes * 60_000, error.fetchDetails?.retryAfterMs || 0);
+      monitor.sourceRetryAt = new Date(Date.now() + delay).toISOString();
+    }
     addLog(user, 'monitor', 'error', `${monitor.label} · ${error.message}`, monitor.url, Date.now() - started, monitor.id, {
+      errorCode: error.code || null, fetch: error.fetchDetails || fetchDetails || null, retryAt: monitor.sourceRetryAt || null,
       requestUrl: monitor.url, httpStatus: error.responseStatus || responseStatus || null,
       networkCode: error.networkCode || null, networkCause: error.networkCause || null,
       responseBody: error.responseBody || responseSample || null, validation: error.message
     });
     addEvent(user, 'error', '检查失败', `${monitor.label} · ${error.message}`, monitor.id);
-    return { checked: false, error: error.message };
+    return { checked: false, error: error.message, errorCode: error.code || null, retryAt: monitor.sourceRetryAt || null };
   } finally {
     activeChecks.delete(monitor.id);
   }
@@ -441,7 +466,7 @@ function draftPresentation(parsed) {
 
 async function checkSourceConnection(user, source) {
   if (!source) return '';
-  const cacheKey = user.id + ':' + source;
+  const cacheKey = user.id + ':' + source + ':' + (user.settings.sourceProxy ? 'proxy' : 'server');
   const cached = sourceCheckCache.get(cacheKey);
   if (cached && Date.now() - cached.at < 30_000) return cached.summary;
   let summary;
@@ -454,10 +479,9 @@ async function checkSourceConnection(user, source) {
       const result = await inspectService(normalized, { mode: 'unavailable' });
       summary = '已尝试连接：' + result.summary;
     } else {
-      const response = await fetch(normalized, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(3500), headers: { 'user-agent': 'WebhookRadar/2.0' } });
-      try { await response.body?.cancel(); } catch { /* status is already available */ }
-      const type = (response.headers.get('content-type') || '类型未知').split(';')[0].slice(0, 60);
-      summary = '已尝试读取：HTTP ' + response.status + ' · ' + type + '。响应内容未发送给 AI。';
+      const result = await fetchSource(normalized, sourceOptions(user));
+      const type = (result.headers['content-type'] || '类型未知').split(';')[0].slice(0, 60);
+      summary = '已尝试读取：HTTP ' + result.status + ' · ' + (result.metadata.method === 'browser' ? '浏览器' : '直接请求') + ' · ' + type + '。响应内容未发送给 AI。';
     }
   } catch (error) {
     summary = '已尝试读取，但连接失败：' + String(error.cause?.code || error.message || '未知错误').slice(0, 160);
@@ -548,7 +572,7 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   if (draft && output && typeof output === 'object' && !Array.isArray(output)) {
     const kind = output.kind || (output.remindAt ? 'reminder' : output.plan ? 'generated' : draft.kind);
     if (kind === draft.kind) output = { ...draft, ...output, kind, ...(kind === 'generated' ? { plan: output.plan ? { ...draft.plan, ...output.plan } : draft.plan } : {}) };
-    else if (kind === 'generated' && draft.kind !== 'reminder') output = { label: draft.label, url: draft.url, intervalMinutes: draft.intervalMinutes, severity: draft.severity, notification: draft.notification, ...output, kind };
+    else if (kind === 'generated' && draft.kind !== 'reminder') output = { label: draft.label, url: draft.url, intervalMinutes: draft.intervalMinutes, severity: draft.severity, notification: draft.notification, fetch: draft.fetch, ...output, kind };
     if (output.notification && typeof output.notification === 'object' && !Array.isArray(output.notification)) output.notification = { ...draft.notification, ...output.notification };
   }
   const presentation = draftPresentation(parsed);
@@ -777,13 +801,41 @@ async function handler(request, response) {
           throw safeError;
         }
       }
+      if (['PUT', 'DELETE'].includes(request.method) && pathname === '/api/source-proxy') {
+        const body = request.method === 'PUT' ? await readJson(request) : {};
+        const proxy = request.method === 'DELETE' ? '' : validateSourceProxy(body.proxyUrl);
+        if (request.method === 'PUT' && !proxy) throw new Error('请填写代理地址，或使用清除按钮移除已保存代理');
+        user.settings.sourceProxy = proxy;
+        for (const monitor of user.monitors) {
+          if (monitor.fetch?.proxy === 'direct') continue;
+          Object.assign(monitor, { sourceRetryAt: null, sourceFailures: 0, lastSourceError: '', lastFetch: null });
+        }
+        for (const key of sourceCheckCache.keys()) if (key.startsWith(user.id + ':')) sourceCheckCache.delete(key);
+        persist();
+        return sendJson(response, 200, publicState(user));
+      }
+      if (request.method === 'POST' && pathname === '/api/source-proxy/test') {
+        const body = await readJson(request);
+        const proxyUrl = validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
+        if (!proxyUrl) throw new Error('请先填写或保存代理地址');
+        const targetUrl = urlOf(body.targetUrl, '测试网站');
+        const started = Date.now();
+        try {
+          const result = await fetchSource(targetUrl, { userId: user.id, proxyUrl, mode: body.mode === 'browser' ? 'browser' : 'http' });
+          addLog(user, 'proxy-test', 'success', '代理读取成功 · HTTP ' + result.status, targetUrl, Date.now() - started, null, { fetch: result.metadata });
+          return sendJson(response, 200, { status: result.status, method: result.metadata.method, endpoint: proxyEndpoint(proxyUrl), durationMs: Date.now() - started });
+        } catch (error) {
+          addLog(user, 'proxy-test', 'error', error.message, targetUrl, Date.now() - started, null, { errorCode: error.code, fetch: error.fetchDetails });
+          throw error;
+        }
+      }
       if (request.method === 'PUT' && pathname === '/api/settings') {
         const body = await readJson(request);
         const webhooks = validateWebhooks(body.webhooks ?? user.settings.webhooks);
         const aiBaseUrl = body.aiBaseUrl ? urlOf(body.aiBaseUrl, 'AI API 地址') : 'https://api.openai.com/v1';
         const aiModel = String(body.aiModel || '').trim().slice(0, 100);
         const aiKey = body.aiKey ? String(body.aiKey).trim().slice(0, 500) : user.settings.aiKey;
-        user.settings = { webhooks, aiBaseUrl, aiModel, aiKey };
+        user.settings = { ...user.settings, webhooks, aiBaseUrl, aiModel, aiKey };
         const keptIds = new Set(webhooks.map((hook) => hook.id));
         for (const monitor of user.monitors) {
           monitor.webhookIds = monitor.webhookIds.filter((id) => keptIds.has(id));
@@ -880,6 +932,7 @@ async function handler(request, response) {
         const started = Date.now();
         let status;
         let responseSample = '';
+        let fetchDetails;
         try {
           let result;
           if (spec.kind === 'generated' && spec.plan.sourceType === 'service') {
@@ -888,14 +941,18 @@ async function handler(request, response) {
           } else if (spec.kind === 'generated' && spec.plan.sourceType === 'log') result = inspectLog(logRoot, user, spec, null, true);
           else {
             const expectsJson = ['dmit', 'json', 'github'].includes(spec.kind) || spec.kind === 'generated' && spec.plan.sourceType === 'json';
-            const body = await fetchText(spec.url, { headers: { 'user-agent': 'WebhookRadar/2.0', accept: expectsJson ? 'application/json' : '*/*' }, onResponse: (code) => { status = code; } });
+            const source = await fetchSource(spec.url, { ...sourceOptions(user, spec), expectsJson });
+            const body = source.body;
+            status = source.status;
+            fetchDetails = source.metadata;
             responseSample = body.slice(0, 4000);
             result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
           }
-          addLog(user, 'preview', 'success', `来源测试 · ${status ? `HTTP ${status} · ` : ''}${result.summary}`, spec.url, Date.now() - started);
-          return sendJson(response, 200, { status: status || null, healthy: result.healthy, summary: result.summary, notificationPreview: buildNotificationPreview(user, spec, result) });
+          addLog(user, 'preview', 'success', `来源测试 · ${status ? `HTTP ${status} · ` : ''}${result.summary}`, spec.url, Date.now() - started, null, fetchDetails ? { fetch: fetchDetails } : null);
+          return sendJson(response, 200, { fetch: fetchDetails, status: status || null, healthy: result.healthy, summary: result.summary, notificationPreview: buildNotificationPreview(user, spec, result) });
         } catch (error) {
           addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started, null, {
+            errorCode: error.code || null, fetch: error.fetchDetails || fetchDetails || null,
             requestUrl: spec.url, httpStatus: error.responseStatus || status || null,
             networkCode: error.networkCode || null, networkCause: error.networkCause || null,
             responseBody: error.responseBody || responseSample || null, validation: error.message
@@ -951,6 +1008,7 @@ async function handler(request, response) {
           if (activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '任务正在检查或发送，请稍后再次保存；本次修改已保留。' });
           const updated = structuredClone(monitor);
           let resetBaseline = false;
+          let fetchChanged = false;
           if (body.rule) {
             const kind = body.rule.kind || monitor.kind;
             if (kind !== monitor.kind && (kind !== 'generated' || monitor.kind === 'reminder')) throw new Error('本次修改需要保留任务类别；如需在监控和日历提醒之间切换，请另建任务');
@@ -965,6 +1023,8 @@ async function handler(request, response) {
               Object.assign(updated, { firedAt: null, completedAt: null, pendingNotifications: [], lastCheckAt: null, lastError: '', lastResult: '' });
             }
             resetBaseline = monitor.kind !== 'reminder' && (kind !== monitor.kind || ['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan));
+            fetchChanged = JSON.stringify(validateFetchOptions(next.fetch)) !== JSON.stringify(validateFetchOptions(monitor.fetch));
+            if (fetchChanged || resetBaseline) Object.assign(updated, { sourceFailures: 0, sourceRetryAt: null, lastSourceError: '', lastFetch: null });
             if (kind !== monitor.kind) for (const key of ['keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'plan']) delete updated[key];
             Object.assign(updated, next);
             if (resetBaseline) Object.assign(updated, { snapshot: null, baselined: false, lastCheckAt: null, lastResult: '', pendingNotifications: [], lastError: '' });
@@ -985,7 +1045,7 @@ async function handler(request, response) {
           for (const key of Object.keys(monitor)) if (!(key in updated)) delete monitor[key];
           Object.assign(monitor, updated);
           persist();
-          if (resetBaseline && monitor.enabled) await checkMonitor(user, monitor);
+          if ((resetBaseline || fetchChanged) && monitor.enabled) await checkMonitor(user, monitor);
           return sendJson(response, 200, publicState(user));
         }
         if (request.method === 'DELETE' && !match[2]) {
@@ -1015,7 +1075,9 @@ setInterval(() => {
   for (const user of store.state.users) for (const monitor of user.monitors) {
     if (activeChecks.size >= maxScheduledChecks) return;
     const lastCheck = Date.parse(monitor.lastCheckAt);
-    if (monitor.kind !== 'reminder' && monitor.enabled && (!Number.isFinite(lastCheck) || now - lastCheck >= monitor.intervalMinutes * 60_000)) checkMonitor(user, monitor);
+    const retryAt = Date.parse(monitor.sourceRetryAt);
+    const due = Number.isFinite(retryAt) ? now >= retryAt : !Number.isFinite(lastCheck) || now - lastCheck >= monitor.intervalMinutes * 60_000;
+    if (monitor.kind !== 'reminder' && monitor.enabled && due) checkMonitor(user, monitor);
   }
 }, 20_000).unref();
 

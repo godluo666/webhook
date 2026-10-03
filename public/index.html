@@ -27,6 +27,7 @@
         <div class="nav-divider" aria-hidden="true"></div>
         <a class="nav-link" href="#channels" aria-label="通知渠道"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M3.5 7h17M3.5 17h17"/><circle cx="9" cy="7" r="2" fill="white"/><circle cx="16" cy="17" r="2" fill="white"/></svg></span><span class="nav-text">通知渠道</span></a>
         <a class="nav-link" href="#ai-settings" aria-label="AI 设置"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="m12 2 1.8 6.2L20 10l-6.2 1.8L12 18l-1.8-6.2L4 10l6.2-1.8L12 2Z"/><path d="m19 17 .6 2.4L22 20l-2.4.6L19 23l-.6-2.4L16 20l2.4-.6L19 17Z"/></svg></span><span class="nav-text">AI 设置</span></a>
+        <a class="nav-link" href="#fetch-settings" aria-label="读取设置"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M4 12h16M12 4c4 4 4 12 0 16-4-4-4-12 0-16Z"/></svg></span><span class="nav-text">读取设置</span></a>
         <a class="nav-link" href="#activity" aria-label="活动与日志"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg></span><span class="nav-text">活动与日志</span></a>
         <a class="nav-link" href="#account" aria-label="账户安全"><span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.5-4 3-6 7-6s6.5 2 7 6"/></svg></span><span class="nav-text">账户安全</span></a>
       </nav>
@@ -99,6 +100,24 @@
                 <div class="settings-actions"><span id="settings-dirty" class="dirty-indicator" aria-live="polite"></span><button class="button button-dark" type="submit" id="save-button">保存渠道</button></div>
               </form></div>
             </section>
+
+<section id="fetch-settings" class="workspace-section source-settings">
+  <div class="card-title-row"><div><div class="eyebrow">SOURCE ACCESS</div><h2>读取设置</h2></div></div>
+  <p class="section-subtitle">为当前账户选择监控网络出口。真实浏览器也跳盾时，可换用能够正常访问目标网站的代理。</p>
+  <form id="source-settings-form" class="stacked-form">
+    <section class="source-settings-section"><h3>监控代理</h3><p class="field-help">HTTP 请求与浏览器使用同一个代理。仅影响网页和接口监控，不改变 AI、Webhook 或邮件的连接。</p>
+    <p id="source-proxy-status" class="source-proxy-status" aria-live="polite"></p>
+    <label class="field-label" for="source-proxy">代理地址</label><input id="source-proxy" type="password" autocomplete="new-password" placeholder="http://用户名:密码@主机:端口">
+    <p class="field-help">支持 HTTP / HTTPS 代理。已保存的凭据不回显；输入新地址可替换。使用稳定出口有助于保持网站验证会话。</p>
+    <div class="settings-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">清除代理</button><button id="source-proxy-save" type="submit" class="button button-primary">保存代理</button></div>
+    </section>
+    <section class="source-settings-section"><h3>测试目标网站</h3><p class="field-help">测试当前输入或已保存代理，确认它是否能读取你要关注的网站。测试不会发送通知，也不会调用 AI。</p>
+    <label class="field-label" for="source-test-url">网站或接口地址</label><input id="source-test-url" type="url" placeholder="https://example.com/api/products">
+    <label class="field-label" for="source-test-mode">测试方式</label><select id="source-test-mode"><option value="http">直接请求</option><option value="browser">浏览器读取</option></select>
+    <div class="source-test-actions"><button id="source-proxy-test" class="button button-outline" type="button">测试读取</button><p id="source-proxy-result" class="field-help" role="status"></p></div>
+    </section>
+  </form>
+</section>
 
 <section id="account" class="workspace-section account-card"><div class="card-title-row"><div><div class="eyebrow">ACCOUNT</div><h2>账户与安全</h2></div><div class="section-icon purple">◉</div></div><p class="section-subtitle">管理邮箱、密码和找回密码所需的恢复码。</p><details class="account-detail"><summary>绑定邮箱</summary><p class="field-help" id="email-status"></p><p class="field-help hidden" id="email-service-note">管理员尚未配置邮件服务，暂时无法绑定邮箱；找回密码仍可使用恢复码。</p><form id="email-form" class="stacked-form"><label class="field-label" for="account-email">邮箱地址</label><input id="account-email" type="email" autocomplete="email"><label class="field-label" for="email-password">当前密码</label><input id="email-password" type="password" required autocomplete="current-password"><label class="field-label" for="account-email-code">邮箱验证码</label><div class="code-send-row"><input id="account-email-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" placeholder="6 位验证码"><button id="send-bind-code" class="mini-button" type="button">发送验证码</button></div><p id="bind-code-status" class="field-help" aria-live="polite">修改邮箱需验证新地址；留空邮箱可解除绑定。</p><button class="button button-dark" type="submit">保存邮箱</button></form></details><details class="account-detail"><summary>修改密码</summary><form id="password-form" class="stacked-form"><label class="field-label" for="current-password">当前密码</label><input id="current-password" type="password" required autocomplete="current-password"><label class="field-label" for="new-password">新密码（至少 12 位）</label><input id="new-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"><button class="button button-dark" type="submit">修改密码</button></form></details><details class="account-detail"><summary>恢复码</summary><p class="field-help" id="recovery-code-status"></p><form id="rotate-code-form" class="stacked-form"><label class="field-label" for="rotate-code-password">当前密码</label><input id="rotate-code-password" type="password" required autocomplete="current-password"><button class="button button-dark" type="submit">生成新恢复码</button></form></details></section>
 

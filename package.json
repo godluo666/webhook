@@ -9,5 +9,9 @@
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "puppeteer-real-browser": "1.4.4",
+    "undici": "6.29.0"
   }
 }

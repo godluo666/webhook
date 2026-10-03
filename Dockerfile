@@ -1,4 +1,4 @@
-FROM node:24-alpine
+FROM node:24-bookworm-slim
 
 ARG SOURCE_URL
 LABEL org.opencontainers.image.source=$SOURCE_URL
@@ -6,15 +6,25 @@ LABEL org.opencontainers.image.source=$SOURCE_URL
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
-    DATA_DIR=/app/.data
+    DATA_DIR=/app/.data \
+    MONITOR_BROWSER_EXECUTABLE=/usr/bin/chromium \
+    TMPDIR=/app/.data/browser-tmp \
+    XDG_CACHE_HOME=/app/.data/browser-tmp/cache \
+    XDG_CONFIG_HOME=/app/.data/browser-tmp/config
+
+RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb xauth fonts-noto-cjk ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-COPY --chown=node:node package.json server.js ./
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY --chown=node:node server.js ./
 COPY --chown=node:node lib ./lib
 COPY --chown=node:node public ./public
 
-RUN mkdir -p /app/.data && chown node:node /app/.data
+# Keep browser writes inside the existing volume, including on read-only stacks.
+RUN mkdir -p /app/.data/browser-tmp && chown -R node:node /app/.data \
+    && rm -rf /tmp && ln -s /app/.data/browser-tmp /tmp
 
 USER node
 EXPOSE 3000
