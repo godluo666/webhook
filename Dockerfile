@@ -1,3 +1,4 @@
+FROM ghcr.io/shadowsocks/sslocal-rust:v1.25.0 AS shadowsocks
 FROM node:24-bookworm-slim
 
 ARG SOURCE_URL
@@ -7,10 +8,15 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
     DATA_DIR=/app/.data \
-    MONITOR_BROWSER_EXECUTABLE=/usr/bin/chromium
+    MONITOR_BROWSER_EXECUTABLE=/usr/bin/chromium \
+    MONITOR_SS_EXECUTABLE=/usr/local/bin/sslocal
 
 RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb xauth fonts-noto-cjk ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=shadowsocks /usr/bin/sslocal /usr/local/bin/sslocal
+COPY third_party/shadowsocks-LICENSE /usr/share/doc/shadowsocks/LICENSE
+RUN /usr/local/bin/sslocal --version
 
 WORKDIR /app
 COPY --chown=node:node package.json package-lock.json ./

@@ -92,10 +92,25 @@ function toast(message, error = false) {
 }
 
 async function api(path, method = 'GET', body) {
-  const response = await fetch(path, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const requestId = globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+  let response;
+  try {
+    response = await fetch(path, { method, headers: { 'x-radar-request-id': requestId, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  } catch (cause) {
+    const error = new Error('页面与 Radar 服务的连接中断，请检查服务或反向代理是否正常。请求 ' + requestId + ' · ' + method + ' ' + path);
+    error.code = 'RADAR_CONNECTION_FAILED'; error.requestId = requestId; error.cause = cause;
+    throw error;
+  }
   let result;
-  try { result = await response.json(); } catch { throw new Error('服务未返回有效数据'); }
-  if (!response.ok) throw new Error(result.error || `请求失败：${response.status}`);
+  try { result = await response.json(); }
+  catch {
+    throw new Error('Radar 返回 HTTP ' + response.status + '，但响应不是有效 JSON。请检查反向代理和服务日志。请求 ' + requestId + ' · ' + path);
+  }
+  if (!response.ok) {
+    const error = new Error(result.error || '请求失败：HTTP ' + response.status);
+    error.code = result.code; error.requestId = result.requestId || requestId; error.status = response.status;
+    throw error;
+  }
   return result;
 }
 
@@ -209,7 +224,7 @@ function renderLogs() {
   const list = $('#log-list');
   const scrollTop = list.scrollTop;
   const expanded = new Set([...list.querySelectorAll('.raw-log[open]')].map((details) => details.dataset.id));
-  const labels = { fetch: '读取过程', errorCode: '错误代码', retryAt: '下次重试时间', instruction: '用户原始指令', conversation: '对话记录', firstModelError: '首次生成校验错误', firstModelResponse: '首次 AI 原始响应', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', sourceCheck: '本地来源检查', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
+  const labels = { requestId: '请求编号', networkRoute: '网络路径', error: '原始错误', fetch: '读取过程', errorCode: '错误代码', retryAt: '下次重试时间', instruction: '用户原始指令', conversation: '对话记录', firstModelError: '首次生成校验错误', firstModelResponse: '首次 AI 原始响应', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', sourceCheck: '本地来源检查', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
   const rawHtml = (entry) => `<details class="raw-log" data-id="${escapeHtml(entry.id)}" ${expanded.has(entry.id) ? 'open' : ''}><summary>查看原始记录</summary><button type="button" class="mini-button copy-log" data-copy-log="${escapeHtml(entry.id)}">复制原始记录</button>${Object.entries(entry.raw).filter(([, value]) => value != null && value !== '').map(([name, value]) => {
     let display = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '');
     if (['aiRequest', 'aiResponse', 'responseBody', 'notification', 'channels'].includes(name)) { try { display = JSON.stringify(JSON.parse(display), null, 2); } catch { /* display the original text */ } }
@@ -309,6 +324,7 @@ function populateSettings() {
   renderSourceSettings(true);
   $('#ai-test-result').textContent = '';
   $('#ai-test-result').className = '';
+  $('#ai-test-log').classList.add('hidden');
   $('#settings-dirty').textContent = '';
 }
 
@@ -1216,14 +1232,18 @@ $('#ai-test-button').addEventListener('click', () => {
     const result = $('#ai-test-result');
     result.textContent = '正在连接…';
     result.className = '';
+    $('#ai-test-log').classList.add('hidden');
     try {
       const report = await api('/api/ai/test', 'POST', { aiBaseUrl: $('#ai-base-url').value.trim(), aiModel: $('#ai-model').value.trim(), aiKey: $('#ai-key').value.trim() });
       result.textContent = `连接成功 · ${report.durationMs} ms`;
       result.className = 'success';
+      $('#ai-test-log').classList.remove('hidden');
       api('/api/state').then((state) => { appState = state; render(); }).catch(() => {});
     } catch (error) {
-      result.textContent = error.message;
+      result.textContent = error.message + (error.requestId && error.code !== 'RADAR_CONNECTION_FAILED' ? '\n请求编号：' + error.requestId : '');
       result.className = 'error';
+      $('#ai-test-log').classList.toggle('hidden', !error.code || error.code === 'RADAR_CONNECTION_FAILED');
+      api('/api/state').then(state => { appState = state; render(); }).catch(() => {});
       throw error;
     }
   });
@@ -1237,7 +1257,7 @@ $('#clear-ai-key-button').addEventListener('click', () => {
   });
 });
 for (const selector of ['#ai-base-url', '#ai-model', '#ai-key']) {
-  $(selector).addEventListener('input', () => { $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; });
+  $(selector).addEventListener('input', () => { $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; $('#ai-test-log').classList.add('hidden'); });
 }
 
 $('#send-form').addEventListener('submit', (event) => {
@@ -1408,18 +1428,19 @@ init();
 
 function renderSourceSettings(reset = false) {
   const { hasSourceProxy, sourceProxyEndpoint } = appState.settings;
-  $('#source-proxy-status').textContent = hasSourceProxy ? '已配置 · ' + sourceProxyEndpoint + ' · 凭据已隐藏' : '当前使用服务器出口 · 未配置代理';
+  const covered = appState.monitors.filter(monitor => usesWebSource(monitor) && monitor.fetch?.proxy !== 'direct').length;
+  $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网页 / 接口任务使用此出口' : '当前使用服务器出口 · 粘贴节点即可应用';
   $('#source-proxy-clear').classList.toggle('hidden', !hasSourceProxy);
-  $('#source-proxy').placeholder = hasSourceProxy ? '已保存 · 输入新地址以替换' : 'http://用户名:密码@主机:端口';
+  $('#source-proxy').placeholder = hasSourceProxy ? '已保存 · 输入新地址以替换' : 'ss://节点分享链接 或 http://主机:端口';
   if (reset) { $('#source-proxy').value = ''; $('#source-proxy-result').textContent = ''; }
 }
 $('#source-settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
   withButton($('#source-proxy-save'), async () => {
-    appState = await api('/api/source-proxy', 'PUT', { proxyUrl: $('#source-proxy').value.trim() });
+    appState = await api('/api/source-proxy', 'PUT', { proxyUrl: $('#source-proxy').value.trim(), applyAll: true });
     $('#source-proxy').value = '';
     render();
-    toast('监控代理已保存');
+    toast('代理已应用到当前账户的网页与接口监控');
   });
 });
 $('#source-proxy-clear').addEventListener('click', () => {
@@ -1430,6 +1451,11 @@ $('#source-proxy-clear').addEventListener('click', () => {
     render();
     toast('已恢复服务器出口');
   });
+});
+$('#ai-test-log').addEventListener('click', () => {
+  $('#activity .log-panel').open = true;
+  $('#log-errors-only').checked = false;
+  renderLogs();
 });
 $('#source-proxy-test').addEventListener('click', () => {
   withButton($('#source-proxy-test'), async () => {

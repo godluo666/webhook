@@ -67,6 +67,7 @@ node server.js
 | `HTTP_PROXY` / `HTTPS_PROXY` | Node.js 24.14+ 会自动使用代理，并跳过本地地址；较旧版本请通过运行环境配置网络 |
 | `MONITOR_BROWSER_EXECUTABLE` | 直接运行 Node 时指定 Chrome / Chromium 可执行文件，Docker 已内置 |
 | `MONITOR_BROWSER_ENABLED=0` | 关闭浏览器读取，默认启用 |
+| `MONITOR_SS_EXECUTABLE` | 直接运行 Node 时指定 shadowsocks-rust 的 `sslocal` 可执行文件，需支持 HTTP 本地代理；Docker 已内置，无需额外配置 |
 | `MONITOR_BROWSER_HEADLESS=1` | Linux 上使用无界面浏览器，默认在 Xvfb 中运行 |
 | `MONITOR_LOG_ROOT` | 可选的日志目录根路径；每个账户只读取其中以自身账户 ID 命名的子目录。默认 `.data/monitor-logs` |
 
@@ -120,7 +121,9 @@ DMIT 全量库存使用[第三方公开数据](https://vps.thairath.eu.org/)，�
 
 在 **任务 → 编辑监控 → 读取设置** 中选择读取方式：自动（先请求，遇到验证时尝试浏览器）、浏览器（执行页面 JavaScript），或直接请求（只使用 HTTP，适合公开接口）。读取过程和错误代码可在原始日志查看。
 
-真实浏览器也可能因服务器出口 IP 被网站限制。参考 [changedetection.io 的代理配置](https://github.com/dgtlmoon/changedetection.io/wiki/Proxy-configuration)，独立的 **读取设置** 页面提供当前账户的 HTTP / HTTPS 代理及目标网站测试。地址格式为 `http://用户名:密码@主机:端口`；特殊字符需 URL 编码。凭据不回显，仅用于网页与接口读取，不影响 AI、Webhook、邮件、服务存活检测或本地日志。单个监控可选择“直接连接”跳过账户代理。容器访问宿主机代理时用 `host.docker.internal:端口`，不要用容器自身的 `127.0.0.1`。
+真实浏览器也可能因服务器出口 IP 被网站限制。参考 [changedetection.io 的代理配置](https://github.com/dgtlmoon/changedetection.io/wiki/Proxy-configuration)，独立的 **读取设置** 页面支持当前账户的 Shadowsocks 节点或 HTTP / HTTPS 代理及目标网站测试。粘贴 `ss://` 分享链接，点击 **应用到监控**，即可让现有及新建的网页、接口监控使用该出口，无需额外安装客户端或修改 Compose；点击清除可恢复服务器出口。现有检测状态、通知内容和待发送记录保留。HTTP 代理地址格式为 `http://用户名:密码@主机:端口`；特殊字符需 URL 编码。凭据不回显，仅用于网页与接口读取，不影响 AI、Webhook、邮件、服务存活检测或本地日志。单个监控可选择“直接连接”跳过账户代理。容器访问宿主机代理时用 `host.docker.internal:端口`，不要用容器自身的 `127.0.0.1`。
+
+SS 使用镜像内的 [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) 客户端，支持标准分享链接、旧版 Base64 链接、AES-GCM、ChaCha20-Poly1305 和 AEAD-2022。带 `plugin` 的节点暂不支持直接导入，可使用现有客户端提供的 HTTP 代理。每次读取启动独立客户端，使用随机认证的本地监听端口，结束后关闭并清理私有临时配置，最多同时运行 4 个客户端；代理凭据按账户保存，不回显。仅更新镜像即可获得 SS 支持。
 
 HTTP 与浏览器使用同一代理出口。浏览器验证 Cookie 按账户、网站和代理隔离，只在内存保留最多一小时，重启后清空；临时浏览器目录在读取后清理。浏览器一次运行一个实例，排队有数量及超时限制。直接请求超时 15 秒，浏览器导航与验证共享 45 秒预算，启动和关闭可能额外耗时。
 
@@ -175,7 +178,9 @@ docker compose up -d
 
 “最近活动”下的日志记录每次 AI 连接测试、规则解析、来源检查和 Webhook 发送的结果、耗时、HTTP 状态和具体错误。新解析日志可展开查看原始指令、发送给 AI 的请求体、AI 回复、地址校验结果；检查失败日志记录网络错误码和响应内容。API Key 会从这些日志中隐藏。每个账户只能查看自己的日志；完整日志可通过登录后的 `/api/logs` 读取，最多保留最近 300 条。旧日志没有保存原始 AI 回复，无法追溯补回。
 
-`fetch failed` 一般表示服务端无法建立网络连接。服务会展示底层错误码，例如连接超时；若连接成功但站点拒绝请求，会显示 HTTP 403 等状态。浏览器能打开页面不代表服务端能抓取同一内容。
+AI 连接测试通过当前 Radar 服务转发，不需要在浏览器允许外部 API 的 CORS。测试日志保存请求编号、实际接口、模型、请求体、HTTP 状态、原始响应和网络错误码，API Key 已隐藏；测试失败后可点击“查看连接日志”。完整 `/chat/completions/` 地址末尾斜杠也会正常处理。
+
+浏览器的 `Failed to fetch` 表示页面没有拿到 Radar 的响应，需结合反向代理和服务日志排查；它不等于 API Key 无效。页面会显示失败请求的路径和编号。服务端连接外部地址失败则展示 DNS、TLS、连接拒绝或超时等底层原因；非 JSON 的反向代理响应会保留 HTTP 状态以便定位。
 
 ## 测试
 

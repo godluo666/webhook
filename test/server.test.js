@@ -1039,3 +1039,86 @@ test('账户代理覆盖监控与试跑，通知不走代理；公开状态和�
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   }
 });
+
+test('AI 连接测试修复完整地址斜杠，并保留脱敏原始响应与网络错误', async () => {
+  const calls = [];
+  let mode = 'success';
+  const ai = http.createServer(async (req, res) => {
+    calls.push({ url: req.url, authorization: req.headers.authorization });
+    if (mode === 'reset') { req.socket.destroy(); return; }
+    if (mode === 'provider') { res.writeHead(401, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'invalid token ai-secret-for-regression' } })); return; }
+    if (mode === 'html') { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>upstream not ready</html>'); return; }
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'OK' } }] }));
+  });
+  const aiPort = await listen(ai);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'radar-ai-connection-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', { aiBaseUrl: 'http://127.0.0.1:' + aiPort + '/v1/chat/completions/', aiModel: 'example-model', aiKey: 'ai-secret-for-regression' });
+    // A broken monitoring proxy must never change the AI request's route.
+    await request(base, '/api/source-proxy', 'PUT', { proxyUrl: 'http://127.0.0.1:1' });
+    const report = await request(base, '/api/ai/test', 'POST', {});
+    assert.equal(report.ok, true);
+    assert.equal(calls[0].url, '/v1/chat/completions');
+    assert.equal(calls[0].authorization, 'Bearer ai-secret-for-regression');
+    let logs = (await request(base, '/api/logs')).logs;
+    assert.equal(logs[0].raw.httpStatus, 200);
+    assert.equal(logs[0].raw.requestId, report.requestId);
+    assert.equal(JSON.parse(logs[0].raw.responseBody).choices[0].message.content, 'OK');
+    for (const next of ['provider', 'html', 'reset']) {
+      mode = next;
+      const response = await fetch(base + '/api/ai/test', { method: 'POST', headers: { cookie: cookies.get(base), 'content-type': 'application/json', 'x-radar-request-id': 'regression-' + mode }, body: '{}' });
+      assert.equal(response.status, 502);
+      const failure = await response.json();
+      assert.equal(failure.requestId, 'regression-' + mode);
+      logs = (await request(base, '/api/logs')).logs;
+      assert.equal(logs[0].raw.requestId, failure.requestId);
+      assert.equal(JSON.stringify(logs).includes('ai-secret-for-regression'), false);
+      assert.equal(JSON.stringify(failure).includes('ai-secret-for-regression'), false);
+      if (next === 'provider') { assert.equal(failure.upstreamStatus, 401); assert.match(logs[0].raw.responseBody, /已隐藏的 API Key/); }
+      if (next === 'html') { assert.match(failure.error, /不是 JSON/); assert.match(logs[0].raw.responseBody, /upstream not ready/); }
+      if (next === 'reset') assert.ok(logs[0].raw.networkCode);
+    }
+  } finally {
+    child.kill(); ai.closeAllConnections(); await new Promise(resolve => ai.close(resolve));
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});
+
+test('代理一键应用仅修改本账户网页任务并保留检测基线，SS 凭据不回显', async () => {
+  const source = http.createServer((_req, res) => res.end('no stock'));
+  const port = await listen(source);
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'radar-apply-proxy-'));
+  const { base, child } = await startApp(dataDir);
+  try {
+    await request(base, '/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: '测试渠道', url: 'http://127.0.0.1:' + port + '/hook', enabled: true }] });
+    const created = await request(base, '/api/monitors', 'POST', { kind: 'webpage', url: 'http://127.0.0.1:' + port, label: '普通任务', keyword: 'stock', mode: 'contains', intervalMinutes: 5, webhookIds: ['hook'], fetch: { mode: 'http', proxy: 'direct' } });
+    const previous = created.monitors[0], aliceCookie = cookies.get(base);
+    await request(base, '/api/auth/register', 'POST', { username: 'second-user', password: 'a-strong-password-123' });
+    const bobCookie = cookies.get(base);
+    await request(base, '/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: '测试渠道', url: 'http://127.0.0.1:' + port + '/hook', enabled: true }] });
+    const bobCreated = await request(base, '/api/monitors', 'POST', { kind: 'webpage', url: 'http://127.0.0.1:' + port, label: '其他账户任务', keyword: 'stock', mode: 'contains', intervalMinutes: 5, webhookIds: ['hook'], fetch: { mode: 'http', proxy: 'direct' } });
+    cookies.set(base, aliceCookie);
+    const saved = await request(base, '/api/source-proxy', 'PUT', { proxyUrl: 'ss://' + Buffer.from('aes-256-gcm:ss-regression-secret').toString('base64url') + '@127.0.0.1:8388#Private', applyAll: true });
+    assert.equal(saved.settings.hasSourceProxy, true);
+    assert.equal(saved.settings.sourceProxyEndpoint, 'ss://127.0.0.1:8388');
+    assert.equal(JSON.stringify(saved).includes('ss-regression-secret'), false);
+    assert.equal(saved.monitors[0].fetch.proxy, 'default');
+    assert.equal(saved.monitors[0].fetch.mode, 'http');
+    assert.deepEqual(saved.monitors[0].snapshot, previous.snapshot);
+    assert.equal(saved.monitors[0].baselined, previous.baselined);
+    assert.deepEqual(saved.monitors[0].pendingNotifications, previous.pendingNotifications);
+    const again = await request(base, '/api/source-proxy', 'PUT', { applyAll: true });
+    assert.equal(again.settings.hasSourceProxy, true);
+    cookies.set(base, bobCookie);
+    const bob = await request(base, '/api/state');
+    assert.equal(bob.settings.hasSourceProxy, false);
+    assert.deepEqual(bob.monitors[0].fetch, bobCreated.monitors[0].fetch);
+    cookies.set(base, aliceCookie);
+    assert.equal((await request(base, '/api/source-proxy', 'DELETE')).settings.hasSourceProxy, false);
+  } finally {
+    child.kill(); source.closeAllConnections(); await new Promise(resolve => source.close(resolve));
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  }
+});

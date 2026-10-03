@@ -13,7 +13,8 @@ import { createStore } from './lib/store.js';
 import { createEmailCodeService } from './lib/email.js';
 import { createSourceFetcher, validateFetchOptions } from './lib/source-fetch.js';
 import { createBrowserSource } from './lib/browser-source.js';
-import { validateSourceProxy, proxyEndpoint } from './lib/source-proxy.js';
+import { validateSourceProxy, proxyEndpoint, redactProxy } from './lib/source-proxy.js';
+import { createShadowsocksBridge } from './lib/shadowsocks.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -25,7 +26,29 @@ const host = process.env.HOST || '127.0.0.1';
 const activeChecks = new Set();
 const sourceCheckCache = new Map();
 const notificationPreviews = new Map();
-const fetchSource = createSourceFetcher({ browserFetch: createBrowserSource({ dataDir }), browserEnabled: process.env.MONITOR_BROWSER_ENABLED !== '0' });
+const readSource = createSourceFetcher({ browserFetch: createBrowserSource({ dataDir }), browserEnabled: process.env.MONITOR_BROWSER_ENABLED !== '0' });
+const withSourceProxy = createShadowsocksBridge({ dataDir });
+function redactData(value, redact) {
+  if (typeof value === 'string') return redact(value);
+  if (Array.isArray(value)) return value.map(item => redactData(item, redact));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactData(item, redact)]));
+  return value;
+}
+async function fetchSource(url, options = {}) {
+  return withSourceProxy(options.proxyUrl, async (proxyUrl, proxyIdentity) => {
+    try {
+      const result = await readSource(url, { ...options, proxyUrl, proxyIdentity });
+      if (proxyIdentity) result.metadata.proxyType = 'shadowsocks';
+      return result;
+    } catch (error) {
+      if (proxyIdentity) {
+        error.message = redactProxy(error.message, options.proxyUrl);
+        error.fetchDetails = redactData({ ...error.fetchDetails, proxyType: 'shadowsocks' }, text => redactProxy(text, options.proxyUrl));
+      }
+      throw error;
+    }
+  });
+}
 function sourceOptions(user, monitor = {}) {
   const options = validateFetchOptions(monitor.fetch);
   return { userId: user.id, mode: options.mode, direct: options.proxy === 'direct', proxyUrl: options.proxy === 'direct' ? '' : user.settings.sourceProxy || '' };
@@ -208,7 +231,15 @@ async function fetchText(url, options = {}) {
     throw failure;
   }
   options.onResponse?.(response.status);
-  const body = await readLimited(response, options.maxBytes || 2_000_000);
+  let body;
+  try { body = await readLimited(response, options.maxBytes || 2_000_000); }
+  catch (error) {
+    error.responseStatus = response.status;
+    error.networkCode = error.cause?.code || error.name;
+    error.networkCause = error.cause?.message || error.message;
+    throw error;
+  }
+  options.onBody?.(body);
   if (!response.ok) {
     const error = new Error(`HTTP ${response.status}${body ? ` · ${body.replace(/<[^>]+>/g, ' ').slice(0, 100)}` : ''}`);
     error.responseStatus = response.status;
@@ -417,7 +448,8 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
 
 function aiEndpoint(baseUrl) {
   const url = new URL(urlOf(baseUrl, 'AI API 地址'));
-  if (!url.pathname.endsWith('/chat/completions')) url.pathname = `${url.pathname.replace(/\/$/, '')}/chat/completions`;
+  url.pathname = url.pathname.replace(/\/+$/, '');
+  if (!url.pathname.endsWith('/chat/completions')) url.pathname += '/chat/completions';
   return url.href;
 }
 
@@ -785,28 +817,58 @@ async function handler(request, response) {
         if (!key) throw new Error('请先填写 API Key');
         if (key.length > 500) throw new Error('API Key 过长');
         const endpoint = aiEndpoint(baseUrl || 'https://api.openai.com/v1');
+        const suppliedId = String(request.headers['x-radar-request-id'] || '');
+        const requestId = /^[a-zA-Z0-9-]{1,80}$/.test(suppliedId) ? suppliedId : randomUUID();
         const started = Date.now();
+        const payload = JSON.stringify({ model, messages: [{ role: 'user', content: '回复 OK' }] });
+        const trace = { requestId, apiEndpoint: endpoint, model, aiRequest: payload, networkRoute: '服务器网络设置（不使用网页监控代理）' };
+        const redact = value => {
+          let text = String(value || '');
+          for (const secret of [key, encodeURIComponent(key), JSON.stringify(key).slice(1, -1)].sort((a, b) => b.length - a.length)) text = text.split(secret).join('[已隐藏的 API Key]');
+          return text;
+        };
+        const safeTrace = () => redactData(trace, redact);
         try {
           const raw = await fetchText(endpoint, { method: 'POST', timeout: 20000, maxBytes: 100_000,
-            headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-            body: JSON.stringify({ model, messages: [{ role: 'user', content: '回复 OK' }] }) });
+            onResponse: status => { trace.httpStatus = status; },
+            onBody: text => { trace.responseBody = text.slice(0, 12000); trace.aiResponseTruncated = text.length > 12000; },
+            headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: payload });
           let result;
-          try { result = JSON.parse(raw); } catch { throw new Error('API 返回的不是 JSON'); }
-          if (!Array.isArray(result.choices) || !result.choices[0]?.message) throw new Error('API 响应缺少 Chat Completions 结果');
-          addLog(user, 'ai-test', 'success', `AI 连接成功 · ${model}`, new URL(endpoint).origin, Date.now() - started);
-          return sendJson(response, 200, { ok: true, model, durationMs: Date.now() - started });
+          try { result = JSON.parse(raw); } catch { throw new Error('API 返回的不是 JSON；请在日志查看原始响应和实际请求地址'); }
+          if (!Array.isArray(result.choices) || !result.choices[0]?.message) throw new Error('API 响应缺少 Chat Completions 结果；请在日志查看原始响应');
+          addLog(user, 'ai-test', 'success', `AI 连接成功 · ${model}`, new URL(endpoint).origin, Date.now() - started, null, safeTrace());
+          return sendJson(response, 200, { ok: true, model, requestId, durationMs: Date.now() - started });
         } catch (error) {
-          const safeError = new Error(String(error.message).replaceAll(key, '[已隐藏的 API Key]'));
-          addLog(user, 'ai-test', 'error', safeError.message, new URL(endpoint).origin, Date.now() - started);
-          throw safeError;
+          Object.assign(trace, { networkCode: error.networkCode || null, networkCause: error.networkCause || null, error: error.message });
+          let hint = '';
+          if (/timeout/i.test(error.networkCode || error.name)) hint = 'AI 接口在 20 秒内未响应';
+          else if (/CERT|TLS|SSL/i.test(error.networkCode || '')) hint = '服务器连接 AI 接口时 TLS / 证书校验失败';
+          else if (/ENOTFOUND|EAI_AGAIN/.test(error.networkCode || '')) hint = '服务器无法解析 AI 接口域名';
+          else if (/ECONNREFUSED/.test(error.networkCode || '')) hint = 'AI 接口拒绝了服务器连接';
+          let detail = error.message;
+          if (trace.httpStatus >= 400) {
+            let provider;
+            try { const parsed = JSON.parse(trace.responseBody || '{}'); provider = parsed.error?.message || parsed.message || (typeof parsed.error === 'string' ? parsed.error : ''); } catch { /* original response remains in logs */ }
+            detail = 'AI 接口返回 HTTP ' + trace.httpStatus + (provider ? ' · ' + String(provider).slice(0, 300) : '');
+          } else if (error.networkCode && !detail.includes(error.networkCode)) detail += ' · ' + error.networkCode;
+          const message = redact(hint ? hint + ' · ' + detail : detail);
+          addLog(user, 'ai-test', 'error', message, new URL(endpoint).origin, Date.now() - started, null, safeTrace());
+          return sendJson(response, 502, { error: message, code: error.networkCode || 'AI_TEST_FAILED', requestId, upstreamStatus: trace.httpStatus || null });
         }
       }
       if (['PUT', 'DELETE'].includes(request.method) && pathname === '/api/source-proxy') {
         const body = request.method === 'PUT' ? await readJson(request) : {};
-        const proxy = request.method === 'DELETE' ? '' : validateSourceProxy(body.proxyUrl);
+        const proxy = request.method === 'DELETE' ? '' : validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
         if (request.method === 'PUT' && !proxy) throw new Error('请填写代理地址，或使用清除按钮移除已保存代理');
+        if (body.applyAll && user.monitors.some(monitor => monitor.fetch?.proxy === 'direct' && activeChecks.has(monitor.id))) throw new Error('有直接连接的任务正在检查，请等待检查完成后再应用代理');
         user.settings.sourceProxy = proxy;
         for (const monitor of user.monitors) {
+          const webSource = monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && ['log', 'service'].includes(monitor.plan.sourceType));
+          if (!webSource) continue;
+          if (body.applyAll && request.method === 'PUT' && monitor.fetch?.proxy === 'direct') {
+            monitor.fetch = { ...validateFetchOptions(monitor.fetch), proxy: 'default' };
+            monitor.revision = (monitor.revision || 0) + 1;
+          }
           if (monitor.fetch?.proxy === 'direct') continue;
           Object.assign(monitor, { sourceRetryAt: null, sourceFailures: 0, lastSourceError: '', lastFetch: null });
         }

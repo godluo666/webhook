@@ -95,7 +95,7 @@
                   <label for="ai-model" class="field-label">模型名称</label><input id="ai-model" type="text" placeholder="填写兼容 Chat Completions 的模型名" autocomplete="off">
                   <label for="ai-key" class="field-label">API Key <span id="key-indicator" class="key-indicator"></span></label><input id="ai-key" type="password" placeholder="未设置" autocomplete="new-password">
                   <div class="ai-key-actions"><span class="field-help">已保存的 Key 不会在页面中回显；输入新 Key 后保存即可替换。</span><button id="clear-ai-key-button" type="button" class="mini-button danger hidden">清除已保存的 Key</button></div>
-                  <div class="ai-test-row"><button type="button" id="ai-test-button" class="button button-outline">测试 API 连接</button><span id="ai-test-result" aria-live="polite"></span></div>
+                  <div class="ai-test-row"><button type="button" id="ai-test-button" class="button button-outline">测试 API 连接</button><span id="ai-test-result" aria-live="polite"></span></div><a id="ai-test-log" href="#activity" class="field-help hidden">查看连接日志 ↗</a>
                 </section>
                 <div class="settings-actions"><span id="settings-dirty" class="dirty-indicator" aria-live="polite"></span><button class="button button-dark" type="submit" id="save-button">保存渠道</button></div>
               </form></div>
@@ -106,10 +106,10 @@
   <p class="section-subtitle">为当前账户选择监控网络出口。真实浏览器也跳盾时，可换用能够正常访问目标网站的代理。</p>
   <form id="source-settings-form" class="stacked-form">
     <section class="source-settings-section"><h3>监控代理</h3><p class="field-help">HTTP 请求与浏览器使用同一个代理。仅影响网页和接口监控，不改变 AI、Webhook 或邮件的连接。</p>
-    <p id="source-proxy-status" class="source-proxy-status" aria-live="polite"></p>
-    <label class="field-label" for="source-proxy">代理地址</label><input id="source-proxy" type="password" autocomplete="new-password" placeholder="http://用户名:密码@主机:端口">
-    <p class="field-help">支持 HTTP / HTTPS 代理。已保存的凭据不回显；输入新地址可替换。使用稳定出口有助于保持网站验证会话。</p>
-    <div class="settings-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">清除代理</button><button id="source-proxy-save" type="submit" class="button button-primary">保存代理</button></div>
+    <p class="field-help">节点密码不会回显。带插件的 SS 节点请使用现有客户端的 HTTP 代理端口。</p><p id="source-proxy-status" class="source-proxy-status" aria-live="polite"></p>
+    <label class="field-label" for="source-proxy">代理地址或 SS 节点</label><input id="source-proxy" type="password" autocomplete="new-password" placeholder="粘贴 ss:// 节点或 http://主机:端口">
+    <p class="field-help">粘贴 Shadowsocks 分享链接即可使用，Docker 已内置客户端；也支持 HTTP / HTTPS 代理。点击应用后，当前账户的全部网页和接口监控使用此出口，原检测记录保留。</p>
+    <div class="settings-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">清除代理</button><button id="source-proxy-save" type="submit" class="button button-primary">应用到监控</button></div>
     </section>
     <section class="source-settings-section"><h3>测试目标网站</h3><p class="field-help">测试当前输入或已保存代理，确认它是否能读取你要关注的网站。测试不会发送通知，也不会调用 AI。</p>
     <label class="field-label" for="source-test-url">网站或接口地址</label><input id="source-test-url" type="url" placeholder="https://example.com/api/products">

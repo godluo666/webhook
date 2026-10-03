@@ -852,7 +852,8 @@ input[role=switch]:checked::before {
 .source-settings .settings-actions > .danger { margin-right: auto; }
 .source-test-actions { margin-top: 24px; }
 .source-settings :is(.settings-actions, .source-test-actions) .button { min-width: 144px; }
-#source-proxy-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+#source-proxy-result, #ai-test-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+#ai-test-log { display: block; margin-top: 16px; }
 @media (max-width: 620px) {
   .rule-tabs { gap: 20px; }
   .rule-tab { font-size: 13px; }
