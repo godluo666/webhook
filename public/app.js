@@ -104,7 +104,9 @@ async function api(path, method = 'GET', body) {
   let result;
   try { result = await response.json(); }
   catch {
-    throw new Error('Radar 返回 HTTP ' + response.status + '，但响应不是有效 JSON。请检查反向代理和服务日志。请求 ' + requestId + ' · ' + path);
+    const error = new Error('Radar 返回 HTTP ' + response.status + '，但响应不是有效 JSON。请检查反向代理和服务日志。请求 ' + requestId + ' · ' + path);
+    error.code = 'RADAR_INVALID_RESPONSE'; error.requestId = requestId;
+    throw error;
   }
   if (!response.ok) {
     const error = new Error(result.error || '请求失败：HTTP ' + response.status);
@@ -1007,12 +1009,18 @@ function showAuth() {
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
   for (const selector of ['#source-proxy', '#source-test-url', '#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code']) $(selector).value = '';
+  sourceSettingsEpoch += 1;
+  releaseSourceAction(sourceAction);
+  resetSourceResults();
+  $('#source-proxy-status').textContent = '';
+  $('#source-test-mode').value = 'http';
   $('#ai-test-result').textContent = '';
   $('#settings-dirty').textContent = '';
   for (const input of document.querySelectorAll('#email-password, #current-password, #new-password, #rotate-code-password')) input.value = '';
 }
 
 function showWorkspace(state) {
+  sourceSettingsEpoch += 1;
   appState = state;
   $('#auth-screen').classList.add('hidden');
   $('.app-shell').classList.remove('auth-hidden');
@@ -1417,8 +1425,11 @@ async function init() {
     if (status.authenticated) showWorkspace(await api('/api/state'));
     else showAuth();
     setInterval(async () => {
-      if ($('.app-shell').classList.contains('auth-hidden')) return;
-      try { appState = await api('/api/state'); render(); } catch (error) { if (error.message === '请先登录') showAuth(); }
+      if ($('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy) return;
+      const epoch = sourceSettingsEpoch, userId = appState.user?.id;
+      const isCurrent = () => epoch === sourceSettingsEpoch && userId === appState.user?.id && !$('.app-shell').classList.contains('auth-hidden');
+      try { const state = await api('/api/state'); if (isCurrent()) { appState = state; render(); } }
+      catch (error) { if (isCurrent() && error.message === '请先登录') showAuth(); }
     }, 30000);
   } catch (error) { showAuth(); toast(`无法连接本地服务：${error.message}`, true); }
 }
@@ -1426,28 +1437,116 @@ $('#send-priority-slot').innerHTML = priorityPicker('send-priority', null, true)
 setAuthMode('login');
 init();
 
+let sourceSettingsBusy = false;
+let sourceSettingsEpoch = 0;
+let sourceAction = null;
+
+function releaseSourceAction(operation) {
+  if (!operation || sourceAction !== operation) return;
+  sourceAction = null;
+  sourceSettingsBusy = false;
+  operation.controls.forEach((control, index) => { control.disabled = operation.disabled[index]; });
+  operation.button.textContent = operation.label;
+  $('#fetch-settings').setAttribute('aria-busy', 'false');
+}
+
+function resetSourceResults() {
+  for (const selector of ['#source-connection-result', '#source-proxy-result']) {
+    $(selector).textContent = '';
+    $(selector).className = 'field-help';
+  }
+}
+
+function sourceConnectionSummary(result = {}) {
+  return '出口 IP：' + (result.ip || '未返回') + (Number.isFinite(result.durationMs) ? ' · ' + result.durationMs + ' ms' : '');
+}
+
 function renderSourceSettings(reset = false) {
-  const { hasSourceProxy, sourceProxyEndpoint } = appState.settings;
+  const { hasSourceProxy, sourceProxyEndpoint, sourceProxyTest } = appState.settings;
   const covered = appState.monitors.filter(monitor => usesWebSource(monitor) && monitor.fetch?.proxy !== 'direct').length;
-  $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网页 / 接口任务使用此出口' : '当前使用服务器出口 · 粘贴节点即可应用';
+  const verified = sourceProxyTest?.ip ? ' · 验证时出口 IP：' + sourceProxyTest.ip : '';
+  $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网页 / 接口任务使用此出口' + verified : '当前使用服务器出口 · 先验证代理，再应用到监控';
   $('#source-proxy-clear').classList.toggle('hidden', !hasSourceProxy);
-  $('#source-proxy').placeholder = hasSourceProxy ? '已保存 · 输入新地址以替换' : 'ss://节点分享链接 或 http://主机:端口';
-  if (reset) { $('#source-proxy').value = ''; $('#source-proxy-result').textContent = ''; }
+  $('#source-proxy').placeholder = hasSourceProxy ? '已保存 · 留空可测试已有代理，输入新地址以替换' : 'ss://节点分享链接 或 http://主机:端口';
+  if (reset) { $('#source-proxy').value = ''; resetSourceResults(); }
+}
+
+async function withSourceAction(button, loadingLabel, work) {
+  if (sourceSettingsBusy) return;
+  const controls = ['#source-proxy', '#source-proxy-test', '#source-proxy-save', '#source-proxy-clear', '#source-target-test', '#source-test-url', '#source-test-mode'].map(selector => $(selector));
+  const disabled = controls.map(control => control.disabled);
+  const epoch = ++sourceSettingsEpoch;
+  const label = button.textContent;
+  const operation = { controls, disabled, button, label };
+  sourceAction = operation;
+  sourceSettingsBusy = true;
+  controls.forEach(control => { control.disabled = true; });
+  button.textContent = loadingLabel;
+  $('#fetch-settings').setAttribute('aria-busy', 'true');
+  try { await work(() => epoch === sourceSettingsEpoch); }
+  catch (error) { if (epoch === sourceSettingsEpoch) toast(error.message, true); }
+  finally {
+    releaseSourceAction(operation);
+  }
+}
+
+function hasProxyToTest(status) {
+  if ($('#source-proxy').value.trim() || appState.settings.hasSourceProxy) return true;
+  status.textContent = '请先粘贴 HTTP / HTTPS 代理地址或 SS 节点。';
+  status.className = 'field-help error';
+  $('#source-proxy').focus();
+  return false;
+}
+
+$('#source-proxy').addEventListener('input', resetSourceResults);
+for (const selector of ['#source-test-url', '#source-test-mode']) {
+  $(selector).addEventListener('input', () => {
+    $('#source-proxy-result').textContent = '';
+    $('#source-proxy-result').className = 'field-help';
+  });
 }
 $('#source-settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  withButton($('#source-proxy-save'), async () => {
-    appState = await api('/api/source-proxy', 'PUT', { proxyUrl: $('#source-proxy').value.trim(), applyAll: true });
-    $('#source-proxy').value = '';
-    render();
-    toast('代理已应用到当前账户的网页与接口监控');
+  const status = $('#source-connection-result');
+  if (!hasProxyToTest(status)) return;
+  const proxyUrl = $('#source-proxy').value.trim();
+  withSourceAction($('#source-proxy-save'), '正在验证…', async (isCurrent) => {
+    status.textContent = '正在验证代理连接，验证通过后应用到监控…';
+    status.className = 'field-help';
+    try {
+      const state = await api('/api/source-proxy', 'PUT', { proxyUrl, applyAll: true });
+      if (!isCurrent()) return;
+      appState = state;
+      $('#source-proxy').value = '';
+      $('#source-proxy-result').textContent = '';
+      render();
+      status.textContent = '验证通过，已应用到监控 · ' + sourceConnectionSummary(state.settings.sourceProxyTest);
+      status.className = 'field-help success';
+      toast('代理验证通过，已应用到当前账户的网页与接口监控');
+    } catch (error) {
+      if (!isCurrent()) return;
+      const uncertain = !error.status || error.status >= 500;
+      const detail = error.code === 'SOURCE_CHECK_BUSY' ? '代理已验证，任务正在检查，本次暂未应用。'
+        : error.code === 'PROXY_CONFIG_CHANGED' ? '代理配置已被其他操作更新，本次未应用。'
+        : error.code === 'PROXY_TEST_BUSY' ? '已有代理测试正在进行，本次未应用。'
+        : uncertain ? '未收到应用确认，请刷新页面确认当前代理配置。'
+        : '代理验证未通过，本次未应用。';
+      status.textContent = detail + '\n' + error.message;
+      status.className = 'field-help error';
+      if (error.status === 409 || uncertain) {
+        try { const state = await api('/api/state'); if (isCurrent()) { appState = state; render(); } } catch { /* keep candidate and error for retry */ }
+      }
+      throw error;
+    }
   });
 });
 $('#source-proxy-clear').addEventListener('click', () => {
-  withButton($('#source-proxy-clear'), async () => {
-    appState = await api('/api/source-proxy', 'DELETE');
+  withSourceAction($('#source-proxy-clear'), '正在清除…', async (isCurrent) => {
+    const state = await api('/api/source-proxy', 'DELETE');
+    if (!isCurrent()) return;
+    appState = state;
     $('#source-proxy').value = '';
-    $('#source-proxy-result').textContent = '';
+    resetSourceResults();
     render();
     toast('已恢复服务器出口');
   });
@@ -1458,13 +1557,61 @@ $('#ai-test-log').addEventListener('click', () => {
   renderLogs();
 });
 $('#source-proxy-test').addEventListener('click', () => {
-  withButton($('#source-proxy-test'), async () => {
-    const status = $('#source-proxy-result');
-    status.textContent = '正在读取目标网站…';
+  const status = $('#source-connection-result');
+  if (!hasProxyToTest(status)) return;
+  const proxyUrl = $('#source-proxy').value.trim();
+  withSourceAction($('#source-proxy-test'), '正在测试…', async (isCurrent) => {
+    status.textContent = '正在测试代理连接，无需填写目标网站…';
+    status.className = 'field-help';
     try {
-      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl: $('#source-proxy').value.trim(), targetUrl: $('#source-test-url').value.trim(), mode: $('#source-test-mode').value });
-      status.textContent = '读取成功 · HTTP ' + result.status + ' · ' + result.durationMs + ' ms · ' + (result.method === 'browser' ? '浏览器' : '直接请求');
-    } catch (error) { status.textContent = error.message; throw error; }
+      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl });
+      if (!isCurrent()) return;
+      status.textContent = '代理连接正常 · ' + sourceConnectionSummary(result) + (proxyUrl ? '。\n仅完成测试；点击“验证并应用”启用此代理。' : '。\n本次仅测试，不更改代理配置。');
+      status.className = 'field-help success';
+    } catch (error) {
+      if (!isCurrent()) return;
+      status.textContent = '代理连接测试失败，本次未更改配置。\n' + error.message;
+      status.className = 'field-help error';
+      throw error;
+    }
+  });
+});
+$('#source-target-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const status = $('#source-proxy-result');
+  const targetUrl = $('#source-test-url').value.trim();
+  if (!targetUrl) {
+    status.textContent = '请填写要测试的网站或接口地址；仅测试代理请使用上方按钮。';
+    status.className = 'field-help error';
+    $('#source-test-url').focus();
+    return;
+  }
+  try {
+    const url = new URL(targetUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || !url.hostname) throw new Error();
+  } catch {
+    status.textContent = '网站或接口地址需以 http:// 或 https:// 开头，例如 https://example.com。';
+    status.className = 'field-help error';
+    $('#source-test-url').focus();
+    return;
+  }
+  if (!hasProxyToTest(status)) return;
+  const proxyUrl = $('#source-proxy').value.trim();
+  const mode = $('#source-test-mode').value;
+  withSourceAction($('#source-target-test'), '正在读取…', async (isCurrent) => {
+    status.textContent = '正在读取目标网站…';
+    status.className = 'field-help';
+    try {
+      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl, targetUrl, mode });
+      if (!isCurrent()) return;
+      status.textContent = '目标读取成功 · HTTP ' + result.status + ' · ' + result.durationMs + ' ms · ' + (result.method === 'browser' ? '浏览器' : '直接请求');
+      status.className = 'field-help success';
+    } catch (error) {
+      if (!isCurrent()) return;
+      status.textContent = '目标网站读取失败，已保存代理配置未更改；可先测试代理连接。\n' + error.message;
+      status.className = 'field-help error';
+      throw error;
+    }
   });
 });
 function selectRuleTab(button, focus = false) {

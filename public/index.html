@@ -108,13 +108,16 @@
     <section class="source-settings-section"><h3>监控代理</h3><p class="field-help">HTTP 请求与浏览器使用同一个代理。仅影响网页和接口监控，不改变 AI、Webhook 或邮件的连接。</p>
     <p class="field-help">节点密码不会回显。带插件的 SS 节点请使用现有客户端的 HTTP 代理端口。</p><p id="source-proxy-status" class="source-proxy-status" aria-live="polite"></p>
     <label class="field-label" for="source-proxy">代理地址或 SS 节点</label><input id="source-proxy" type="password" autocomplete="new-password" placeholder="粘贴 ss:// 节点或 http://主机:端口">
-    <p class="field-help">粘贴 Shadowsocks 分享链接即可使用，Docker 已内置客户端；也支持 HTTP / HTTPS 代理。点击应用后，当前账户的全部网页和接口监控使用此出口，原检测记录保留。</p>
-    <div class="settings-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">清除代理</button><button id="source-proxy-save" type="submit" class="button button-primary">应用到监控</button></div>
+    <p class="field-help">支持 HTTP / HTTPS 代理与 Shadowsocks 分享链接，Docker 已内置 SS 客户端。测试代理无需填写网站；验证成功后才替换已保存代理，并应用到当前账户的网页和接口监控，原检测记录保留。</p>
+    <div class="settings-actions source-proxy-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">清除代理</button><button id="source-proxy-test" type="button" class="button button-outline">测试代理</button><button id="source-proxy-save" type="submit" class="button button-primary">验证并应用</button></div>
+    <p id="source-connection-result" class="field-help" role="status"></p>
     </section>
-    <section class="source-settings-section"><h3>测试目标网站</h3><p class="field-help">测试当前输入或已保存代理，确认它是否能读取你要关注的网站。测试不会发送通知，也不会调用 AI。</p>
+  </form>
+  <form id="source-target-form" class="stacked-form source-target-section" novalidate>
+    <section class="source-settings-section"><h3>测试目标网站</h3><p class="field-help">可选：测试当前输入或已保存代理能否读取指定网站。代理连接正常也可能遇到网站限制；此测试不会发送通知，也不会调用 AI。</p>
     <label class="field-label" for="source-test-url">网站或接口地址</label><input id="source-test-url" type="url" placeholder="https://example.com/api/products">
     <label class="field-label" for="source-test-mode">测试方式</label><select id="source-test-mode"><option value="http">直接请求</option><option value="browser">浏览器读取</option></select>
-    <div class="source-test-actions"><button id="source-proxy-test" class="button button-outline" type="button">测试读取</button><p id="source-proxy-result" class="field-help" role="status"></p></div>
+    <div class="source-test-actions"><button id="source-target-test" class="button button-outline" type="submit">测试读取</button><p id="source-proxy-result" class="field-help" role="status"></p></div>
     </section>
   </form>
 </section>

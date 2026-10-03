@@ -846,13 +846,19 @@ input[role=switch]:checked::before {
 .editor-footer .button { min-width: 144px; }
 .source-settings { max-width: 900px; }
 .source-settings-form, #source-settings-form { max-width: 680px; margin-top: 36px; }
+.source-target-section { max-width: 680px; margin-top: 48px; padding-top: 32px; border-top: 1px solid var(--border); }
 .source-settings-section + .source-settings-section { margin-top: 48px; padding-top: 32px; border-top: 1px solid var(--border); }
 .source-proxy-status { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; margin: 24px 0; }
 .source-settings .settings-actions { justify-content: flex-end; }
 .source-settings .settings-actions > .danger { margin-right: auto; }
+.source-proxy-actions { flex-wrap: wrap; gap: 16px; }
+#source-connection-result:empty { display: none; }
+#source-connection-result { margin-top: 20px; }
+:is(#source-connection-result, #source-proxy-result).success { color: var(--success-text); }
+:is(#source-connection-result, #source-proxy-result).error { color: var(--danger-text); }
 .source-test-actions { margin-top: 24px; }
 .source-settings :is(.settings-actions, .source-test-actions) .button { min-width: 144px; }
-#source-proxy-result, #ai-test-result { white-space: pre-wrap; overflow-wrap: anywhere; }
+#source-connection-result, #source-proxy-result, #ai-test-result { white-space: pre-wrap; overflow-wrap: anywhere; }
 #ai-test-log { display: block; margin-top: 16px; }
 @media (max-width: 620px) {
   .rule-tabs { gap: 20px; }
@@ -860,4 +866,6 @@ input[role=switch]:checked::before {
   .rule-pane { padding-top: 24px; }
   .editor-footer > span { max-width: 48%; }
   .editor-footer .button { min-width: 128px; }
+  .source-proxy-actions .button { flex: 1 1 144px; }
+  .source-proxy-actions > .danger { flex-basis: 100%; margin-right: 0; }
 }

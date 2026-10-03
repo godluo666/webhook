@@ -9,12 +9,14 @@ const root = process.cwd();
 const { createShadowsocksBridge } = await import(pathToFileURL(path.join(root, 'lib/shadowsocks.js')));
 const { createSourceFetcher } = await import(pathToFileURL(path.join(root, 'lib/source-fetch.js')));
 const { createBrowserSource } = await import(pathToFileURL(path.join(root, 'lib/browser-source.js')));
+const { createProxyTester } = await import(pathToFileURL(path.join(root, 'lib/proxy-connectivity.js')));
 const dataRoot = process.env.DATA_DIR;
 const dataDir = await fs.mkdtemp(path.join(dataRoot, 'ss-smoke-'));
 const listen = srv => new Promise(resolve => srv.listen(0, '127.0.0.1', () => resolve(srv.address().port)));
 const headers = [];
 const target = http.createServer((req, res) => {
   headers.push({ ...req.headers, path: req.url });
+  if (req.url === '/proxy-probe') { res.setHeader('content-type', 'application/json'); res.end('{"ip":"203.0.113.10"}'); return; }
   if (req.url !== '/') { res.writeHead(204); res.end(); return; }
   res.setHeader('content-type', 'text/html');
   res.setHeader('set-cookie', 'sourceSession=ss-cookie; Path=/; HttpOnly');
@@ -36,6 +38,12 @@ try {
   const bridge = createShadowsocksBridge({ dataDir });
   const read = createSourceFetcher({ browserFetch: createBrowserSource({ dataDir }) });
   const node = 'ss://aes-256-gcm:local-smoke-password@127.0.0.1:' + ssPort;
+  const testProxy = createProxyTester({ withProxy: bridge, urls: ['http://127.0.0.1:' + targetPort + '/proxy-probe'] });
+  const verified = await testProxy(node);
+  assert.equal(verified.ok, true);
+  assert.equal(verified.ip, '203.0.113.10');
+  assert.equal(verified.fetch.proxyType, 'shadowsocks');
+  assert.equal(JSON.stringify(verified).includes('local-smoke-password'), false);
   const readThrough = (mode, userId = 'first-user') => bridge(node, (proxyUrl, proxyIdentity) => read('http://127.0.0.1:' + targetPort, { proxyUrl, proxyIdentity, mode, userId }));
   const httpResult = await readThrough('http');
   assert.equal(httpResult.status, 200);
@@ -49,7 +57,7 @@ try {
   assert.equal(headers.slice(before).some(item => item.path === '/' && item.cookie?.includes('sourceSession=ss-cookie')), false);
   assert.equal(headers.some(item => item.authorization || item['proxy-authorization']), false);
   assert.equal((await fs.readdir(path.join(dataDir, 'proxy-tmp'))).length, 0);
-  console.log('Real Shadowsocks HTTP/browser reads, cross-read cookies, account isolation, credential isolation and temporary cleanup passed.');
+  console.log('Real Shadowsocks exit-IP validation, HTTP/browser reads, cross-read cookies, account isolation, credential isolation and temporary cleanup passed.');
 } finally {
   const closed = new Promise(resolve => child.once('close', resolve));
   if (child.pid && child.exitCode === null && child.signalCode === null) { child.kill(); await closed; }

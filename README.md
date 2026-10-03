@@ -68,6 +68,7 @@ node server.js
 | `MONITOR_BROWSER_EXECUTABLE` | 直接运行 Node 时指定 Chrome / Chromium 可执行文件，Docker 已内置 |
 | `MONITOR_BROWSER_ENABLED=0` | 关闭浏览器读取，默认启用 |
 | `MONITOR_SS_EXECUTABLE` | 直接运行 Node 时指定 shadowsocks-rust 的 `sslocal` 可执行文件，需支持 HTTP 本地代理；Docker 已内置，无需额外配置 |
+| `MONITOR_PROXY_TEST_URL` | 可选的代理出网检测地址，应返回 JSON `{ "ip": "出口IP" }`、纯 IP 或 Cloudflare trace；不配置时使用内置检测服务及备用服务 |
 | `MONITOR_BROWSER_HEADLESS=1` | Linux 上使用无界面浏览器，默认在 Xvfb 中运行 |
 | `MONITOR_LOG_ROOT` | 可选的日志目录根路径；每个账户只读取其中以自身账户 ID 命名的子目录。默认 `.data/monitor-logs` |
 
@@ -121,15 +122,19 @@ DMIT 全量库存使用[第三方公开数据](https://vps.thairath.eu.org/)，�
 
 在 **任务 → 编辑监控 → 读取设置** 中选择读取方式：自动（先请求，遇到验证时尝试浏览器）、浏览器（执行页面 JavaScript），或直接请求（只使用 HTTP，适合公开接口）。读取过程和错误代码可在原始日志查看。
 
-真实浏览器也可能因服务器出口 IP 被网站限制。参考 [changedetection.io 的代理配置](https://github.com/dgtlmoon/changedetection.io/wiki/Proxy-configuration)，独立的 **读取设置** 页面支持当前账户的 Shadowsocks 节点或 HTTP / HTTPS 代理及目标网站测试。粘贴 `ss://` 分享链接，点击 **应用到监控**，即可让现有及新建的网页、接口监控使用该出口，无需额外安装客户端或修改 Compose；点击清除可恢复服务器出口。现有检测状态、通知内容和待发送记录保留。HTTP 代理地址格式为 `http://用户名:密码@主机:端口`；特殊字符需 URL 编码。凭据不回显，仅用于网页与接口读取，不影响 AI、Webhook、邮件、服务存活检测或本地日志。单个监控可选择“直接连接”跳过账户代理。容器访问宿主机代理时用 `host.docker.internal:端口`，不要用容器自身的 `127.0.0.1`。
+真实浏览器也可能因服务器出口 IP 被网站限制。参考 [changedetection.io 的代理配置](https://github.com/dgtlmoon/changedetection.io/wiki/Proxy-configuration)，独立的 **读取设置** 页面支持当前账户的 Shadowsocks 节点或 HTTP / HTTPS 代理及目标网站测试。粘贴 `ss://` 分享链接或 HTTP 代理，点击 **验证并应用**，会先验证代理认证和出网，验证通过后让现有及新建的网页、接口监控使用该出口，无需额外安装客户端或修改 Compose；验证失败保留原代理和监控状态，点击清除可恢复服务器出口。现有检测状态、通知内容和待发送记录保留。HTTP 代理地址格式为 `http://用户名:密码@主机:端口`；特殊字符需 URL 编码。凭据不回显，仅用于网页与接口读取，不影响 AI、Webhook、邮件、服务存活检测或本地日志。单个监控可选择“直接连接”跳过账户代理。容器访问宿主机代理时用 `host.docker.internal:端口`，不要用容器自身的 `127.0.0.1`。
 
 SS 使用镜像内的 [shadowsocks-rust](https://github.com/shadowsocks/shadowsocks-rust) 客户端，支持标准分享链接、旧版 Base64 链接、AES-GCM、ChaCha20-Poly1305 和 AEAD-2022。带 `plugin` 的节点暂不支持直接导入，可使用现有客户端提供的 HTTP 代理。每次读取启动独立客户端，使用随机认证的本地监听端口，结束后关闭并清理私有临时配置，最多同时运行 4 个客户端；代理凭据按账户保存，不回显。仅更新镜像即可获得 SS 支持。
+
+**测试代理** 无需填写目标网站，只通过候选代理读取小型 IP 检测响应，显示出口 IP 和耗时，不保存配置、不调用 AI、不发送通知。导入时会重新验证，避免使用过期的测试结果；检测服务默认使用 [ipify](https://www.ipify.org/)，失败时尝试 Cloudflare trace，每个检测请求限时 8 秒。SS 会完成实际加密转发，不能只靠本地端口打开判断可用。检测日志保留每次尝试、错误链和认证错误，隐藏代理凭据。检测服务不可达时暂不应用，可配置 `MONITOR_PROXY_TEST_URL` 使用自己的检测端点。
+
+**测试目标网站** 是独立操作，用于确认代理是否能读取特定来源，可选择 HTTP 或浏览器。目标地址填错不会阻挡代理验证；目标网站跳盾或拒绝访问会单独报告，不改变已保存代理，也不意味着代理完全不可用。
 
 HTTP 与浏览器使用同一代理出口。浏览器验证 Cookie 按账户、网站和代理隔离，只在内存保留最多一小时，重启后清空；临时浏览器目录在读取后清理。浏览器一次运行一个实例，排队有数量及超时限制。直接请求超时 15 秒，浏览器导航与验证共享 45 秒预算，启动和关闭可能额外耗时。
 
 根据 [Cloudflare 官方响应标记](https://developers.cloudflare.com/cloudflare-challenges/challenge-types/challenge-pages/detect-response/)及验证页特征识别跳盾，即使 HTTP 200 也不会当作真实来源。验证失败保留上一次有效结果、不发库存变化通知，并按 1、2、4、8、15 分钟延迟重试，最长 15 分钟。限流遵守 `Retry-After`（最长一小时）；立即检查可提前重试。只切换读取方式或代理保留基线，修改来源地址或检测条件仍重新建立基线。
 
-日志包含各次读取尝试、HTTP 状态、直接请求的 Cloudflare Ray ID、错误代码及下次重试时间。认证凭据和 Cookie 不进入公开日志。浏览器和代理不能保证通过所有验证；出口被拒绝、需要人工 CAPTCHA 或登录时仍可能失败。应先测试新出口是否能访问目标网站，再应用到监控。
+日志包含各次读取尝试、HTTP 状态、直接请求的 Cloudflare Ray ID、错误代码及下次重试时间。认证凭据和 Cookie 不进入公开日志。浏览器和代理不能保证通过所有验证；出口被拒绝、需要人工 CAPTCHA 或登录时仍可能失败。代理出网验证通过后，仍建议单独测试目标网站的访问结果。
 
 浏览器读取使用 Playwright。Docker 镜像已包含 Chromium、Xvfb 和中文字体，现有只读 Compose 和数据卷可继续使用。1Panel 更新 `ghcr.io/godluo666/webhook:latest` 即可，无需新增浏览器容器。直接运行 Node 时需安装 Chrome / Chromium，并可用 `MONITOR_BROWSER_EXECUTABLE` 指定可执行文件。
 

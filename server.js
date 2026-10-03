@@ -15,6 +15,7 @@ import { createSourceFetcher, validateFetchOptions } from './lib/source-fetch.js
 import { createBrowserSource } from './lib/browser-source.js';
 import { validateSourceProxy, proxyEndpoint, redactProxy } from './lib/source-proxy.js';
 import { createShadowsocksBridge } from './lib/shadowsocks.js';
+import { createProxyTester } from './lib/proxy-connectivity.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -28,6 +29,8 @@ const sourceCheckCache = new Map();
 const notificationPreviews = new Map();
 const readSource = createSourceFetcher({ browserFetch: createBrowserSource({ dataDir }), browserEnabled: process.env.MONITOR_BROWSER_ENABLED !== '0' });
 const withSourceProxy = createShadowsocksBridge({ dataDir });
+const probeProxy = createProxyTester({ withProxy: withSourceProxy, ...(process.env.MONITOR_PROXY_TEST_URL ? { urls: [process.env.MONITOR_PROXY_TEST_URL] } : {}) });
+const proxyTests = new Map();
 function redactData(value, redact) {
   if (typeof value === 'string') return redact(value);
   if (Array.isArray(value)) return value.map(item => redactData(item, redact));
@@ -76,6 +79,31 @@ function addLog(user, kind, status, detail, url, durationMs, monitorId = null, r
   user.logs.unshift({ id: randomUUID(), kind, status, detail: String(detail).slice(0, 500), url: displayUrl, durationMs, monitorId, raw, at: new Date().toISOString() });
   user.logs.length = Math.min(user.logs.length, 300);
   persist();
+}
+
+function testProxy(user, proxy) {
+  const pending = proxyTests.get(user.id);
+  if (pending) {
+    if (pending.proxy === proxy) return pending.promise;
+    throw Object.assign(new Error('此账户正在测试另一个代理，请等待测试完成'), { status: 409, code: 'PROXY_TEST_BUSY' });
+  }
+  if (proxyTests.size >= 16) throw Object.assign(new Error('代理检测繁忙，请稍后重试'), { status: 409, code: 'PROXY_TEST_BUSY' });
+  const started = Date.now();
+  const promise = Promise.resolve().then(async () => {
+    try {
+      const report = await probeProxy(proxy);
+      addLog(user, 'proxy-test', 'success', '代理连接正常 · 出口 IP ' + report.ip, null, report.durationMs, null, { purpose: 'connectivity', endpoint: report.endpoint, ip: report.ip, fetch: report.fetch });
+      return report;
+    } catch (error) {
+      error.message = redactProxy(error.message, proxy);
+      addLog(user, 'proxy-test', 'error', error.message, null, Date.now() - started, null, redactData({ purpose: 'connectivity', endpoint: proxyEndpoint(proxy), errorCode: error.code, fetch: error.fetchDetails }, text => redactProxy(text, proxy)));
+      throw error;
+    } finally {
+      if (proxyTests.get(user.id)?.promise === promise) proxyTests.delete(user.id);
+    }
+  });
+  proxyTests.set(user.id, { proxy, promise });
+  return promise;
 }
 
 function urlOf(value, label) {
@@ -860,8 +888,17 @@ async function handler(request, response) {
         const body = request.method === 'PUT' ? await readJson(request) : {};
         const proxy = request.method === 'DELETE' ? '' : validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
         if (request.method === 'PUT' && !proxy) throw new Error('请填写代理地址，或使用清除按钮移除已保存代理');
-        if (body.applyAll && user.monitors.some(monitor => monitor.fetch?.proxy === 'direct' && activeChecks.has(monitor.id))) throw new Error('有直接连接的任务正在检查，请等待检查完成后再应用代理');
+        const version = user.settings.sourceProxyVersion || 0;
+        let verified = null;
+        if (request.method === 'PUT') {
+          try { verified = await testProxy(user, proxy); }
+          catch (error) { return sendJson(response, error.status || 400, { error: error.message, code: error.code || 'PROXY_TEST_FAILED' }); }
+          if ((user.settings.sourceProxyVersion || 0) !== version) return sendJson(response, 409, { error: '代理配置已在验证期间更改，请重新验证后应用', code: 'PROXY_CONFIG_CHANGED' });
+          if (body.applyAll && user.monitors.some(monitor => monitor.fetch?.proxy === 'direct' && activeChecks.has(monitor.id))) return sendJson(response, 409, { error: '代理已验证，有直接连接的任务正在检查，请等待检查完成后再应用', code: 'SOURCE_CHECK_BUSY' });
+        }
         user.settings.sourceProxy = proxy;
+        user.settings.sourceProxyTest = verified ? { ip: verified.ip, testedAt: verified.testedAt, durationMs: verified.durationMs } : null;
+        user.settings.sourceProxyVersion = version + 1;
         for (const monitor of user.monitors) {
           const webSource = monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && ['log', 'service'].includes(monitor.plan.sourceType));
           if (!webSource) continue;
@@ -880,14 +917,19 @@ async function handler(request, response) {
         const body = await readJson(request);
         const proxyUrl = validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
         if (!proxyUrl) throw new Error('请先填写或保存代理地址');
-        const targetUrl = urlOf(body.targetUrl, '测试网站');
+        if (!String(body.targetUrl || '').trim()) {
+          try { return sendJson(response, 200, await testProxy(user, proxyUrl)); }
+          catch (error) { return sendJson(response, error.status || 400, { error: error.message, code: error.code || 'PROXY_TEST_FAILED' }); }
+        }
+        const targetUrl = urlOf(body.targetUrl, '目标网站地址');
         const started = Date.now();
         try {
           const result = await fetchSource(targetUrl, { userId: user.id, proxyUrl, mode: body.mode === 'browser' ? 'browser' : 'http' });
-          addLog(user, 'proxy-test', 'success', '代理读取成功 · HTTP ' + result.status, targetUrl, Date.now() - started, null, { fetch: result.metadata });
-          return sendJson(response, 200, { status: result.status, method: result.metadata.method, endpoint: proxyEndpoint(proxyUrl), durationMs: Date.now() - started });
+          addLog(user, 'proxy-test', 'success', '代理读取成功 · HTTP ' + result.status, targetUrl, Date.now() - started, null, { purpose: 'target', fetch: result.metadata });
+          return sendJson(response, 200, { purpose: 'target', status: result.status, method: result.metadata.method, endpoint: proxyEndpoint(proxyUrl), durationMs: Date.now() - started });
         } catch (error) {
-          addLog(user, 'proxy-test', 'error', error.message, targetUrl, Date.now() - started, null, { errorCode: error.code, fetch: error.fetchDetails });
+          error.message = redactProxy(error.message, proxyUrl);
+          addLog(user, 'proxy-test', 'error', error.message, targetUrl, Date.now() - started, null, redactData({ purpose: 'target', errorCode: error.code, fetch: error.fetchDetails }, text => redactProxy(text, proxyUrl)));
           throw error;
         }
       }

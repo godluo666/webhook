@@ -16,6 +16,36 @@ function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 }
 
+async function localMonitoringProxy(targetPort, password = 'proxy-regression-private') {
+  const sockets = new Set(), proxy = http.createServer();
+  proxy.on('connection', socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); });
+  proxy.on('connect', (req, socket, head) => {
+    if (req.url !== '127.0.0.1:' + targetPort || req.headers['proxy-authorization'] !== 'Basic ' + Buffer.from('regression-user:' + password).toString('base64')) {
+      socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'); return;
+    }
+    const upstream = net.connect(targetPort, '127.0.0.1', () => {
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) upstream.write(head);
+      socket.pipe(upstream); upstream.pipe(socket);
+    });
+    sockets.add(upstream); upstream.once('close', () => sockets.delete(upstream));
+    upstream.on('error', () => socket.destroy()); socket.on('error', () => upstream.destroy());
+    socket.once('close', () => upstream.destroy());
+  });
+  const port = await listen(proxy);
+  let stopped = false;
+  return {
+    url: 'http://regression-user:' + password + '@127.0.0.1:' + port,
+    endpoint: 'http://127.0.0.1:' + port,
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      for (const socket of sockets) socket.destroy();
+      await new Promise(resolve => proxy.close(resolve));
+    }
+  };
+}
+
 async function request(base, endpoint, method = 'GET', body) {
   const response = await fetch(`${base}${endpoint}`, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(cookies.get(base) ? { cookie: cookies.get(base) } : {}) }, body: body ? JSON.stringify(body) : undefined });
   if (response.headers.get('set-cookie')) cookies.set(base, response.headers.get('set-cookie').split(';')[0]);
@@ -984,6 +1014,7 @@ test('Cloudflare 验证保留有效状态、延迟重试；手动检查可恢复
 test('账户代理覆盖监控与试跑，通知不走代理；公开状态和日志不泄露凭据', async () => {
   const proxyRequests = [], deliveries = [];
   const source = http.createServer(async (req, res) => {
+    if (req.url === '/proxy-probe') { res.setHeader('content-type', 'application/json'); res.end('{"ip":"203.0.113.10"}'); return; }
     if (req.url === '/source') { res.setHeader('content-type', 'text/html'); res.end('<p>Buy now</p>'); return; }
     let data = ''; for await (const part of req) data += part; deliveries.push(data); res.end('ok');
   });
@@ -1003,7 +1034,7 @@ test('账户代理覆盖监控与试跑，通知不走代理；公开状态和�
   });
   const proxyPort = await listen(proxy);
   const dir = await mkdtemp(path.join(tmpdir(), 'radar-proxy-test-'));
-  const { base, child } = await startApp(dir);
+  const { base, child } = await startApp(dir, { env: { MONITOR_PROXY_TEST_URL: 'http://127.0.0.1:' + sourcePort + '/proxy-probe' } });
   try {
     const proxyUrl = 'http://proxy-user:super-private-pass@127.0.0.1:' + proxyPort;
     const saved = await request(base, '/api/source-proxy', 'PUT', { proxyUrl });
@@ -1044,6 +1075,7 @@ test('AI 连接测试修复完整地址斜杠，并保留脱敏原始响应与�
   const calls = [];
   let mode = 'success';
   const ai = http.createServer(async (req, res) => {
+    if (req.url === '/proxy-probe') { res.setHeader('content-type', 'application/json'); res.end('{"ip":"203.0.113.10"}'); return; }
     calls.push({ url: req.url, authorization: req.headers.authorization });
     if (mode === 'reset') { req.socket.destroy(); return; }
     if (mode === 'provider') { res.writeHead(401, { 'content-type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'invalid token ai-secret-for-regression' } })); return; }
@@ -1052,12 +1084,14 @@ test('AI 连接测试修复完整地址斜杠，并保留脱敏原始响应与�
     res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'OK' } }] }));
   });
   const aiPort = await listen(ai);
+  const proxy = await localMonitoringProxy(aiPort);
   const dataDir = await mkdtemp(path.join(tmpdir(), 'radar-ai-connection-'));
-  const { base, child } = await startApp(dataDir);
+  const { base, child } = await startApp(dataDir, { env: { MONITOR_PROXY_TEST_URL: 'http://127.0.0.1:' + aiPort + '/proxy-probe' } });
   try {
     await request(base, '/api/settings', 'PUT', { aiBaseUrl: 'http://127.0.0.1:' + aiPort + '/v1/chat/completions/', aiModel: 'example-model', aiKey: 'ai-secret-for-regression' });
     // A broken monitoring proxy must never change the AI request's route.
-    await request(base, '/api/source-proxy', 'PUT', { proxyUrl: 'http://127.0.0.1:1' });
+    await request(base, '/api/source-proxy', 'PUT', { proxyUrl: proxy.url });
+    await proxy.stop();
     const report = await request(base, '/api/ai/test', 'POST', {});
     assert.equal(report.ok, true);
     assert.equal(calls[0].url, '/v1/chat/completions');
@@ -1081,16 +1115,20 @@ test('AI 连接测试修复完整地址斜杠，并保留脱敏原始响应与�
       if (next === 'reset') assert.ok(logs[0].raw.networkCode);
     }
   } finally {
-    child.kill(); ai.closeAllConnections(); await new Promise(resolve => ai.close(resolve));
+    child.kill(); await proxy.stop(); ai.closeAllConnections(); await new Promise(resolve => ai.close(resolve));
     await rm(dataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
 
-test('代理一键应用仅修改本账户网页任务并保留检测基线，SS 凭据不回显', async () => {
-  const source = http.createServer((_req, res) => res.end('no stock'));
+test('代理一键应用仅修改本账户网页任务并保留检测基线，代理凭据不回显', async () => {
+  const source = http.createServer((req, res) => {
+    if (req.url === '/proxy-probe') { res.setHeader('content-type', 'application/json'); res.end('{"ip":"203.0.113.10"}'); return; }
+    res.end('no stock');
+  });
   const port = await listen(source);
+  const proxy = await localMonitoringProxy(port, 'apply-private-secret');
   const dataDir = await mkdtemp(path.join(tmpdir(), 'radar-apply-proxy-'));
-  const { base, child } = await startApp(dataDir);
+  const { base, child } = await startApp(dataDir, { env: { MONITOR_PROXY_TEST_URL: 'http://127.0.0.1:' + port + '/proxy-probe' } });
   try {
     await request(base, '/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: '测试渠道', url: 'http://127.0.0.1:' + port + '/hook', enabled: true }] });
     const created = await request(base, '/api/monitors', 'POST', { kind: 'webpage', url: 'http://127.0.0.1:' + port, label: '普通任务', keyword: 'stock', mode: 'contains', intervalMinutes: 5, webhookIds: ['hook'], fetch: { mode: 'http', proxy: 'direct' } });
@@ -1100,10 +1138,10 @@ test('代理一键应用仅修改本账户网页任务并保留检测基线，SS
     await request(base, '/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: '测试渠道', url: 'http://127.0.0.1:' + port + '/hook', enabled: true }] });
     const bobCreated = await request(base, '/api/monitors', 'POST', { kind: 'webpage', url: 'http://127.0.0.1:' + port, label: '其他账户任务', keyword: 'stock', mode: 'contains', intervalMinutes: 5, webhookIds: ['hook'], fetch: { mode: 'http', proxy: 'direct' } });
     cookies.set(base, aliceCookie);
-    const saved = await request(base, '/api/source-proxy', 'PUT', { proxyUrl: 'ss://' + Buffer.from('aes-256-gcm:ss-regression-secret').toString('base64url') + '@127.0.0.1:8388#Private', applyAll: true });
+    const saved = await request(base, '/api/source-proxy', 'PUT', { proxyUrl: proxy.url, applyAll: true });
     assert.equal(saved.settings.hasSourceProxy, true);
-    assert.equal(saved.settings.sourceProxyEndpoint, 'ss://127.0.0.1:8388');
-    assert.equal(JSON.stringify(saved).includes('ss-regression-secret'), false);
+    assert.equal(saved.settings.sourceProxyEndpoint, proxy.endpoint);
+    assert.equal(JSON.stringify(saved).includes('apply-private-secret'), false);
     assert.equal(saved.monitors[0].fetch.proxy, 'default');
     assert.equal(saved.monitors[0].fetch.mode, 'http');
     assert.deepEqual(saved.monitors[0].snapshot, previous.snapshot);
@@ -1118,7 +1156,7 @@ test('代理一键应用仅修改本账户网页任务并保留检测基线，SS
     cookies.set(base, aliceCookie);
     assert.equal((await request(base, '/api/source-proxy', 'DELETE')).settings.hasSourceProxy, false);
   } finally {
-    child.kill(); source.closeAllConnections(); await new Promise(resolve => source.close(resolve));
+    child.kill(); await proxy.stop(); source.closeAllConnections(); await new Promise(resolve => source.close(resolve));
     await rm(dataDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   }
 });
