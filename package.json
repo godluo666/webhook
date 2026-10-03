@@ -11,7 +11,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "puppeteer-real-browser": "1.4.4",
+    "playwright-core": "1.63.0",
     "undici": "6.29.0"
   }
 }

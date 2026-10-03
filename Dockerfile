@@ -7,10 +7,7 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=3000 \
     DATA_DIR=/app/.data \
-    MONITOR_BROWSER_EXECUTABLE=/usr/bin/chromium \
-    TMPDIR=/app/.data/browser-tmp \
-    XDG_CACHE_HOME=/app/.data/browser-tmp/cache \
-    XDG_CONFIG_HOME=/app/.data/browser-tmp/config
+    MONITOR_BROWSER_EXECUTABLE=/usr/bin/chromium
 
 RUN apt-get update && apt-get install -y --no-install-recommends chromium xvfb xauth fonts-noto-cjk ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -25,6 +22,10 @@ COPY --chown=node:node public ./public
 # Keep browser writes inside the existing volume, including on read-only stacks.
 RUN mkdir -p /app/.data/browser-tmp && chown -R node:node /app/.data \
     && rm -rf /tmp && ln -s /app/.data/browser-tmp /tmp
+
+ENV TMPDIR=/app/.data/browser-tmp \
+    XDG_CACHE_HOME=/app/.data/browser-tmp/cache \
+    XDG_CONFIG_HOME=/app/.data/browser-tmp/config
 
 USER node
 EXPOSE 3000

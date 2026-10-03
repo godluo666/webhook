@@ -128,7 +128,7 @@ HTTP 与浏览器使用同一代理出口。浏览器验证 Cookie 按账户、�
 
 日志包含各次读取尝试、HTTP 状态、直接请求的 Cloudflare Ray ID、错误代码及下次重试时间。认证凭据和 Cookie 不进入公开日志。浏览器和代理不能保证通过所有验证；出口被拒绝、需要人工 CAPTCHA 或登录时仍可能失败。应先测试新出口是否能访问目标网站，再应用到监控。
 
-Docker 镜像已包含 Chromium、Xvfb 和中文字体，现有只读 Compose 和数据卷可继续使用。1Panel 更新 `ghcr.io/godluo666/webhook:latest` 即可，无需新增浏览器容器。直接运行 Node 时需安装 Chrome / Chromium，并可用 `MONITOR_BROWSER_EXECUTABLE` 指定可执行文件。
+浏览器读取使用 Playwright。Docker 镜像已包含 Chromium、Xvfb 和中文字体，现有只读 Compose 和数据卷可继续使用。1Panel 更新 `ghcr.io/godluo666/webhook:latest` 即可，无需新增浏览器容器。直接运行 Node 时需安装 Chrome / Chromium，并可用 `MONITOR_BROWSER_EXECUTABLE` 指定可执行文件。
 
 ## 定时与循环提醒
 
