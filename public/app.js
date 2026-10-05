@@ -70,10 +70,10 @@ let savedSidebarVisibility = 'visible';
 try { savedSidebarVisibility = localStorage.getItem('webhook-radar-sidebar-visibility') || 'visible'; } catch { /* keep navigation visible */ }
 setSidebarVisible(savedSidebarVisibility !== 'hidden');
 sidebarVisibility.addEventListener('click', () => setSidebarVisible(sidebarShell.classList.contains('sidebar-hidden'), true));
-const pageNames = { top: '概览', create: '智能创建', monitors: '任务与提醒', notifications: '快速发送', channels: '通知渠道', 'ai-settings': 'AI 设置', 'fetch-settings': '读取设置', activity: '活动与日志', account: '账户安全', orders: '自动下单' };
+const pageNames = { top: '概览', create: '智能创建', monitors: '任务与提醒', notifications: '快速发送', channels: '通知渠道', 'ai-settings': 'AI 设置', 'fetch-settings': '读取设置', activity: '活动与日志', account: '账户安全' };
 function syncNavigation(resetScroll = false) {
   const requested = (location.hash || '#top').slice(1);
-  const view = requested === 'settings' ? 'ai-settings' : requested in pageNames ? requested : 'top';
+  const view = requested === 'orders' ? 'monitors' : requested === 'settings' ? 'ai-settings' : requested in pageNames ? requested : 'top';
   sidebarShell.dataset.view = view;
   const current = view === 'top' ? '#top' : '#' + view;
   document.querySelectorAll('.side-nav .nav-link').forEach((link) => {
@@ -262,6 +262,7 @@ function taskEditor(monitor, scope = 'edit') {
     wrapper = 'generated-plan-editor';
     raw = '<textarea data-plan-json ' + (edit ? 'class="edit-plan hidden" id="edit-plan-' + escapeHtml(monitor.id) + '"' : 'class="hidden" id="rule-plan"') + ' aria-hidden="true">' + escapeHtml(JSON.stringify(monitor.plan, null, 2)) + '</textarea><p class="advanced-feedback" role="status"></p>';
   }
+  if (edit && monitor.kind !== 'reminder' && typeof renderMonitorOrder === 'function') sections.push(['自动下单（选填）', renderMonitorOrder(monitor), 'order']);
   if (edit) sections.push(['检测记录', '<div class="record-heading"><span>最近的检查与发送</span><button type="button" class="mini-button" data-action="rule-logs" data-id="' + escapeHtml(monitor.id) + '">刷新记录</button></div><div class="task-records" role="log">正在读取记录…</div>', 'records']);
   const content = ruleSections(sections, token) + raw;
   return wrapper ? '<div class="' + wrapper + '">' + content + '</div>' : content;
@@ -280,6 +281,7 @@ function openTaskEditor(monitor, focusSection) {
   $('#task-save-status').textContent = '修改后点击保存';
   const editor = $('#task-workspace .monitor-route');
   refreshChoices(editor);
+  if (typeof mountMonitorOrder === 'function') mountMonitorOrder(monitor);
   const notification = editor.querySelector('.notification-editor');
   if (notification) attachNotification(notification, () => ({ ...monitor, ...readSavedRule(editor, monitor).rule, webhookIds: selectedIds(editor.querySelector('.target-options')) }), monitor.id);
   showRuleLogs(monitor).catch(error => { if (editor.isConnected) editor.querySelector('.task-records').textContent = error.message; });
@@ -287,6 +289,7 @@ function openTaskEditor(monitor, focusSection) {
   else window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function closeTaskEditor() {
+  if (typeof resetOrderUI === 'function') resetOrderUI();
   const root = $('#task-workspace .notification-editor'), state = notificationEditors.get(root);
   if (state) { clearTimeout(state.timer); state.sequence++; }
   activeTaskId = null;

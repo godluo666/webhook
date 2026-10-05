@@ -295,7 +295,7 @@ try {
   await page.locator('[data-action="edit"][data-id="' + multi.id + '"]').click();
   await page.locator('.task-records .check-record').first().waitFor();
   const sectionKeys = await taskEditor.locator('[data-rule-section]').evaluateAll(nodes => nodes.map(n => n.dataset.ruleSection));
-  assert.deepEqual(sectionKeys, ['basics', 'conditions', 'notifications', 'source', 'evidence', 'records']);
+  assert.deepEqual(sectionKeys, ['basics', 'conditions', 'notifications', 'source', 'evidence', 'order', 'records']);
   assert.equal(await taskEditor.locator('[role=tab], details, dialog, select:visible').count(), 0);
   for (const section of await taskEditor.locator('[data-rule-section]').all()) assert.ok(await section.isVisible());
   await page.evaluate(() => window.scrollTo(0, 0));

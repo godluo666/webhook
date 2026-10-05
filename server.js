@@ -24,6 +24,7 @@ import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/r
 import { createScheduler } from './lib/scheduler.js';
 import { createElementPreview, selectedElement } from './lib/element-picker.js';
 import { createOrderService, validateOrderTask, publicOrderTask } from './lib/orders.js';
+import { createOrderAccountService, publicOrderAccount } from './lib/order-account.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -77,7 +78,9 @@ function inspectMonitorService(user, monitor, plan) {
   return inspectRoutedService(monitor.url, plan, sourceOptions(user, monitor));
 }
 const ruleService = createRuleService({ fetchSource, sourceOptions, inspectService: inspectRoutedService });
+let orderAccountService;
 const orderService = createOrderService({
+  isAccountBusy:(user,monitorId)=>orderAccountService?.busy(user,{id:monitorId})||false,
   persist: () => store.persist(), withProxy: withSourceProxy, sourceOptions,
   requestAI: async (user, messages, {signal} = {}) => {
     if (!user.settings.aiKey || !user.settings.aiModel) throw new Error('请先填写 AI API Key 和模型名称');
@@ -98,6 +101,7 @@ const orderService = createOrderService({
     if (monitor) await deliver(user, { event:'order.result', title:'自动下单 · ' + task.label, message:detail }, monitor.webhookIds);
   }
 });
+orderAccountService = createOrderAccountService({persist:()=>store.persist(),withProxy:withSourceProxy,sourceOptions,isOrderBusy:(user,monitor)=>user.orderTasks.some(task=>task.monitorId===monitor.id&&orderService.isBusy(user,task))});
 orderService.recover(store.state.users);
 function mergeRule(current, patch = {}) {
   const next = { ...current, ...patch };
@@ -1020,12 +1024,25 @@ async function handler(request, response) {
         return sendJson(response, 200, { recoveryCode });
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
+      const accountMatch=pathname.match(/^\/api\/monitors\/([^/]+)\/order-account(?:\/(start|action|finish|cancel|check|logout))?$/);
+      if(accountMatch){
+        const monitor=user.monitors.find(m=>m.id===accountMatch[1]&&m.kind!=='reminder');
+        if(!monitor)return sendJson(response,404,{error:'监控不存在'});
+        const action=accountMatch[2],body=['POST','PUT'].includes(request.method)?await readJson(request):{};
+        if(request.method==='GET'&&!action)return sendJson(response,200,{account:publicOrderAccount(user.orderAccounts.find(a=>a.monitorId===monitor.id))});
+        if(request.method==='PUT'&&!action)return sendJson(response,200,{account:orderAccountService.save(user,monitor,body)});
+        if(request.method==='POST'&&action){
+          if(['start','action'].includes(action))return sendJson(response,200,await orderAccountService[action](user,monitor,body));
+          return sendJson(response,200,{account:await orderAccountService[action](user,monitor,body)});
+        }
+        return sendJson(response,405,{error:'不支持的请求方法'});
+      }
       if (pathname === '/api/order-tasks') {
         if (request.method === 'GET') return sendJson(response, 200, { tasks:user.orderTasks.map(publicOrderTask) });
         if (request.method === 'POST') {
-          if (user.orderTasks.length >= 10) throw new Error('最多创建 10 个下单任务');
+          if (user.orderTasks.filter(t=>!t.result).length >= 10) throw new Error('最多同时保留 10 份未执行的下单配置');
           const task = validateOrderTask(await readJson(request));
-          if (task.monitorId && !user.monitors.some(m=>m.id===task.monitorId && m.kind!=='reminder')) throw new Error('绑定的监控任务不存在');
+          if (!user.monitors.some(m=>m.id===task.monitorId && m.kind!=='reminder')) throw new Error('绑定的监控任务不存在');
           user.orderTasks.unshift(task); persist(); return sendJson(response, 201, {task:publicOrderTask(task)});
         }
       }
@@ -1040,7 +1057,7 @@ async function handler(request, response) {
           if (body.expectedRevision !== task.revision) return sendJson(response, 409, {error:'任务配置已变化，请刷新后再保存'});
           if (task.result || task.submissionStartedAt) throw new Error('已有执行记录，请创建新的下单任务');
           const next = validateOrderTask(body, task);
-          if (next.monitorId && !user.monitors.some(m=>m.id===next.monitorId && m.kind!=='reminder')) throw new Error('绑定的监控任务不存在');
+          if (!user.monitors.some(m=>m.id===next.monitorId && m.kind!=='reminder')) throw new Error('绑定的监控任务不存在');
           Object.assign(task, next); persist(); return sendJson(response, 200, {task:publicOrderTask(task)});
         }
         if (request.method === 'DELETE' && !action) { user.orderTasks=user.orderTasks.filter(t=>t!==task);persist();return sendJson(response,200,{ok:true}); }
@@ -1512,6 +1529,10 @@ async function handler(request, response) {
         }
         if (request.method === 'DELETE' && !match[2]) {
           if (activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '任务正在检查或发送，请等待完成后再删除。', code: 'MONITOR_BUSY' });
+          if(user.orderTasks.some(task=>task.monitorId===monitor.id&&orderService.isBusy(user,task)))return sendJson(response,409,{error:'自动下单正在执行，请先停止并等待结束'});
+          await orderAccountService.logout(user,monitor);
+          user.orderAccounts=user.orderAccounts.filter(a=>a.monitorId!==monitor.id);
+          for(const task of user.orderTasks.filter(t=>t.monitorId===monitor.id)){task.enabled=false;task.approvedHash=null;}
           scheduler.cancel(monitor.id);
           user.monitors = user.monitors.filter((item) => item.id !== monitor.id);
           persist();
