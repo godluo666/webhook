@@ -121,6 +121,9 @@ try {
   await page.locator('#preview .rule-evidence').first().waitFor();
   await page.locator('#preview [data-rule-pick]').click();
   await page.locator('.picker-status').filter({ hasText: '页面已加载' }).waitFor();
+  await page.locator('.picker-count').filter({ hasText: '已选 1 个区域' }).waitFor();
+  await page.frameLocator('.element-frame').locator('.price').click();
+  assert.equal(await page.locator('[data-picker-confirm]').isDisabled(), true);
   await page.frameLocator('.element-frame').locator('.price').click();
   await page.locator('[data-picker-confirm]').click();
   await page.waitForFunction(() => !document.querySelector('.rule-dialog'));
@@ -241,8 +244,9 @@ try {
   assert.match(await page.locator('.picker-status').innerText(), /任务代理出口.*en.*5 个区域/);
   const iframe = page.frameLocator('.element-frame');
   assert.equal(await iframe.locator('[data-radar-monitored]').count(), 5);
-  await iframe.locator('#product0 .qty').click();
-  assert.equal(await page.locator('.picker-scope').inputValue(), 'all_models');
+  assert.equal(await page.locator('.picker-count').innerText(), '已选 5 个区域');
+  await page.locator('[data-picker-scope="all_models"]').click();
+  assert.equal(await page.locator('.picker-scope').getAttribute('data-value'), 'all_models');
   assert.match(await page.locator('.picker-scope-help').innerText(), /5 个型号/);
   await page.locator('[data-picker-confirm]').click();
   await page.waitForFunction(() => !document.querySelector('.rule-dialog'));
@@ -316,6 +320,61 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log('PASS ten-task centered list, stable pause/check geometry, complete single-page rule editor, tablet and mobile without overflow');
+
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.locator('[data-action="edit"][data-id="' + multi.id + '"]').click();
+  await taskEditor.locator('[data-rule-pick]').click();
+  await page.locator('.picker-status').filter({ hasText: '页面已加载' }).waitFor();
+  await page.locator('.picker-count').filter({ hasText: '已选 5 个区域' }).waitFor();
+  const multiFrame = page.frameLocator('.element-frame');
+  for (const i of [0, 2, 4]) await multiFrame.locator('#product' + i + ' .qty').click();
+  assert.equal(await multiFrame.locator('.radar-selected').count(), 2);
+  assert.equal(await page.locator('.picker-count').innerText(), '已选 2 个区域');
+  assert.equal(await page.locator('.picker-selected-item').count(), 2);
+  assert.equal(await page.locator('.picker-scope').getAttribute('data-value'), 'selected');
+  await multiFrame.locator('#product1 .qty').click();
+  assert.equal(await multiFrame.locator('.radar-selected').count(), 1);
+  await multiFrame.locator('#product1 .qty').click();
+  assert.equal(await multiFrame.locator('.radar-selected').count(), 2);
+  await page.locator('[data-picker-confirm]').click();
+  await page.waitForFunction(() => !document.querySelector('.rule-dialog'));
+  await page.locator('#task-save').click();
+  await taskEditor.waitFor({ state: 'hidden' });
+  state = await (await context.request.get(base + '/api/state')).json();
+  const subset = state.monitors.find(m => m.id === multi.id);
+  assert.equal(subset.extraction_rule.kind, 'elements');
+  assert.equal(subset.snapshot.items.length, 2);
+  assert.deepEqual(new Set(subset.snapshot.items.map(item => item.name)), new Set(['TRI.Core', 'TRI.Elite']));
+  const sentBefore = notifications.filter(n => n.monitorId === multi.id).length;
+  modelCounts = [1, 1, 0, 0, 0];
+  await context.request.post(base + '/api/monitors/' + multi.id + '/check');
+  assert.equal(notifications.filter(n => n.monitorId === multi.id).length, sentBefore);
+  modelCounts = [1, 1, 0, 2, 0];
+  await context.request.post(base + '/api/monitors/' + multi.id + '/check');
+  assert.equal(notifications.filter(n => n.monitorId === multi.id).length, sentBefore + 1);
+  assert.match(notifications.filter(n => n.monitorId === multi.id).at(-1).message, /TRI.Elite.*无货 → 有货/);
+  await page.locator('[data-action="edit"][data-id="' + multi.id + '"]').click();
+  await taskEditor.locator('[data-rule-pick]').click();
+  await page.locator('.picker-count').filter({ hasText: '已选 2 个区域' }).waitFor();
+  assert.equal(await multiFrame.locator('.radar-selected').count(), 2);
+  await page.screenshot({ path: path.join(output, 'desktop-multi-picker.png'), fullPage: true });
+  await page.locator('[data-picker-clear]').click();
+  assert.equal(await multiFrame.locator('.radar-selected').count(), 0);
+  assert.equal(await page.locator('[data-picker-confirm]').isDisabled(), true);
+  await multiFrame.locator('#product1 .qty').click();
+  await multiFrame.locator('#product3 .qty').click();
+  await page.locator('.picker-selected-item').first().click();
+  assert.equal(await multiFrame.locator('.radar-selected').count(), 1);
+  await multiFrame.locator('#product1 .qty').click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
+  assert.equal(await page.locator('select:visible, dialog, details').count(), 0);
+  await page.screenshot({ path: path.join(output, 'mobile-multi-picker.png'), fullPage: true });
+  await page.locator('[data-rule-close]').click();
+  await page.locator('#task-close').click();
+  assert.deepEqual(errors, []);
+  console.log('PASS multi-selection, toggling, clear/remove, saved selection restoration, subset restock notifications and mobile picker');
+
 
 } finally {
   await browser?.close();

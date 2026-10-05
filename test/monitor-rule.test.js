@@ -173,3 +173,63 @@ test('商品JSON的库存或价格相互冲突时不选择第一个字段作为�
   assert.equal(analysis.candidates.length, 0);
   assert.equal(analysis.warnings.length, 2);
 });
+
+const multiRule = (type, condition, selectors = ['#a', '#b']) => rule({ type, target_element: { label: '所选区域' }, extraction_rule: { kind: 'elements', elements: selectors.map((selector, i) => ({ target: { selector, label: '区域' + (i + 1) } })) }, condition });
+
+test('多区域网页变化与关键词按区域独立判断，长文本尾部变化仍可识别', () => {
+  const monitor = multiRule('webpage_change', { operator: 'changed' });
+  const before = extractRule(monitor, '<div id="a">old</div><div id="b">' + 'x'.repeat(1000) + 'old</div>');
+  evaluateRule(monitor, before);
+  const after = extractRule(monitor, '<div id="a">old</div><div id="b">' + 'x'.repeat(1000) + 'new</div>');
+  assert.equal(evaluateRule(monitor, after, before).triggered, true);
+  assert.deepEqual(after.triggered_regions, ['#b']);
+  assert.ok(after.regions.every(region => region._comparison_value === undefined));
+  const keyword = multiRule('webpage_change', { operator: 'contains', value: 'keyword' });
+  const first = extractRule(keyword, '<div id="a">keyword</div><div id="b">old</div>'); evaluateRule(keyword, first);
+  const next = extractRule(keyword, '<div id="a">keyword</div><div id="b">' + 'x'.repeat(1000) + ' keyword</div>');
+  assert.equal(evaluateRule(keyword, next, first).triggered, true);
+  assert.deepEqual(next.triggered_regions, ['#b']);
+  assert.equal(evaluateRule(keyword, extractRule(keyword, '<div id="a">keyword</div><div id="b">keyword</div>'), next).triggered, false);
+});
+
+test('多个价格不拼接为一个数值，各自越过阈值时提醒且不重复', () => {
+  const monitor = multiRule('price_change', { operator: 'lt', value: 200 });
+  const first = extractRule(monitor, '<span id="a">￥100</span><span id="b">￥300</span>'); evaluateRule(monitor, first);
+  const second = extractRule(monitor, '<span id="a">￥100</span><span id="b">￥199</span>');
+  assert.equal(evaluateRule(monitor, second, first).triggered, true);
+  assert.deepEqual(second.triggered_regions, ['#b']);
+  assert.equal(second.regions[1].value, 199);
+  assert.equal(evaluateRule(monitor, extractRule(monitor, '<span id="a">￥100</span><span id="b">￥198</span>'), second).triggered, false);
+});
+
+test('点选多个库存区域独立补货，未选区域变化与页面重排不提醒', () => {
+  const monitor = multiRule('product_stock', { operator: 'transition' });
+  const body = (b, c = 0) => '<small id="a">1 Available</small><small id="b">' + b + ' Available</small><small id="c">' + c + ' Available</small>';
+  const first = extractRule(monitor, body(0)); evaluateRule(monitor, first);
+  const ignored = extractRule(monitor, body(0, 1));
+  assert.equal(evaluateRule(monitor, ignored, first).triggered, false);
+  const next = extractRule(monitor, body(1, 1));
+  assert.equal(evaluateRule(monitor, next, ignored).triggered, true);
+  assert.deepEqual(next.triggered_items, ['#b']);
+  assert.equal(evaluateRule(monitor, extractRule(monitor, '<small id="b">1 Available</small><small id="a">1 Available</small>'), next).triggered, false);
+});
+
+test('多选数量、重复、缺失、歧义和隐藏区域均明确失败', () => {
+  assert.throws(() => multiRule('webpage_change', { operator: 'changed' }, []), /1 到 20/);
+  assert.throws(() => multiRule('webpage_change', { operator: 'changed' }, Array.from({ length: 21 }, (_, i) => '#x' + i)), /1 到 20/);
+  assert.throws(() => multiRule('webpage_change', { operator: 'changed' }, ['#a', '#a']), /重复/);
+  const monitor = multiRule('webpage_change', { operator: 'changed' });
+  assert.throws(() => extractRule(monitor, '<p id="a">a</p>'), /区域 2.*不存在/);
+  assert.throws(() => extractRule(monitor, '<p id="a">a</p><p id="b">b</p><p id="b">c</p>'), /区域 2.*多个/);
+  assert.throws(() => extractRule(monitor, '<p id="a">a</p><div hidden><p id="b">b</p></div>'), /区域 2.*不可见/);
+  assert.notEqual(ruleSignature(monitor), ruleSignature(multiRule('webpage_change', { operator: 'changed' }, ['#a', '#c'])));
+});
+
+test('实际多区域库存保存验证逐区域业务场景', async () => {
+  const monitor = multiRule('product_stock', { operator: 'transition' });
+  const service = createRuleService({ sourceOptions: () => ({}), fetchSource: async () => ({ body: '<small id="a">0 Available</small><small id="b">0 Available</small>', status: 200, metadata: { method: 'http' } }) });
+  const report = await service.test({}, monitor);
+  assert.equal(report.passed, true);
+  assert.ok(report.behavior_tests.length >= 5);
+  assert.ok(report.behavior_tests.every(test => test.passed));
+});

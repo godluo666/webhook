@@ -22,7 +22,7 @@ import { createRuleService } from './lib/rule-service.js';
 import { normalizeAiPlan } from './lib/ai-rule-compat.js';
 import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/rule-policy.js';
 import { createScheduler } from './lib/scheduler.js';
-import { createElementPreview, selectedElement } from './lib/element-picker.js';
+import { createElementPreview, selectedElements } from './lib/element-picker.js';
 import { createOrderService, validateOrderTask, publicOrderTask } from './lib/orders.js';
 import { createOrderAccountService, publicOrderAccount } from './lib/order-account.js';
 
@@ -542,6 +542,7 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
       fetch: fetchDetails || null, current_value: current.value ?? current.summary,
       previous_value: previousSnapshot?.value ?? null, changed: previousSnapshot ? current.content_hash && previousSnapshot.content_hash ? current.content_hash !== previousSnapshot.content_hash : JSON.stringify(previousSnapshot.value ?? previousSnapshot.summary) !== JSON.stringify(current.value ?? current.summary) : false,
       ...(current.items ? { items: current.items, triggered_items: current.triggered_items || [] } : {}),
+      ...(current.regions ? { regions: current.regions, triggered_regions: current.triggered_regions || [] } : {}),
       triggered, condition: monitor.kind === 'unified' ? describeRule(monitor) : monitor.description,
       reason: triggered ? '检测值满足提醒条件，已加入通知队列' : '检测成功，本次没有新的触发变化',
       summary: current.summary
@@ -1220,18 +1221,19 @@ async function handler(request, response) {
       }
       if (request.method === 'POST' && pathname === '/api/select-element') {
         const body = await readJson(request);
-        const selected = selectedElement(user.id, body.previewId, body.index);
+        const selections = selectedElements(user.id, body.previewId, body.indices ?? [body.index]);
+        const selected = selections[0];
         const saved = body.monitorId ? user.monitors.find(m => m.id === body.monitorId) : null;
         if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
         const input = mergeRule(saved || {}, body.rule || {});
         const inferred = inferGoal(body.instruction || '', input, body.type);
         const type = inferred.type;
         const collection = type === 'product_stock' && body.scope === 'all_models' ? selected.collection : null;
-        if (body.scope === 'all_models' && !collection) throw new Error('请点击某个型号的库存文字；当前区域无法验证全部型号库存');
+        if (body.scope === 'all_models' && (!collection || selections.some(element => JSON.stringify(element.collection) !== JSON.stringify(collection)))) throw new Error('请点击某个型号的库存文字；当前区域无法验证全部型号库存');
         const draft = {
           ...input, kind: 'unified', type, url: selected.url, label: input.label || '网页区域监控',
-          detection_method: selected.method === 'browser' ? 'browser' : 'dom', target_element: collection ? { label: '各型号库存区域' } : selected.target,
-          extraction_rule: collection || { kind: type === 'product_stock' ? 'stock' : type === 'price_change' ? 'number' : 'text', ...(selected.attribute ? { attribute: selected.attribute } : {}) },
+          detection_method: selected.method === 'browser' ? 'browser' : 'dom', target_element: collection ? { label: '各型号库存区域' } : selections.length > 1 ? { label: '所选 ' + selections.length + ' 个网页区域' } : selected.target,
+          extraction_rule: collection || (selections.length > 1 ? { kind: 'elements', elements: selections.map((element, index) => ({ target: { ...element.target, label: element.target.label === '用户选择的网页区域' ? '网页区域 ' + (index + 1) : element.target.label }, ...(element.attribute ? { attribute: element.attribute } : {}) })) } : { kind: type === 'product_stock' ? 'stock' : type === 'price_change' ? 'number' : 'text', ...(selected.attribute ? { attribute: selected.attribute } : {}) }),
           condition: body.condition || (input.type === type ? input.condition : inferred.condition),
           interval: input.interval ?? (type === 'product_stock' ? 30 : 300), sourceProxy: body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || ''
         };

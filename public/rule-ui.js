@@ -4,6 +4,7 @@ const ruleMethodNames = { html: '页面内容', dom: '网页区域', json: '商�
 function ruleValue(value) { return ({ in_stock: '有货', out_of_stock: '无货', healthy: '正常', unhealthy: '异常' })[value] || String(value ?? '尚未检测'); }
 function unifiedDescription(monitor) {
   const c = monitor.condition || {};
+  if (monitor.extraction_rule?.kind === 'elements') return '所选区域分别判断，任一区域满足条件时提醒：' + unifiedDescription({ ...monitor, extraction_rule: {} });
   if (monitor.extraction_rule?.kind === 'stock_items') return c.operator === 'transition' ? '任一型号从「' + (c.from || []).map(ruleValue).join('、') + '」变为「' + (c.to || []).map(ruleValue).join('、') + '」时提醒' : c.operator === 'equals' ? '任一型号' + ruleValue(c.value) + '时提醒' : '任一型号库存变化时提醒';
   if (c.operator === 'transition') return '从「' + (c.from || []).map(ruleValue).join('、') + '」变为「' + (c.to || []).map(ruleValue).join('、') + '」时提醒';
   if (c.operator === 'changed') return ruleTypeNames[monitor.type] + '变化时提醒';
@@ -14,7 +15,7 @@ function unifiedDescription(monitor) {
 }
 function unifiedSummary(monitor) {
   const test = monitor.last_test_result;
-  return '<div class="rule-evidence"><div><span>监控目标</span><strong>' + escapeHtml(ruleTypeNames[monitor.type]) + '</strong></div><div><span>检测方式</span><strong>' + escapeHtml(monitor.target_element?.label || ruleMethodNames[monitor.detection_method]) + '</strong></div><div><span>当前状态</span><strong>' + escapeHtml(monitor.snapshot?.items ? monitor.snapshot.summary : test?.snapshot?.items ? test.summary : ruleValue(monitor.snapshot?.value ?? test?.current_value)) + '</strong></div><div><span>验证结果</span><strong>' + (test?.passed ? '已通过 ' + (Object.keys(test.checks || {}).length + (test.behavior_tests?.length || 0)) + ' 项验证 · 依据评分 ' + Math.round(monitor.confidence * 100) + '%' : '等待验证') + '</strong></div></div>' + (monitor.explanation ? '<p class="field-help">' + escapeHtml(monitor.explanation) + '</p>' : '');
+  return '<div class="rule-evidence"><div><span>监控目标</span><strong>' + escapeHtml(ruleTypeNames[monitor.type]) + '</strong></div><div><span>检测方式</span><strong>' + escapeHtml(monitor.target_element?.label || ruleMethodNames[monitor.detection_method]) + '</strong></div><div><span>当前状态</span><strong>' + escapeHtml(monitor.snapshot?.items || monitor.snapshot?.regions ? monitor.snapshot.summary : test?.snapshot?.items || test?.snapshot?.regions ? test.summary : ruleValue(monitor.snapshot?.value ?? test?.current_value)) + '</strong></div><div><span>验证结果</span><strong>' + (test?.passed ? '已通过 ' + (Object.keys(test.checks || {}).length + (test.behavior_tests?.length || 0)) + ' 项验证 · 依据评分 ' + Math.round(monitor.confidence * 100) + '%' : '等待验证') + '</strong></div></div>' + (monitor.explanation ? '<p class="field-help">' + escapeHtml(monitor.explanation) + '</p>' : '');
 }
 function ruleValidationSummary(monitor) {
   const tests = monitor.last_test_result?.behavior_tests;
@@ -23,7 +24,10 @@ function ruleValidationSummary(monitor) {
 }
 function stockModelSummary(monitor) {
   const items = monitor.snapshot?.items || monitor.last_test_result?.snapshot?.items;
-  if (!items?.length) return '';
+  if (!items?.length) {
+    const regions = monitor.snapshot?.regions || monitor.last_test_result?.snapshot?.regions;
+    return regions?.length ? '<section class="stock-models"><h4>' + regions.length + ' 个监控区域</h4><ul>' + regions.map(region => '<li><span>' + escapeHtml(region.name) + '</span><strong>' + escapeHtml(ruleValue(region.value)) + '</strong></li>').join('') + '</ul></section>' : '';
+  }
   return '<section class="stock-models"><h4>' + items.length + ' 个型号的库存</h4><ul>' + items.map(item => '<li><span>' + escapeHtml(item.name) + '</span><strong class="' + (item.state === 'in_stock' ? 'available' : '') + '">' + escapeHtml(ruleValue(item.state)) + '</strong><small>' + escapeHtml(item.raw_value) + '</small></li>').join('') + '</ul></section>';
 }
 function unifiedConditionFields(monitor) {
@@ -103,50 +107,99 @@ function ruleDialog(title) {
 async function openElementPicker(monitor, onSelected) {
   const dialog = ruleDialog('选择网页元素');
   const body = dialog.querySelector('.rule-dialog-body');
-  body.innerHTML = '<p class="field-help">点击页面中的价格、库存或购买按钮。下面是服务端使用此任务出口读取的文字快照，绿色框为当前检测区域。页面语言可能随出口变化，请核对原文；选择后会重新读取并验证。</p><label><input type="checkbox" class="picker-browser"> 等待动态页面渲染</label><button type="button" class="mini-button" data-picker-load>重新加载页面</button><p class="picker-status" role="status">正在读取页面…</p><iframe class="element-frame" title="可选择的网页区域" sandbox="allow-same-origin"></iframe>' + (monitor.type === 'product_stock' ? '<label class="picker-scope-label hidden">监控范围<select class="picker-scope"><option value="all_models">同类全部型号（任意型号有货即可提醒）</option><option value="single">只监控点选的这个型号</option></select></label><p class="picker-scope-help field-help"></p>' : '') + '<button type="button" class="button button-primary" data-picker-confirm disabled>使用所选区域</button>';
+  body.innerHTML = '<p class="field-help">点击可选中多个价格、库存或文字区域，再点一次取消。每个区域独立判断，任一区域满足条件时提醒。绿色框表示当前监控区域，紫色框表示本次选择。</p><div class="picker-toolbar"><label><input type="checkbox" class="picker-browser"> 等待动态页面渲染</label><button type="button" class="mini-button" data-picker-load>重新加载页面</button></div><p class="picker-status" role="status">正在读取页面…</p><div class="picker-selection-line"><strong class="picker-count">已选 0 个区域</strong><button type="button" class="mini-button" data-picker-clear disabled>清空选择</button></div><div class="picker-selection" aria-label="已选网页区域"></div><iframe class="element-frame" title="可多选的网页区域" sandbox="allow-same-origin"></iframe>' + (monitor.type === 'product_stock' ? '<div class="picker-scope hidden" role="group" aria-label="监控范围" data-value="selected"><button type="button" class="mini-button" data-picker-scope="selected" aria-pressed="true">只监控所选区域</button><button type="button" class="mini-button" data-picker-scope="all_models" aria-pressed="false">同类全部型号</button></div><p class="picker-scope-help field-help"></p>' : '') + '<button type="button" class="button button-primary" data-picker-confirm disabled>使用所选区域</button>';
   const frame = body.querySelector('iframe'), status = body.querySelector('.picker-status'), confirm = body.querySelector('[data-picker-confirm]');
+  const count = body.querySelector('.picker-count'), list = body.querySelector('.picker-selection'), clear = body.querySelector('[data-picker-clear]');
+  const scope = body.querySelector('.picker-scope');
   body.querySelector('.picker-browser').checked = monitor.detection_method === 'browser' || monitor.fetch?.mode === 'browser';
-  let preview, selected = null;
+  let preview, revision = 0;
+  const selected = new Map();
+  const collectionForSelection = () => {
+    const matches = [...selected.keys()].map(index => preview?.collections?.find(item => item.index === index));
+    return matches.length && matches.every(item => item && item.group === matches[0]?.group) ? matches[0] : null;
+  };
+  const setScope = value => {
+    if (!scope) return;
+    scope.dataset.value = value;
+    scope.querySelectorAll('[data-picker-scope]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.pickerScope === value)));
+  };
+  const renderSelection = () => {
+    count.textContent = '已选 ' + selected.size + ' 个区域';
+    clear.disabled = !selected.size;
+    confirm.disabled = !selected.size;
+    list.innerHTML = [...selected].map(([index, node]) => '<button type="button" class="picker-selected-item" data-picker-remove="' + index + '" title="取消选择" aria-label="取消选择：' + escapeHtml((node.textContent || node.value || '').trim().slice(0, 80)) + '"><span>' + escapeHtml((node.textContent || node.value || '').trim().slice(0, 80)) + '</span><span aria-hidden="true">×</span></button>').join('');
+    const collection = collectionForSelection();
+    if (scope) {
+      scope.classList.toggle('hidden', !collection);
+      if (!collection) setScope('selected');
+      const all = collection && scope.dataset.value === 'all_models';
+      body.querySelector('.picker-scope-help').textContent = collection ? all ? '已识别 ' + collection.count + ' 个型号，监控同类全部型号。' : '仅监控点选的 ' + selected.size + ' 个区域。也可以直接选择同类全部 ' + collection.count + ' 个型号。' : '';
+      confirm.textContent = all ? '使用全部 ' + collection.count + ' 个型号' : selected.size ? '使用 ' + selected.size + ' 个区域' : '使用所选区域';
+    } else confirm.textContent = selected.size ? '使用 ' + selected.size + ' 个区域' : '使用所选区域';
+  };
+  const remove = index => {
+    selected.get(index)?.classList.remove('radar-selected');
+    selected.delete(index); setScope('selected'); renderSelection();
+  };
   const reload = async () => {
-    selected = null; confirm.disabled = true; status.textContent = '正在读取页面…';
-    body.querySelector('.picker-scope-label')?.classList.add('hidden');
-    const help = body.querySelector('.picker-scope-help'); if (help) help.textContent = '';
-    preview = await api('/api/element-preview', 'POST', { monitorId: monitor.id || undefined, url: monitor.url, rule: monitor, browser: body.querySelector('.picker-browser').checked });
+    const version = ++revision;
+    selected.clear(); preview = null; setScope('selected'); renderSelection();
+    frame.removeAttribute('srcdoc'); status.textContent = '正在读取页面…';
+    const loaded = await api('/api/element-preview', 'POST', { monitorId: monitor.id || undefined, url: monitor.url, rule: monitor, browser: body.querySelector('.picker-browser').checked });
+    if (!dialog.isConnected || revision !== version) return;
+    preview = loaded;
     if (monitor.label === '网页区域监控' && preview.title) monitor.label = preview.title;
     frame.onload = () => {
       const doc = frame.contentDocument;
-      if (!doc) return;
+      if (!doc || revision !== version || !dialog.isConnected) return;
+      for (const index of (preview.selected_indices || []).slice(0, 20)) {
+        const node = doc.querySelector('[data-radar-element="' + index + '"]');
+        if (node) { selected.set(index, node); node.classList.add('radar-selected'); }
+      }
+      if (monitor.extraction_rule?.kind === 'stock_items' && collectionForSelection()) setScope('all_models');
+      renderSelection();
       doc.addEventListener('click', event => {
         event.preventDefault();
         const target = event.target.closest('[data-radar-element]');
         if (!target) return;
-        doc.querySelectorAll('.radar-selected').forEach(element => element.classList.remove('radar-selected'));
-        target.classList.add('radar-selected');
-        selected = Number(target.dataset.radarElement);
-        status.textContent = '已选择：' + (target.textContent || target.value || '').trim().slice(0, 180);
-        const collection = preview.collections?.find(item => item.index === selected);
-        const scope = body.querySelector('.picker-scope');
-        if (scope) {
-          scope.closest('label').classList.toggle('hidden', !collection);
-          const requireCollection = monitor.extraction_rule?.kind === 'stock_items';
-          scope.value = collection ? 'all_models' : 'single';
-          refreshChoices(body);
-          body.querySelector('.picker-scope-help').textContent = collection ? '已识别 ' + collection.count + ' 个型号。默认保留全部型号的监控范围；也可选择仅监控一个。' : requireCollection ? '当前是全部型号的监控任务。请选择某个型号的库存文字，以保留监控范围。' : '当前选择仅用于这个区域。';
-          confirm.disabled = requireCollection && !collection;
-        } else confirm.disabled = false;
+        const index = Number(target.dataset.radarElement);
+        if (selected.has(index)) { remove(index); return; }
+        const overlaps = [...selected].filter(([, node]) => node.contains(target) || target.contains(node));
+        if (selected.size - overlaps.length >= 20) { status.textContent = '最多选择 20 个区域，请先取消一个。'; return; }
+        for (const [oldIndex, node] of overlaps) { node.classList.remove('radar-selected'); selected.delete(oldIndex); }
+        selected.set(index, target); target.classList.add('radar-selected'); setScope('selected'); renderSelection();
+        status.textContent = '已选 ' + selected.size + ' 个区域 · 继续点击添加，再点一次取消。';
       });
     };
     frame.srcdoc = preview.html;
-    status.textContent = preview.count ? '页面已加载 · ' + (preview.fetch?.route === 'proxy' ? '任务代理出口' : '服务端出口') + ' · ' + (preview.language || '语言由来源决定') + ' · 当前标记 ' + preview.highlighted + ' 个区域。点击要关注的区域。' : '页面中没有可选区域，可以勾选动态页面渲染后重试。';
+    status.textContent = preview.count ? '页面已加载 · ' + (preview.fetch?.route === 'proxy' ? '任务代理出口' : '服务端出口') + ' · ' + (preview.language || '语言由来源决定') + ' · 当前标记 ' + preview.highlighted + ' 个区域。可连续点选多个区域。' : '页面中没有可选区域，可以勾选动态页面渲染后重试。';
   };
+  clear.onclick = () => { for (const node of selected.values()) node.classList.remove('radar-selected'); selected.clear(); setScope('selected'); renderSelection(); };
+  list.onclick = event => { const button = event.target.closest('[data-picker-remove]'); if (button) remove(Number(button.dataset.pickerRemove)); };
+  scope?.addEventListener('click', event => {
+    const button = event.target.closest('[data-picker-scope]');
+    if (!button) return;
+    const collection = collectionForSelection();
+    if (button.dataset.pickerScope === 'all_models' && collection) {
+      const indices = preview.collections.filter(item => item.group === collection.group).map(item => item.index);
+      if (indices.length <= 20) for (const index of indices) {
+        const node = frame.contentDocument.querySelector('[data-radar-element="' + index + '"]');
+        if (node) { selected.set(index, node); node.classList.add('radar-selected'); }
+      }
+    }
+    setScope(button.dataset.pickerScope); renderSelection();
+  });
   body.querySelector('[data-picker-load]').onclick = () => withButton(body.querySelector('[data-picker-load]'), reload);
   confirm.onclick = () => withButton(confirm, async () => {
-    const result = await api('/api/select-element', 'POST', { monitorId: monitor.id || undefined, previewId: preview.id, index: selected, scope: body.querySelector('.picker-scope')?.value || 'single', type: monitor.type || 'webpage_change', rule: monitor });
+    if (!selected.size || !preview) throw new Error('请先选择网页区域');
+    const result = await api('/api/select-element', 'POST', { monitorId: monitor.id || undefined, previewId: preview.id, indices: [...selected.keys()], scope: scope?.dataset.value || 'selected', type: monitor.type || 'webpage_change', rule: monitor });
+    if (!dialog.isConnected) return;
     onSelected({ ...monitor, ...result.monitor, id: monitor.id });
     dialog.close();
   });
-  try { await reload(); } catch (error) { status.textContent = error.message; }
+  try { await reload(); } catch (error) { if (dialog.isConnected) status.textContent = error.message; }
 }
+
 async function showRuleLogs(monitor) {
   const editor = document.querySelector('.monitor-route[data-id="' + CSS.escape(monitor.id) + '"]');
   const body = editor?.querySelector('.task-records');

@@ -168,3 +168,13 @@ select.choice-source { display: none !important; }
   .app-shell[data-view="monitors"] .nav-link { box-shadow: none; }
   .app-shell[data-view="monitors"] .nav-link.active { background: #f5f5f7; }
 }
+
+.picker-toolbar, .picker-selection-line, .picker-scope { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.picker-selection-line { justify-content: space-between; margin: 16px 0 8px; }
+.picker-selection { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.picker-selected-item { display: inline-flex; align-items: center; gap: 12px; max-width: 100%; padding: 8px 12px; border: 1px solid #d6d8df; border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.picker-selected-item span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.picker-scope { margin-top: 16px; }
+.picker-scope [aria-pressed="true"] { background: #f1efff; color: #5144b4; }
+.picker-scope.hidden { display: none; }
+.element-frame { max-width: 100%; }

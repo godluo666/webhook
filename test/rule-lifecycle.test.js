@@ -379,3 +379,52 @@ test('普通接口故障和价格变化采用固定模板，模型默认阈值�
   assert.equal(monitor.interval, 300);
   assert.deepEqual(monitor.condition, { operator: 'changed', initial: 'baseline' });
 });
+
+test('多选区域保存、重新打开和通知独立生效，非法选择与账户隔离受保护', async t => {
+  const f = await fixture(t);
+  const preview = await f.request('/api/element-preview', 'POST', { url: f.url + '/models' });
+  const indices = [preview.collections[1].index, preview.collections[3].index];
+  const draft = await f.request('/api/select-element', 'POST', { previewId: preview.id, indices, type: 'product_stock', scope: 'selected' });
+  assert.equal(draft.monitor.extraction_rule.kind, 'elements');
+  assert.equal(draft.monitor.last_test_result.snapshot.items.length, 2);
+  assert.deepEqual(draft.monitor.last_test_result.snapshot.items.map(item => item.name), ['TRI.Core', 'TRI.Elite']);
+  const saved = (await f.request('/api/monitors', 'POST', { ...draft.monitor, webhookIds: ['hook'] }, 201)).monitors[0];
+  const reopened = await f.request('/api/element-preview', 'POST', { monitorId: saved.id });
+  assert.equal(reopened.highlighted, 2);
+  assert.equal(reopened.selected_indices.length, 2);
+  f.setCounts([1,0,0,0,0]);
+  await f.request('/api/monitors/' + saved.id + '/check', 'POST');
+  assert.equal(f.messages.length, 0);
+  f.setCounts([1,1,0,0,0]);
+  await f.request('/api/monitors/' + saved.id + '/check', 'POST');
+  assert.match(f.messages[0].message, /TRI.Core.*无货 → 有货/);
+  f.setCounts([1,1,0,1,0]);
+  await f.request('/api/monitors/' + saved.id + '/check', 'POST');
+  assert.equal(f.messages.length, 2);
+  assert.match(f.messages[1].message, /TRI.Elite.*无货 → 有货/);
+  assert.doesNotMatch(f.messages[1].message, /TRI.Core/);
+  await f.request('/api/monitors/' + saved.id + '/check', 'POST');
+  assert.equal(f.messages.length, 2);
+  await f.request('/api/select-element', 'POST', { previewId: preview.id, indices: [], type: 'product_stock' }, 400);
+  await f.request('/api/select-element', 'POST', { previewId: preview.id, indices: [indices[0], indices[0]], type: 'product_stock' }, 400);
+  await f.request('/api/select-element', 'POST', { previewId: preview.id, indices: [1501], type: 'product_stock' }, 400);
+  await f.request('/api/auth/register', 'POST', { username: 'multi-other', password: 'multi-other-password-123' }, 201);
+  await f.request('/api/select-element', 'POST', { previewId: preview.id, indices, type: 'product_stock' }, 404);
+});
+
+test('多选网页内容和价格通过正式执行器并在通知中指出实际变化区域', async t => {
+  const f = await fixture(t);
+  const preview = await f.request('/api/element-preview', 'POST', { url: f.url + '/product' });
+  const { load } = await import('cheerio');
+  const $ = load(preview.html);
+  const indices = [Number($('.stock').attr('data-radar-element')), Number($('.price').attr('data-radar-element'))];
+  const draft = await f.request('/api/select-element', 'POST', { previewId: preview.id, indices, type: 'webpage_change' });
+  const saved = (await f.request('/api/monitors', 'POST', { ...draft.monitor, webhookIds: ['hook'] }, 201)).monitors[0];
+  f.setPrice(199);
+  await f.request('/api/monitors/' + saved.id + '/check', 'POST');
+  assert.equal(f.messages.length, 1);
+  assert.match(f.messages[0].message, /网页区域 2.*300.*199/);
+  assert.doesNotMatch(f.messages[0].message, /Sold Out/);
+  const logs = await f.request('/api/monitors/' + saved.id + '/logs');
+  assert.ok(logs.logs.some(log => log.raw?.regions?.length === 2 && log.raw.triggered_regions.length === 1));
+});
