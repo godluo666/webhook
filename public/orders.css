@@ -25,3 +25,7 @@ body:has(.app-shell[data-view="monitors"]) #toast { top:88px; bottom:auto; }
 @media(max-width:980px){.order-footer-actions{width:100%;}.order-footer-actions .button{min-width:0;flex:1 1 130px;}#order-status{max-width:none;padding:0;}body:has(.app-shell[data-view="monitors"]) #toast{top:132px;right:20px;}}
 
 #task-workspace .task-editor-footer { position:static; }
+
+.order-product-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:16px 0; }
+#order-product-window { min-width:0; margin:20px 0; overflow-wrap:anywhere; }
+#order-product-window .element-frame { width:100%; max-width:100%; }

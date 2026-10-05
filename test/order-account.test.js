@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createOrderAccountService,publicOrderAccount,savedOrderAccount,orderAccountFingerprint} from '../lib/order-account.js';
 const monitor={id:'monitor-a'},userFor=id=>({id,monitors:[monitor],orderAccounts:[]});
 function setup(timeoutMs=10000){let leased=0,closed=0,valid=false;const user=userFor('a');
-  const service=createOrderAccountService({persist:()=>{},timeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(_task,options)=>({close:async()=>closed++,remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}})});
+  const service=createOrderAccountService({persist:()=>{},timeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(_task,options)=>({close:async()=>closed++,productHtml:async()=>'<h1>Product A</h1>',remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}})});
   service.save(user,monitor,{loginUrl:'https://shop.example/login',username:'private-user',password:'private-password'});
   return {service,user,get leased(){return leased},get closed(){return closed},login(){valid=true;}};
 }
@@ -27,4 +27,13 @@ test('关闭、登录超时和打开新登录会话都释放原浏览器和代�
   await assert.rejects(f.service.action(f.user,monitor,{sessionId:first.sessionId}),error=>error.status===404);
   await new Promise(resolve=>setTimeout(resolve,100));assert.equal(f.closed,2);assert.equal(f.leased,0);assert.equal(f.service.busy(f.user,monitor),false);
   await assert.rejects(f.service.action(f.user,monitor,{sessionId:second.sessionId}),error=>error.status===404);
+});
+
+test('商品点选读取保存的私有会话，未完成登录或跨网站时拒绝，读取后释放资源',async()=>{
+ const f=setup();await assert.rejects(f.service.productPreview(f.user,monitor,{url:'https://shop.example/product'}),/请先/);
+ const opened=await f.service.start(f.user,monitor);assert.equal(f.service.busy(f.user,monitor.id),true);assert.equal(f.service.busy(f.user,monitor),true);
+ await assert.rejects(f.service.productPreview(f.user,monitor,{url:'https://shop.example/product'}),/结束当前登录/);f.login();await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});
+ const revision=f.user.orderAccounts[0].revision;const preview=await f.service.productPreview(f.user,monitor,{url:'https://shop.example/product'});
+ assert.equal(preview.html,'<h1>Product A</h1>');assert.equal(preview.url,'https://shop.example/product');assert.equal(f.leased,0);assert.equal(f.closed,2);assert.equal(f.service.busy(f.user,monitor.id),false);assert.equal(f.user.orderAccounts[0].revision,revision);
+ await assert.rejects(f.service.productPreview(f.user,monitor,{url:'https://other.example/product'}),/网站不符/);
 });

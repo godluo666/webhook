@@ -22,9 +22,9 @@ import { createRuleService } from './lib/rule-service.js';
 import { normalizeAiPlan } from './lib/ai-rule-compat.js';
 import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/rule-policy.js';
 import { createScheduler } from './lib/scheduler.js';
-import { createElementPreview, selectedElements } from './lib/element-picker.js';
+import { createElementPreview, selectedElements, selectedElement } from './lib/element-picker.js';
 import { createOrderService, validateOrderTask, publicOrderTask } from './lib/orders.js';
-import { createOrderAccountService, publicOrderAccount } from './lib/order-account.js';
+import { createOrderAccountService, publicOrderAccount, savedOrderAccount } from './lib/order-account.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -93,8 +93,9 @@ const orderService = createOrderService({
     catch { throw new Error('AI 未返回有效的下单代码，请重新生成'); }
   },
   notify: async (user, task) => {
-    const success = ['prepared','ordered','paid'].includes(task.status);
-    const detail = task.status === 'paid' ? '订单已提交并付款，请在网站核对账单。' : task.status === 'payment_failed' ? '订单已提交，付款未完成：' + task.error : task.status === 'ordered' ? '订单已提交，请在网站核对订单和支付情况。' : task.status === 'prepared' ? '已核对商品、数量和总价，停在提交前。' : task.status === 'uncertain' ? '订单或付款结果尚未确认，请核对网站订单记录；不会自动重试。' : task.error;
+    const success = ['prepared','ordered','paid','awaiting_payment'].includes(task.status);
+    let detail = task.status === 'awaiting_payment' ? task.result?.paymentPending?.message || '订单已提交，等待付款。' : task.status === 'paid' ? '订单已提交并付款，请在网站核对账单。' : task.status === 'payment_failed' ? '订单已提交，付款未完成：' + task.error : task.status === 'ordered' ? '订单已提交，请在网站核对订单和支付情况。' : task.status === 'prepared' ? '已核对商品、数量和总价，停在提交前。' : task.status === 'uncertain' ? '订单或付款结果尚未确认，请核对网站订单记录；不会自动重试。' : task.error;
+    if(task.result?.url)detail+='\n订单 / 付款页面：'+task.result.url;
     addEvent(user, success ? 'success' : 'error', '自动下单 · ' + task.label, detail);
     addLog(user, 'order', success ? 'success' : 'error', task.label + ' · ' + detail, task.url, 0);
     const monitor = user.monitors.find(m=>m.id===task.monitorId);
@@ -1025,6 +1026,19 @@ async function handler(request, response) {
         return sendJson(response, 200, { recoveryCode });
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
+      const productChoiceMatch=pathname.match(/^\/api\/monitors\/([^/]+)\/order-product\/(preview|select)$/);
+      if(productChoiceMatch&&request.method==='POST'){
+        const monitor=user.monitors.find(m=>m.id===productChoiceMatch[1]&&m.kind!=='reminder');if(!monitor)return sendJson(response,404,{error:'监控不存在'});
+        const body=await readJson(request);
+        if(productChoiceMatch[2]==='preview'){
+          const source=await orderAccountService.productPreview(user,monitor,body);
+          return sendJson(response,200,createElementPreview(user.id,source.url,source.html,'browser'));
+        }
+        const selected=selectedElement(user.id,body.previewId,body.index);
+        savedOrderAccount(user,{monitorId:monitor.id,url:selected.url});
+        if(selected.url!==urlOf(body.url,'商品地址'))throw new Error('商品地址已变化，请重新点选');
+        return sendJson(response,200,{selection:{url:selected.url,selector:selected.target.selector,text:selected.target.text}});
+      }
       const accountMatch=pathname.match(/^\/api\/monitors\/([^/]+)\/order-account(?:\/(start|action|finish|cancel|check|logout))?$/);
       if(accountMatch){
         const monitor=user.monitors.find(m=>m.id===accountMatch[1]&&m.kind!=='reminder');

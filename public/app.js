@@ -117,15 +117,15 @@ function toast(message, error = false) {
   toastTimer = setTimeout(() => element.classList.remove('visible'), 4500);
 }
 
-async function api(path, method = 'GET', body) {
+async function api(path, method = 'GET', body, options = {}) {
   const requestId = randomId(), epoch = workspaceEpoch;
   const assertCurrent = () => { if (epoch !== workspaceEpoch) throw staleOperation(); };
   let response;
   try {
-    response = await fetch(path, { method, headers: { 'x-radar-request-id': requestId, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    response = await fetch(path, { method, signal: options.signal, headers: { 'x-radar-request-id': requestId, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   } catch (cause) {
     assertCurrent();
-    const error = new Error('页面与 Radar 服务的连接中断，请检查服务或反向代理是否正常。请求 ' + requestId + ' · ' + method + ' ' + path);
+    const error = new Error((options.signal?.aborted ? '操作超时，请查看账户状态后再继续。请求 ' : '页面与 Radar 服务的连接中断，请检查服务或反向代理是否正常。请求 ') + requestId + ' · ' + method + ' ' + path);
     error.code = 'RADAR_CONNECTION_FAILED'; error.requestId = requestId; error.cause = cause;
     throw error;
   }

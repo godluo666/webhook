@@ -25,7 +25,7 @@ test('下单配置拒绝无限预算、无效数量、带凭据的 URL；付款�
   assert.equal(task.enabled,false);assert.equal(JSON.stringify(publicOrderTask(task)).includes('private-site-secret'),false);
   assert.deepEqual(validateOrderTask({...input,url:'https://another-shop.example/a'},task).credentials,{});
 });
-function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false}={}){
+function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false}={}){
   const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0;
   const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
     openBrowser:async(current,options)=>{const session={trace:[],receipt:null,snapshot:async()=>({text:'Product A USD 10',elements:[{id:'actual-random-selector'}]}),close:async()=>{},methods:{goto:async()=>true,submit:async()=>{
@@ -35,6 +35,7 @@ function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paym
       if(fake&&!pay)return {status:'ordered'};
       session.receipt={status:'ordered',review:{product:current.product,quantity:1,total:10,currency:'USD'},confirmation:'Order #42'};return session.receipt;
     },pay:async()=>{
+      if(insufficientBalance){session.receipt={...session.receipt,status:'awaiting_payment',invoiceId:'42',url:'https://shop.example/invoice?id=42',paymentPending:{reason:'insufficient_balance',message:'余额不足，已保留待付款订单',balance:0,total:10,currency:'USD'}};return session.receipt;}
       if(paymentFailure)throw new Error('invoice price changed');
       assert.ok(task.submissionStartedAt, 'Submission ledger must be durable before payment');
       await options.onBeforePayment({invoiceId:'42',total:10,currency:'USD'});
@@ -99,4 +100,20 @@ test('下单前页面变化由 AI 修复并试跑，提交后的结构错误不�
     await service.generate(user,task);service.approve(user,task,orderProgramHash(task));await service.trigger(user,user.monitors[0]);await service.trigger(user,user.monitors[0]);
     assert.equal(commits,1);assert.equal(generated,afterSubmit?1:2);assert.equal(task.repairs.length,afterSubmit?0:1);assert.equal(task.status,afterSubmit?'uncertain':'ordered');
   }
+});
+
+test('商品名称与币种可留空，点选与试跑识别结果参与执行授权',()=>{
+ const task=validateOrderTask({...input,product:'',currency:'',label:'',productSelection:{url:input.url,selector:'#product-name',text:'Product A'}});
+ assert.equal(task.product,'');assert.equal(task.currency,'');assert.equal(task.label,'自动下单');
+ assert.throws(()=>validateOrderTask({...input,productSelection:{url:'https://shop.example/other',selector:'#a',text:'a'}}),/页面已变化/);
+ assert.throws(()=>validateOrderTask({...input,currency:'$'}),/币种/);
+ const original=orderProgramHash(task);task.verifiedProduct='Product A';task.verifiedCurrency='USD';assert.notEqual(orderProgramHash(task),original);
+ assert.throws(()=>parseOrderTotal('USD -5.00'),/无效/);
+});
+test('余额不足保留待付款账单，停止付款且不会重复下单或扣款',async()=>{
+ const f=fixture({pay:true,insufficientBalance:true});await f.service.generate(f.user,f.task);f.service.approve(f.user,f.task,orderProgramHash(f.task));
+ await f.service.execute(f.user,f.task);assert.equal(f.task.status,'awaiting_payment');assert.equal(f.task.result.invoiceId,'42');assert.equal(f.task.result.paymentPending.reason,'insufficient_balance');
+ assert.equal(f.commits,1);assert.equal(f.payments,0);assert.equal(f.task.paymentStartedAt,undefined);
+ await f.service.trigger(f.user,f.user.monitors[0]);await assert.rejects(f.service.execute(f.user,f.task),/已经执行/);assert.equal(f.commits,1);assert.equal(f.payments,0);
+ f.service.recover([f.user]);assert.equal(f.task.status,'awaiting_payment');assert.equal(f.task.enabled,false);
 });
