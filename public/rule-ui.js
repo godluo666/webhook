@@ -19,12 +19,12 @@ function unifiedSummary(monitor) {
 function ruleValidationSummary(monitor) {
   const tests = monitor.last_test_result?.behavior_tests;
   if (!tests?.length) return '';
-  return '<details class="rule-validation"><summary>查看提醒条件的 ' + tests.length + ' 项场景验证</summary><ul>' + tests.map(test => '<li>' + (test.passed ? '已通过：' : '未通过：') + escapeHtml(test.name) + '</li>').join('') + '</ul><p class="field-help">这些条件测试使用模拟状态，不代表商品实际补货。上方当前库存和原文来自实际抓取。</p></details>';
+  return '<section class="rule-validation"><h4>提醒条件 · ' + tests.length + ' 项场景验证</h4><ul>' + tests.map(test => '<li>' + (test.passed ? '已通过：' : '未通过：') + escapeHtml(test.name) + '</li>').join('') + '</ul><p class="field-help">这些条件测试使用模拟状态，不代表商品实际补货。上方当前库存和原文来自实际抓取。</p></section>';
 }
-function stockModelSummary(monitor, open = false) {
+function stockModelSummary(monitor) {
   const items = monitor.snapshot?.items || monitor.last_test_result?.snapshot?.items;
   if (!items?.length) return '';
-  return '<details class="stock-models" ' + (open ? 'open' : '') + '><summary>查看 ' + items.length + ' 个型号的库存</summary><ul>' + items.map(item => '<li><span>' + escapeHtml(item.name) + '</span><strong class="' + (item.state === 'in_stock' ? 'available' : '') + '">' + escapeHtml(ruleValue(item.state)) + '</strong><small>' + escapeHtml(item.raw_value) + '</small></li>').join('') + '</ul></details>';
+  return '<section class="stock-models"><h4>' + items.length + ' 个型号的库存</h4><ul>' + items.map(item => '<li><span>' + escapeHtml(item.name) + '</span><strong class="' + (item.state === 'in_stock' ? 'available' : '') + '">' + escapeHtml(ruleValue(item.state)) + '</strong><small>' + escapeHtml(item.raw_value) + '</small></li>').join('') + '</ul></section>';
 }
 function unifiedConditionFields(monitor) {
   const c = monitor.condition || {};
@@ -50,12 +50,6 @@ function unifiedConditionFields(monitor) {
   }
   if (!['changed', 'transition'].includes(c.operator)) fields += select('第一次检查', 'condition.initial', c.initial, [['baseline', '先记录，之后满足条件再提醒'], ['notify', '已经满足也提醒我']]);
   return fields;
-}
-function unifiedRuleEditor(monitor) {
-  const editable = { type: monitor.type, detection_method: monitor.detection_method, target_element: monitor.target_element, extraction_rule: monitor.extraction_rule, condition: monitor.condition };
-  return '<div class="unified-rule-editor editor-wide">' + unifiedSummary(monitor) + ruleValidationSummary(monitor) + stockModelSummary(monitor) + '<div class="unified-basic-fields rule-fields">' + unifiedConditionFields(monitor) + '</div>'
-    + '<div class="element-actions"><button type="button" class="button button-outline" data-rule-analyze>重新分析目标</button><button type="button" class="button button-outline" data-rule-pick>选择网页元素</button></div><p class="field-help">选择价格、库存或购买按钮。更换监控目标后，请重新分析或选择区域；保存前自动验证。</p>'
-    + '<details class="advanced-plan"><summary>高级设置 · 网页区域与数据字段</summary><p class="field-help">selector、XPath、API 字段和 JSON 路径保存在统一配置中。通常无需修改。</p><textarea class="unified-json" rows="10" spellcheck="false">' + escapeHtml(JSON.stringify(editable, null, 2)) + '</textarea><p class="unified-error" role="status"></p></details></div>';
 }
 function readUnifiedRule(root) {
   const editor = root.querySelector('.unified-rule-editor') || root.closest('.unified-rule-editor');
@@ -92,15 +86,19 @@ document.addEventListener('input', event => {
   } catch (failure) { error.textContent = '配置尚未完整：' + failure.message; }
 });
 function ruleDialog(title) {
-  const dialog = document.createElement('dialog');
-  dialog.className = 'rule-dialog';
-  dialog.setAttribute('aria-label', title);
-  dialog.innerHTML = '<header><h2>' + escapeHtml(title) + '</h2><button type="button" class="mini-button" data-rule-close>关闭</button></header><div class="rule-dialog-body"></div>';
-  dialog.addEventListener('click', event => { if (event.target.closest('[data-rule-close]')) dialog.close(); });
-  dialog.addEventListener('close', () => dialog.remove());
-  document.body.append(dialog);
-  dialog.showModal();
-  return dialog;
+  const view = document.querySelector('.app-shell').dataset.view;
+  const host = document.querySelector(view === 'monitors' ? '#task-inspection' : view === 'activity' ? '#activity-inspection' : '#create-inspection');
+  const returnFocus = document.activeElement;
+  host.replaceChildren(); host.classList.remove('hidden');
+  const section = document.createElement('section');
+  section.className = 'rule-dialog';
+  section.setAttribute('aria-label', title);
+  section.innerHTML = '<header><h3>' + escapeHtml(title) + '</h3><button type="button" class="mini-button" data-rule-close>完成</button></header><div class="rule-dialog-body"></div>';
+  section.close = () => { section.remove(); if (!host.children.length) host.classList.add('hidden'); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); };
+  section.addEventListener('click', event => { if (event.target.closest('[data-rule-close]')) section.close(); });
+  host.append(section);
+  section.scrollIntoView({ block: 'start', behavior: 'instant' });
+  return section;
 }
 async function openElementPicker(monitor, onSelected) {
   const dialog = ruleDialog('选择网页元素');
@@ -132,6 +130,7 @@ async function openElementPicker(monitor, onSelected) {
           scope.closest('label').classList.toggle('hidden', !collection);
           const requireCollection = monitor.extraction_rule?.kind === 'stock_items';
           scope.value = collection ? 'all_models' : 'single';
+          refreshChoices(body);
           body.querySelector('.picker-scope-help').textContent = collection ? '已识别 ' + collection.count + ' 个型号。默认保留全部型号的监控范围；也可选择仅监控一个。' : requireCollection ? '当前是全部型号的监控任务。请选择某个型号的库存文字，以保留监控范围。' : '当前选择仅用于这个区域。';
           confirm.disabled = requireCollection && !collection;
         } else confirm.disabled = false;
@@ -149,10 +148,12 @@ async function openElementPicker(monitor, onSelected) {
   try { await reload(); } catch (error) { status.textContent = error.message; }
 }
 async function showRuleLogs(monitor) {
-  const dialog = ruleDialog('检测记录 · ' + monitor.label), body = dialog.querySelector('.rule-dialog-body');
-  body.textContent = '正在读取检测记录…';
+  const editor = document.querySelector('.monitor-route[data-id="' + CSS.escape(monitor.id) + '"]');
+  const body = editor?.querySelector('.task-records');
+  if (!body) return;
   const data = await api('/api/monitors/' + encodeURIComponent(monitor.id) + '/logs');
-  body.innerHTML = data.logs.length ? data.logs.map(log => '<article class="check-record"><strong>' + escapeHtml(new Date(log.at).toLocaleString('zh-CN')) + ' · ' + (log.status === 'error' ? '失败' : '成功') + '</strong><p>' + escapeHtml(log.detail) + '</p>' + (log.raw?.current_value != null ? '<p>当前值：' + escapeHtml(ruleValue(log.raw.current_value)) + '</p>' : '') + (log.raw?.previous_value != null ? '<p>之前：' + escapeHtml(ruleValue(log.raw.previous_value)) + '</p>' : '') + (log.raw?.reason ? '<p>' + escapeHtml(log.raw.reason) + '</p>' : '') + '</article>').join('') : '<p>暂无检测记录。</p>';
+  if (!body.isConnected) return;
+  body.innerHTML = data.logs.length ? data.logs.slice(0, 10).map(log => '<article class="check-record"><strong>' + escapeHtml(new Date(log.at).toLocaleString('zh-CN')) + ' · ' + (log.status === 'error' ? '失败' : '成功') + '</strong><p>' + escapeHtml(log.detail) + '</p>' + (log.raw?.current_value != null ? '<p>当前值：' + escapeHtml(ruleValue(log.raw.current_value)) + '</p>' : '') + (log.raw?.previous_value != null ? '<p>之前：' + escapeHtml(ruleValue(log.raw.previous_value)) + '</p>' : '') + (log.raw?.reason ? '<p>' + escapeHtml(log.raw.reason) + '</p>' : '') + '</article>').join('') : '<p class="field-help">暂无检测记录。</p>';
 }
 async function showRuleRepair(monitor) {
   const dialog = ruleDialog('修复规则 · ' + monitor.label), body = dialog.querySelector('.rule-dialog-body');
@@ -175,6 +176,7 @@ document.addEventListener('click', event => {
     const input = label.querySelector('input'), unit = label.querySelector('.interval-unit');
     unit.value = seconds < 60 ? 'seconds' : 'minutes';
     input.value = seconds < 60 ? seconds : seconds / 60;
+    refreshChoices(preset.closest('label'));
     input.dispatchEvent(new Event('input', { bubbles: true }));
     unit.dispatchEvent(new Event('change', { bubbles: true }));
   }
@@ -221,13 +223,20 @@ document.addEventListener('click', event => {
   const edited = task ? readSavedRule(task, original) : null;
   const current = task ? { ...original, ...edited.rule, webhookIds: edited.webhookIds } : collectPreviewRule();
   const apply = rule => {
-    editor.outerHTML = unifiedRuleEditor(rule);
+    const updated = { ...current, ...rule };
+    const editable = { type: updated.type, detection_method: updated.detection_method, target_element: updated.target_element, extraction_rule: updated.extraction_rule, condition: updated.condition };
+    editor.querySelector('.unified-json').value = JSON.stringify(editable, null, 2);
+    editor.querySelector('.unified-basic-fields').innerHTML = unifiedConditionFields(updated);
+    const evidence = [...editor.querySelectorAll('[data-rule-section="evidence"] .rule-section-content')][0];
+    if (evidence) evidence.innerHTML = unifiedSummary(updated) + ruleValidationSummary(updated) + stockModelSummary(updated);
+    refreshChoices(editor);
+
+    const notification = task?.querySelector('.notification-editor');
+    if (notification) queueNotificationRefresh(notification);
     if (!task) {
       previewMonitor = { ...current, ...rule };
       renderPreview(previewMonitor);
-      $('#preview .rule-editor').open = true;
-      const conditionsTab = $('#preview [data-editor-tab="1"]');
-      if (conditionsTab) selectRuleTab(conditionsTab);
+      $('#preview .rule-editor').scrollIntoView({ block: 'start', behavior: 'instant' });
       renderRevisionDiff();
     }
     toast('检测区域已验证，保存后生效');

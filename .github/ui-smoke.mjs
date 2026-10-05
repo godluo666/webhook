@@ -5,6 +5,8 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright-core';
 
+const choose = async (field, value) => field.locator('..').locator('.choice-control [data-choice-value="' + value + '"]').click();
+
 const root = process.cwd();
 const dataRoot = path.resolve(process.env.DATA_DIR || path.join(root, 'release', 'ui-smoke-data'));
 await fs.mkdir(dataRoot, { recursive: true });
@@ -200,7 +202,7 @@ try {
   await page.locator('#webhook-drawer').waitFor({ state: 'visible' });
   await page.locator('#drawer-fields .hook-name').fill('常用通知渠道');
   await page.locator('#drawer-fields .hook-url').fill(mockBase + '/hook?token=' + 'x'.repeat(180));
-  await page.locator('#drawer-fields .hook-format').selectOption('generic');
+  await choose(page.locator('#drawer-fields .hook-format'), 'generic');
   await page.locator('#drawer-save').click();
   await waitForSignal(channelHold.entered, 'Channel save');
   for (const selector of ['#drawer-save', '#drawer-test', '#drawer-fields .hook-name', '#drawer-fields .hook-url']) {
@@ -243,12 +245,11 @@ try {
   assert.equal(current.settings.aiBaseUrl, mockBase + '/v1');
 
   await navigate('activity');
-  if (!await page.locator('#activity .log-panel').evaluate(node => node.open)) await page.locator('#activity .log-panel > summary').click();
-  const rawLog = page.locator('.raw-log').first();
-  await rawLog.locator('summary').click();
-  await rawLog.locator('[data-copy-log]').click();
+  await page.locator('[data-view-log]').first().click();
+  await page.locator('.rule-dialog [data-copy-log]').click();
   await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('已复制'));
   assert.ok(await page.evaluate(() => window.__copyFallbackCalls > 0), 'HTTP deployments must use the clipboard fallback');
+  await page.locator('[data-rule-close]').click();
 
   console.log('UI smoke: editing drafts, independent proxy controls and 30 second intervals');
   const hookId = current.settings.webhooks[0].id;
@@ -264,15 +265,17 @@ try {
   await page.reload();
   await navigate('monitors');
   const articleA = page.locator('.monitor-item').filter({ has: page.locator('.monitor-name').filter({ hasText: '任务 A' }) });
-  await articleA.locator('.monitor-route > summary').click();
-  await articleA.locator('.edit-label').fill('还没有保存的任务 A 草稿');
-  const taskBPath = base + '/api/monitors/' + encodeURIComponent(taskB.id) + '/check';
-  const checkFinished = page.waitForResponse(response => response.url() === taskBPath);
-  await page.locator('[data-action="check"][data-id="' + taskB.id + '"]').click();
-  await (await checkFinished).finished();
-  await page.waitForFunction(id => !document.querySelector('[data-action="check"][data-id="' + id + '"]').disabled, taskB.id);
-  assert.equal(await articleA.locator('.edit-label').inputValue(), '还没有保存的任务 A 草稿', 'Checking task B must preserve task A editing draft');
-  assert.equal(await articleA.locator('.monitor-route').evaluate(node => node.open), true);
+  const listBounds = await page.locator('#monitor-list').boundingBox();
+  await articleA.locator('[data-action="edit"]').click();
+  const editorA = page.locator('#task-workspace');
+  await editorA.locator('.edit-label').fill('还没有保存的任务 A 草稿');
+  const checkedTask = await context.request.post(base + '/api/monitors/' + encodeURIComponent(taskB.id) + '/check');
+  assert.ok(checkedTask.ok());
+  await page.evaluate(async () => { appState = await api('/api/state'); render(); });
+  assert.equal(await editorA.locator('.edit-label').inputValue(), '还没有保存的任务 A 草稿', 'Background checks must preserve task A editing draft');
+  assert.equal(await editorA.isVisible(), true);
+  assert.equal(await page.locator('#task-list-view').isVisible(), false);
+  assert.equal(await page.locator('#task-workspace [role=tab], #task-workspace details, #task-workspace dialog').count(), 0, 'All rule sections remain on a single page');
   assert.equal((await state()).monitors.find(monitor => monitor.id === taskA.id).label, '任务 A', 'Preserved editing drafts must remain unsaved');
 
   // The proxy API has its own real-network regression tests. This UI check
@@ -285,14 +288,13 @@ try {
       body: JSON.stringify({ ok: true, purpose: 'connectivity', ip: '203.0.113.12', durationMs: 17 })
     });
   });
-  await articleA.locator('[data-editor-tab="3"]').click();
-  await articleA.locator('.source-fetch-proxy').selectOption('custom');
-  const proxyInput = articleA.locator('.source-proxy-input');
+  await choose(editorA.locator('.source-fetch-proxy'), 'custom');
+  const proxyInput = editorA.locator('.source-proxy-input');
   assert.equal(await proxyInput.isVisible(), true);
   assert.equal(await proxyInput.getAttribute('type'), 'password', 'Independent proxy credentials must remain masked');
   const candidate = 'http://smoke-user:smoke-password@127.0.0.1:9';
   await proxyInput.fill(candidate);
-  await articleA.locator('[data-source-proxy-test]').click();
+  await editorA.locator('[data-source-proxy-test]').click();
   await page.waitForFunction(id => {
     const editor = document.querySelector('.monitor-route[data-id="' + id + '"]');
     return editor.querySelector('.rule-proxy-result').textContent.includes('203.0.113.12');
@@ -302,38 +304,85 @@ try {
   assert.equal(proxyCandidates[0].monitorId, undefined, 'A new candidate must not accidentally test an old saved proxy');
   assert.equal((await state()).monitors.find(monitor => monitor.id === taskA.id).fetch.proxy, 'direct', 'Testing a proxy must not save it');
   if (screenshotDir) { await proxyInput.scrollIntoViewIfNeeded(); await page.screenshot({ path: path.join(screenshotDir, 'proxy-desktop.png'), fullPage: true }); }
-  await articleA.locator('.source-fetch-proxy').selectOption('direct');
+  await choose(editorA.locator('.source-fetch-proxy'), 'direct');
   assert.equal(await proxyInput.isVisible(), false);
 
-  await articleA.locator('[data-editor-tab="0"]').click();
-  await articleA.locator('.edit-label').fill('任务 A');
-  await articleA.locator('.edit-interval').fill('30');
-  await articleA.locator('.interval-unit').selectOption('seconds');
+  await editorA.locator('.edit-label').fill('任务 A');
+  await editorA.locator('.edit-interval').fill('30');
+  await choose(editorA.locator('.interval-unit'), 'seconds');
   const beforeInterval = (await state()).monitors.find(monitor => monitor.id === taskA.id);
   const intervalSaved = page.waitForResponse(response =>
     response.url() === base + '/api/monitors/' + encodeURIComponent(taskA.id)
     && response.request().method() === 'PATCH');
-  await articleA.locator('[data-action="save-rule"]').click();
+  await editorA.locator('[data-action="save-rule"]').click();
   await (await intervalSaved).finished();
-  await page.waitForFunction(id => !document.querySelector('[data-action="save-rule"][data-id="' + id + '"]').disabled, taskA.id);
+  await editorA.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => !document.querySelector('#task-save').disabled);
   const savedInterval = (await state()).monitors.find(monitor => monitor.id === taskA.id);
   assert.equal(savedInterval.intervalMinutes, 0.5, 'A 30 second interval must be saved without being clamped to whole minutes');
   assert.equal(savedInterval.baselined, beforeInterval.baselined);
   assert.deepEqual(savedInterval.snapshot, beforeInterval.snapshot, 'Changing an interval must retain the monitoring baseline');
-  if (!await articleA.locator('.monitor-route').evaluate(node => node.open)) await articleA.locator('.monitor-route > summary').click();
-  assert.equal(await articleA.locator('.edit-interval').inputValue(), '30');
-  assert.equal(await articleA.locator('.interval-unit').inputValue(), 'seconds', 'Reopened editing must retain the saved unit');
+  await articleA.locator('[data-action="edit"]').click();
+  assert.equal(await editorA.locator('.edit-interval').inputValue(), '30');
+  assert.equal(await editorA.locator('.interval-unit').inputValue(), 'seconds', 'Reopened editing must retain the saved unit');
+  await page.locator('#task-close').click();
+  assert.deepEqual(await page.locator('#monitor-list').boundingBox(), listBounds, 'Returning from editing must preserve list geometry');
 
+  console.log('UI smoke: reminder and generated rule editing on one page');
+  const reminder = (await post('/api/monitors', {
+    kind: 'reminder', label: '会议提醒', message: '带上会议材料',
+    remindAt: new Date(Date.now() + 86400000).toISOString(), webhookIds: [hookId],
+    notification: { title: '{{name}}', body: '{{message}}' }
+  })).monitors[0];
+  const service = (await post('/api/monitors', {
+    kind: 'generated', label: '接口响应', url: mockBase + '/source-service', intervalMinutes: 5,
+    plan: { sourceType: 'service', mode: 'unavailable', initial: 'baseline', failureThreshold: 3 },
+    webhookIds: [hookId], notification: { title: '{{name}}', body: '{{summary}}' }
+  })).monitors[0];
+  await page.reload();
+  await page.locator('[data-action="edit"][data-id="' + reminder.id + '"]').click();
+  assert.equal(await editorA.locator('[data-rule-section="source"]').count(), 0);
+  await choose(editorA.locator('.edit-repeat-mode'), 'interval');
+  await choose(editorA.locator('.edit-repeat-unit'), '1440');
+  await editorA.locator('.edit-repeat-value').fill('2');
+  await editorA.locator('.edit-message').fill('更新后的会议材料提醒');
+  await editorA.locator('.notification-body').fill('{{message}} · 会议安排');
+  await page.locator('#task-save').click();
+  await editorA.waitFor({ state: 'hidden' });
+  const savedReminder = (await state()).monitors.find(m => m.id === reminder.id);
+  assert.equal(savedReminder.repeatMinutes, 2880);
+  assert.equal(savedReminder.message, '更新后的会议材料提醒');
+  assert.equal(savedReminder.notification.body, '{{message}} · 会议安排');
+  await page.locator('[data-action="edit"][data-id="' + service.id + '"]').click();
+  await choose(editorA.locator('[data-plan-key="mode"]'), 'slow');
+  await editorA.locator('[data-plan-key="thresholdMs"]').fill('5.5');
+  await choose(editorA.locator('[data-plan-key="initial"]'), 'notify');
+  await page.locator('#task-save').click();
+  await editorA.waitFor({ state: 'hidden' });
+  const savedService = (await state()).monitors.find(m => m.id === service.id);
+  assert.equal(savedService.plan.mode, 'slow');
+  assert.equal(savedService.plan.thresholdMs, 5500);
+  assert.equal(savedService.plan.initial, 'notify');
+  await navigate('create');
+  await page.evaluate(rule => { previewMonitor = rule; renderPreview(rule); }, { ...savedReminder, id: undefined, label: '新的会议提醒' });
+  await page.locator('#rule-message').fill('新的提醒正文');
+  await choose(page.locator('.rule-repeat-mode'), 'once');
+  await page.locator('#create-button').click();
+  await page.waitForFunction(() => document.querySelector('.app-shell').dataset.view === 'monitors');
+  const newReminder = (await state()).monitors.find(m => m.label === '新的会议提醒');
+  assert.equal(newReminder.message, '新的提醒正文');
+  assert.equal(newReminder.repeatMinutes, 0);
 
   console.log('UI smoke: desktop headings and mobile layouts');
   const headings = {
     top: '#overview h1', channels: '#settings-page-title', 'ai-settings': '#settings-page-title',
-    create: '#create-heading', monitors: '#monitors h2', notifications: '#notifications h2',
+    create: '#create-heading', monitors: '#task-list-view h2', notifications: '#notifications h2',
     'fetch-settings': '#fetch-settings h2', activity: '#activity h2'
   };
   for (const [view, selector] of Object.entries(headings)) {
     await navigate(view);
     assert.equal(await page.locator(selector).isVisible(), true, 'Desktop page title must be visible for ' + view);
+    assert.equal(await page.locator('details, select:visible').count(), 0, 'No dropdown controls on ' + view);
   }
   const mobile = await context.newPage();
   await mobile.setViewportSize({ width: 390, height: 844 });
@@ -342,12 +391,13 @@ try {
     await mobile.goto(base + '/#monitors');
     await mobile.waitForFunction(() => !document.querySelector('.app-shell').classList.contains('auth-hidden'));
     const mobileArticle = mobile.locator('.monitor-item').filter({ has: mobile.locator('.monitor-name').filter({ hasText: '任务 A' }) });
-    await mobileArticle.locator('.monitor-route > summary').click();
-    await mobileArticle.locator('[data-editor-tab="3"]').click();
-    await mobileArticle.locator('.source-fetch-proxy').selectOption('custom');
-    await mobileArticle.locator('.source-proxy-input').fill(candidate);
-    await mobileArticle.locator('.source-proxy-input').scrollIntoViewIfNeeded();
+    await mobileArticle.locator('[data-action="edit"]').click();
+    const mobileEditor = mobile.locator('#task-workspace');
+    await choose(mobileEditor.locator('.source-fetch-proxy'), 'custom');
+    await mobileEditor.locator('.source-proxy-input').fill(candidate);
+    await mobileEditor.locator('.source-proxy-input').scrollIntoViewIfNeeded();
     await mobile.screenshot({ path: path.join(screenshotDir, 'proxy-mobile.png'), fullPage: true });
+    await mobile.locator('#task-close').click();
   }
   for (const view of ['channels', 'ai-settings', 'monitors', 'notifications', 'create', 'fetch-settings', 'activity']) {
     await mobile.goto(base + '/#' + view);
@@ -371,8 +421,7 @@ try {
   await page.locator('#ai-test-button').click();
   await waitForSignal(lateAi.entered, 'Delayed AI provider request');
   await navigate('account');
-  const recoveryDetail = page.locator('.account-detail').filter({ has: page.locator('#rotate-code-form') });
-  if (!await recoveryDetail.evaluate(node => node.open)) await recoveryDetail.locator('summary').click();
+  await page.locator('#account [data-feature-tab][aria-controls="account-panel-2"]').click();
   const lateRecovery = { entered: deferred(), release: deferred() };
   nextRecoveryHold = lateRecovery;
   releaseRecovery = lateRecovery.release;

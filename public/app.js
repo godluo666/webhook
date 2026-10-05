@@ -193,7 +193,7 @@ function intervalFields(monitor, scope) {
   const value = unit === 'seconds' ? Number((minutes * 60).toFixed(4)) : unit === 'hours' ? minutes / 60 : minutes;
   const attr = scope === 'edit' ? 'class="edit-interval"' : 'id="rule-interval"';
   return '<label>多久检查一次<div class="interval-control"><input ' + attr + ' type="number" min="0" step="any" value="' + value + '" aria-label="检查间隔"><select class="interval-unit" aria-label="检查间隔单位">'
-    + [['seconds', '秒'], ['minutes', '分钟'], ['hours', '小时']].map(([key, name]) => '<option value="' + key + '" ' + (key === unit ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></div><span class="interval-presets">' + [10, 30, 60, 300, 600].map(seconds => '<button type="button" class="mini-button" data-interval-preset="' + seconds + '">' + (seconds < 60 ? seconds + '秒' : seconds / 60 + '分钟') + '</button>').join('') + '</span><span class="field-help">快捷值仅供选择，可自定义 1 秒起的周期；只改周期会保留检测条件与历史。</span></label>';
+    + [['seconds', '秒'], ['minutes', '分钟'], ['hours', '小时']].map(([key, name]) => '<option value="' + key + '" ' + (key === unit ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></div><span class="field-help">支持 1 秒起的周期，修改后保留检测记录。</span></label>';
 }
 function readInterval(root, selector) {
   const value = Number(root.querySelector(selector).value);
@@ -207,11 +207,11 @@ function sourceFetchFields(monitor) {
   const mode = monitor.fetch?.mode || 'auto', proxy = monitor.fetch?.proxy || 'default';
   const service = monitor.kind === 'unified' && monitor.extraction_rule?.kind === 'service' || monitor.kind === 'generated' && monitor.plan?.sourceType === 'service';
   const method = service ? '<input type="hidden" class="source-fetch-mode" value="http"><p class="field-help editor-wide">通过下方选择的出口检测服务状态。</p>' : '<label>读取方式<select class="source-fetch-mode">'
-    + [['auto', '自动 · 遇到验证时尝试浏览器'], ['browser', '浏览器 · 等待页面加载'], ['http', '直接请求 · 适合公开接口']].map(([value, name]) => '<option value="' + value + '" ' + (mode === value ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></label>';
-  return method + '<label>网络出口<select class="source-fetch-proxy"><option value="default" ' + (proxy === 'default' ? 'selected' : '') + '>账户设置' + (appState.settings.hasSourceProxy ? ' · 使用代理' : ' · 服务器出口') + '</option><option value="direct" ' + (proxy === 'direct' ? 'selected' : '') + '>直接连接 · 跳过代理</option><option value="custom" ' + (proxy === 'custom' ? 'selected' : '') + '>独立代理 · 仅此任务</option></select></label>'
+    + [['auto', '自动'], ['browser', '浏览器'], ['http', '直接请求']].map(([value, name]) => '<option value="' + value + '" ' + (mode === value ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></label>';
+  return method + '<label>网络出口<select class="source-fetch-proxy"><option value="default" ' + (proxy === 'default' ? 'selected' : '') + '>账户设置' + (appState.settings.hasSourceProxy ? ' · 使用代理' : ' · 服务器出口') + '</option><option value="direct" ' + (proxy === 'direct' ? 'selected' : '') + '>直接连接</option><option value="custom" ' + (proxy === 'custom' ? 'selected' : '') + '>独立代理</option></select></label>'
     + '<div class="source-custom-proxy editor-wide ' + (proxy === 'custom' ? '' : 'hidden') + '"><label>此任务的代理地址<input class="source-proxy-input" type="password" autocomplete="new-password" spellcheck="false" value="' + escapeHtml(monitor.sourceProxy || '') + '" placeholder="' + (monitor.hasSourceProxy ? '已保存独立代理；留空保持当前地址' : 'http://user:pass@host:port 或 ss://…') + '"></label>'
     + '<div class="rule-proxy-actions"><button type="button" class="button button-outline" data-source-proxy-test>测试独立代理</button><span class="rule-proxy-result" role="status">' + escapeHtml(monitor.sourceProxyEndpoint ? monitor.sourceProxyEndpoint + (monitor.sourceProxyTest?.ip ? ' · ' + sourceConnectionSummary(monitor.sourceProxyTest) : '') + (monitor.sourceProxyTest?.testedAt ? ' · 验证于 ' + new Date(monitor.sourceProxyTest.testedAt).toLocaleString('zh-CN') : '') : '保存前会验证代理连通性；验证失败保留原设置。') + '</span></div></div>'
-    + '<p class="field-help editor-wide">每条监控可以使用不同代理。此处选择优先于账户默认出口，AI 修改和修复会保留此设置。</p>';
+    + '<p class="field-help editor-wide">自动读取会在需要时尝试浏览器。独立代理只用于当前任务。</p>';
 }
 function readSourceProxy(root, monitor) {
   const custom = root.querySelector('.source-fetch-proxy')?.value === 'custom';
@@ -223,87 +223,124 @@ function readSourceFetch(root, monitor) {
   return root.querySelector('.source-fetch-mode') ? { mode: root.querySelector('.source-fetch-mode').value, proxy: root.querySelector('.source-fetch-proxy').value } : monitor.fetch;
 }
 function ruleSections(sections, token) {
-  return '<div class="rule-panel-editor"><div class="rule-tabs" role="tablist" aria-label="任务设置">'
-    + sections.map(([name], i) => '<button type="button" role="tab" class="rule-tab ' + (i ? '' : 'selected') + '" data-editor-tab="' + i + '" id="' + token + '-tab-' + i + '" aria-controls="' + token + '-panel-' + i + '" aria-selected="' + !i + '" tabindex="' + (i ? '-1' : '0') + '">' + name + '</button>').join('')
-    + '</div>' + sections.map(([name, content], i) => '<section class="rule-pane ' + (i ? 'hidden' : '') + '" role="tabpanel" id="' + token + '-panel-' + i + '" aria-labelledby="' + token + '-tab-' + i + '"><h3>' + name + '</h3>' + content + '</section>').join('') + '</div>';
+  return '<div class="rule-panel-editor">' + sections.map(([name, content, key], i) => '<section class="rule-section" data-rule-section="' + (key || i) + '" id="' + escapeHtml(token) + '-section-' + i + '"><h3>' + name + '</h3><div class="rule-section-content">' + content + '</div></section>').join('') + '</div>';
 }
+
 function conditionFields(monitor, scope) {
   const attr = (key) => scope === 'edit' ? 'class="edit-' + key + '"' : 'id="rule-' + key + '"';
   const field = (name, key, value, type = 'text') => '<label>' + name + '<input ' + attr(key) + ' type="' + type + '" value="' + escapeHtml(value || '') + '"></label>';
   const select = (name, key, options) => '<label>' + name + '<select ' + attr(key) + '>' + options + '</select></label>';
-  if (monitor.kind === 'unified') return unifiedRuleEditor(monitor);
-  if (monitor.kind === 'generated') return generatedPlanEditor(monitor.plan, scope === 'edit' ? 'edit-plan-' + monitor.id : 'rule-plan', scope === 'edit' ? 'edit-plan' : '');
+  if (monitor.kind === 'unified') return '<div class="unified-basic-fields rule-fields">' + unifiedConditionFields(monitor) + '</div><div class="element-actions"><button type="button" class="button button-outline" data-rule-analyze>重新分析目标</button><button type="button" class="button button-outline" data-rule-pick>选择网页元素</button></div>';
+  if (monitor.kind === 'generated') return '<p class="plain-rule-summary">' + escapeHtml(friendlyRule(monitor)) + '</p><div class="plain-plan-fields">' + basicPlanFields(monitor.plan) + '</div>';
   if (monitor.kind === 'webpage') return field('要关注的文字', 'keyword', monitor.keyword) + select('什么时候提醒', 'mode', '<option value="contains" ' + (monitor.mode === 'contains' ? 'selected' : '') + '>文字出现时</option><option value="absent" ' + (monitor.mode === 'absent' ? 'selected' : '') + '>文字消失时</option>');
   if (monitor.kind === 'dmit') return select('什么时候提醒', 'trigger-mode', '<option value="restock" ' + (monitor.triggerMode !== 'any-available' ? 'selected' : '') + '>由无货变为有货</option><option value="any-available" ' + (monitor.triggerMode === 'any-available' ? 'selected' : '') + '>任意有货 · 首次满足也通知</option>');
   if (monitor.kind === 'json') return select('满足什么条件', 'operator', operatorOptions(monitor.operator)) + field('关注的内容或数值', 'expected', monitor.expected)
-    + '<details class="advanced-plan editor-wide"><summary>高级 · 数据字段路径</summary>' + field('读取哪个字段', 'json-path', monitor.jsonPath) + '</details>';
+    + field('读取哪个字段', 'json-path', monitor.jsonPath);
   if (monitor.kind === 'rss') return field('新内容标题包含（选填）', 'keyword', monitor.keyword);
   return '<p class="field-help editor-wide">' + escapeHtml(friendlyRule(monitor)) + '</p>';
 }
 function taskEditor(monitor, scope = 'edit') {
   const edit = scope === 'edit', token = edit ? 'task-' + monitor.id : 'draft';
-  const attr = (key) => edit ? 'class="edit-' + key + '"' : 'id="rule-' + key + '"';
+  const attr = key => edit ? 'class="edit-' + key + '"' : 'id="rule-' + key + '"';
   const field = (name, key, value, type = 'text', extra = '') => '<label>' + name + '<input ' + attr(key) + ' type="' + type + '" ' + extra + ' value="' + escapeHtml(value) + '"></label>';
   const priority = '<div class="priority-field ' + (hasNtfyTarget(monitor.webhookIds || []) ? '' : 'hidden') + '"><span>ntfy 优先级</span>' + priorityPicker(edit ? 'edit-priority-' + monitor.id : 'rule-priority', monitor.priority, true, edit ? 'edit-priority' : '') + '</div>';
-  const targets = edit ? '<p class="field-help">选择这项任务的接收渠道。</p><div class="target-options">' + targetOptions(monitor.webhookIds || []) + '</div>' : '<p class="field-help">接收渠道在预览上方选择，通知内容和接收效果在下方编辑。</p>';
-  const notifications = targets + priority + (edit ? '<div class="editor-section-actions"><button type="button" class="button button-outline" data-action="notification" data-id="' + escapeHtml(monitor.id) + '">编辑通知内容与预览</button></div>' : '');
-  if (monitor.kind === 'reminder') return ruleSections([
-    ['基本信息', '<div class="rule-fields">' + field('提醒名称', 'label', monitor.label, 'text', 'maxlength="60"') + field('首次发送时间', 'remind-at', reminderInput(monitor.remindAt), 'datetime-local') + repeatFields(scope, monitor.repeatMinutes) + '</div>'],
-    ['提醒内容', '<label>到时提醒什么<textarea ' + attr('message') + ' rows="4" maxlength="2000">' + escapeHtml(monitor.message) + '</textarea></label><p class="field-help">修改时间或重复方式后会重新安排提醒。</p>'],
-    ['通知', notifications]
-  ], token);
-  const source = '<div class="rule-fields">' + (monitor.kind !== 'dmit' ? field('要关注的地址或日志文件', 'url', monitor.url, 'text') : '<p class="field-help editor-wide">使用第三方库存数据源。</p>') + sourceFetchFields(monitor) + '</div>';
-  return ruleSections([
-    ['基本信息', '<div class="rule-fields">' + field('任务名称', 'label', monitor.label, 'text', 'maxlength="60"') + intervalFields(monitor, scope) + '</div><p class="field-help">支持秒、分钟、小时，保存后随时调整。复杂条件可通过“与 AI 修改”更新。</p>'],
-    ['提醒条件', '<div class="rule-fields">' + conditionFields(monitor, scope) + '</div>'],
-    ['通知', notifications],
-    ['读取设置', source + '<p class="field-help">修改来源地址或提醒条件会重新记录状态。仅切换读取方式或代理会保留上次有效状态。</p>']
-  ], token);
+  const targets = edit ? '<div class="field-label">接收渠道</div><div class="target-options">' + targetOptions(monitor.webhookIds || []) + '</div>' : '';
+  const notification = targets + priority + (edit ? notificationFields(monitor) : '');
+  const basic = '<div class="rule-fields">' + field(monitor.kind === 'reminder' ? '提醒名称' : '任务名称', 'label', monitor.label, 'text', 'maxlength="60"') + (monitor.kind === 'reminder' ? field('首次发送时间', 'remind-at', reminderInput(monitor.remindAt), 'datetime-local') + repeatFields(scope, monitor.repeatMinutes) : intervalFields(monitor, scope)) + '</div>';
+  const sections = [['任务信息', basic, 'basics']];
+  if (monitor.kind === 'reminder') sections.push(['提醒内容', '<label>到时提醒什么<textarea ' + attr('message') + ' rows="3" maxlength="2000">' + escapeHtml(monitor.message) + '</textarea></label>', 'conditions']);
+  else sections.push(['提醒条件', '<div class="rule-fields">' + conditionFields(monitor, scope) + '</div>', 'conditions']);
+  if (notification) sections.push(['通知', notification, 'notifications']);
+  if (monitor.kind !== 'reminder') sections.push(['读取设置', '<div class="rule-fields">' + (monitor.kind !== 'dmit' ? field('监控地址或日志文件', 'url', monitor.url, 'text') : '<p class="field-help">使用第三方库存数据源。</p>') + sourceFetchFields(monitor) + '</div>', 'source']);
+  let wrapper = '', raw = '';
+  if (monitor.kind === 'unified') {
+    wrapper = 'unified-rule-editor';
+    const editable = { type: monitor.type, detection_method: monitor.detection_method, target_element: monitor.target_element, extraction_rule: monitor.extraction_rule, condition: monitor.condition };
+    raw = '<textarea class="unified-json hidden" aria-hidden="true">' + escapeHtml(JSON.stringify(editable, null, 2)) + '</textarea><p class="unified-error" role="status"></p>';
+    if (edit) sections.push(['检测依据', unifiedSummary(monitor) + stockModelSummary(monitor) + (monitor.repair_suggestion || monitor.lastError ? '<button type="button" class="button button-outline" data-action="rule-repair" data-id="' + escapeHtml(monitor.id) + '">修复检测规则</button>' : ''), 'evidence']);
+  } else if (monitor.kind === 'generated') {
+    wrapper = 'generated-plan-editor';
+    raw = '<textarea data-plan-json ' + (edit ? 'class="edit-plan hidden" id="edit-plan-' + escapeHtml(monitor.id) + '"' : 'class="hidden" id="rule-plan"') + ' aria-hidden="true">' + escapeHtml(JSON.stringify(monitor.plan, null, 2)) + '</textarea><p class="advanced-feedback" role="status"></p>';
+  }
+  if (edit) sections.push(['检测记录', '<div class="record-heading"><span>最近的检查与发送</span><button type="button" class="mini-button" data-action="rule-logs" data-id="' + escapeHtml(monitor.id) + '">刷新记录</button></div><div class="task-records" role="log">正在读取记录…</div>', 'records']);
+  const content = ruleSections(sections, token) + raw;
+  return wrapper ? '<div class="' + wrapper + '">' + content + '</div>' : content;
 }
-function renderMonitors(resetEditorId) {
+
+let activeTaskId = null;
+let taskListScroll = 0;
+function openTaskEditor(monitor, focusSection) {
+  if (!activeTaskId) taskListScroll = window.scrollY;
+  activeTaskId = monitor.id;
+  $('#task-editor-title').textContent = monitor.label;
+  $('#task-editor-body').innerHTML = '<div class="monitor-route" data-id="' + escapeHtml(monitor.id) + '" data-revision="' + (monitor.revision || 0) + '">' + taskEditor(monitor) + '</div>';
+  $('#task-save').dataset.id = monitor.id;
+  $('#task-list-view').classList.add('hidden');
+  $('#task-workspace').classList.remove('hidden');
+  $('#task-save-status').textContent = '修改后点击保存';
+  const editor = $('#task-workspace .monitor-route');
+  refreshChoices(editor);
+  const notification = editor.querySelector('.notification-editor');
+  if (notification) attachNotification(notification, () => ({ ...monitor, ...readSavedRule(editor, monitor).rule, webhookIds: selectedIds(editor.querySelector('.target-options')) }), monitor.id);
+  showRuleLogs(monitor).catch(error => { if (editor.isConnected) editor.querySelector('.task-records').textContent = error.message; });
+  if (focusSection) editor.querySelector('[data-rule-section="' + focusSection + '"]')?.scrollIntoView({ block: 'start', behavior: 'instant' });
+  else window.scrollTo({ top: 0, behavior: 'instant' });
+}
+function closeTaskEditor() {
+  const root = $('#task-workspace .notification-editor'), state = notificationEditors.get(root);
+  if (state) { clearTimeout(state.timer); state.sequence++; }
+  activeTaskId = null;
+  $('#task-editor-body').innerHTML = '';
+  $('#task-inspection').innerHTML = '';
+  $('#task-inspection').classList.add('hidden');
+  $('#task-workspace').classList.add('hidden');
+  $('#task-list-view').classList.remove('hidden');
+  window.scrollTo({ top: taskListScroll, behavior: 'instant' });
+}
+$('#task-close').addEventListener('click', closeTaskEditor);
+
+function renderMonitors() {
   const list = $('#monitor-list');
-  const expandedMenus = new Set([...list.querySelectorAll('.monitor-more[open]')].map(node => node.dataset.id));
-  const editors = [...list.querySelectorAll('.monitor-route[open]')].filter((node) => node.dataset.id !== resetEditorId);
-  const focused = document.activeElement;
-  const selection = focused && 'selectionStart' in focused ? [focused.selectionStart, focused.selectionEnd] : null;
-  if (!appState.monitors.length) { list.innerHTML = '<div class="empty-state"><strong>还没有任务</strong><span>在智能创建中描述你的需求。</span></div>'; return; }
-  list.innerHTML = appState.monitors.map((monitor) => {
+  if (!appState.monitors.length) {
+    $('#task-no-results').classList.add('hidden');
+    list.innerHTML = '<div class="empty-state"><strong>还没有任务</strong><span>创建监控或定时提醒，让关心的事自动通知你。</span><a class="button button-primary" href="#create">创建第一个任务</a></div>';
+    return;
+  }
+  list.innerHTML = appState.monitors.map(monitor => {
     const reminder = monitor.kind === 'reminder';
     const status = monitor.completedAt ? ['已发送', ''] : !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastSourceError === 'SOURCE_CHALLENGE' ? ['等待网站验证', 'error'] : monitor.lastError ? [reminder ? '发送待重试' : '检查异常', 'error'] : reminder ? ['等待提醒', 'paused'] : monitor.baselined ? ['运行中', ''] : ['等待检查', 'paused'];
-    const recipients = (monitor.webhookIds || []).map((id) => appState.settings.webhooks.find((hook) => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
-    const meta = reminder ? escapeHtml(repeatLabel(monitor.repeatMinutes) + ' · 下次 ' + reminderDate(monitor.remindAt)) : '每 ' + intervalLabel(monitor.intervalMinutes) + ' 检查 · ' + escapeHtml(relativeTime(monitor.lastCheckAt)) + (monitor.lastFetch ? ' · ' + (monitor.lastFetch.method === 'browser' ? '浏览器读取' : '直接请求') + (monitor.lastFetch.route === 'proxy' ? ' · 代理出口' : '') : '');
-    const id = escapeHtml(monitor.id);
-    const source = usesNetworkSource(monitor) ? sourceRouteLabel(monitor) : '';
-    const result = monitor.lastResult ? friendlyResult(monitor) : monitor.kind === 'unified' ? monitor.last_test_result?.summary || '等待首次检测' : '等待首次检查';
-    const repair = !reminder && monitor.kind === 'unified' && (monitor.repair_suggestion || monitor.lastError);
-    return '<article class="monitor-item" data-monitor-id="' + id + '"><div class="monitor-top"><div class="monitor-heading"><span class="monitor-type-label">' + escapeHtml(reminder ? '定时提醒' : ruleTypeNames[monitor.type] || '监控任务') + '</span><div class="monitor-name">' + escapeHtml(monitor.label) + '</div></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
-      + '<div class="monitor-description" title="' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '">' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '</div>'
-      + '<div class="monitor-current"><span>' + (monitor.lastError ? '上次有效结果' : '当前检测结果') + '</span><strong>' + escapeHtml(result) + '</strong></div>'
-      + (monitor.lastError ? '<div class="monitor-result monitor-error">' + escapeHtml(monitor.lastError) + '</div>' : '')
-      + '<div class="monitor-meta">' + meta + '</div><div class="monitor-routing"><span title="' + escapeHtml(recipients) + '">通知：' + escapeHtml(recipients) + '</span>' + (source ? '<span class="monitor-source-route" title="' + escapeHtml(source) + '">出口：' + escapeHtml(source) + '</span>' : '') + '</div>'
-      + (monitor.sourceRetryAt ? '<p class="field-help">下次重试：' + escapeHtml(reminderDate(monitor.sourceRetryAt)) + '</p>' : '')
-      + '<details class="monitor-route" data-id="' + id + '" data-revision="' + (monitor.revision || 0) + '"><summary>编辑' + (reminder ? '提醒' : '监控') + '</summary>' + taskEditor(monitor)
-      + '<div class="editor-footer"><span>保存后应用本次修改</span><button class="button button-primary" data-action="save-rule" data-id="' + id + '" type="button">保存修改</button></div></details>'
-      + '<div class="monitor-actions"><button class="mini-button" data-action="refine" data-id="' + id + '">与 AI 修改</button>'
-      + (!reminder ? '<button class="mini-button" data-action="check" data-id="' + id + '">立即检查</button><button class="mini-button" data-action="rule-logs" data-id="' + id + '">检测记录</button>' : '')
-      + (repair ? '<button class="mini-button monitor-repair-action" data-action="rule-repair" data-id="' + id + '">查看修复建议</button>' : '')
-      + '<details class="monitor-more" data-id="' + id + '"><summary>更多操作</summary><div class="monitor-more-menu">'
-      + (usesNetworkSource(monitor) ? '<button class="mini-button" data-action="proxy" data-id="' + id + '">代理出口</button>' : '')
-      + '<button class="mini-button" data-action="notification" data-id="' + id + '">通知内容与预览</button>'
-      + (!reminder && monitor.kind === 'unified' && !repair ? '<button class="mini-button" data-action="rule-repair" data-id="' + id + '">重新分析与修复</button>' : '')
-      + (!monitor.completedAt ? '<button class="mini-button" data-action="toggle" data-id="' + id + '">' + (monitor.enabled ? '暂停' : '继续') + '</button>' : '')
-      + '<button class="mini-button danger" data-action="delete" data-id="' + id + '">删除</button></div></details></div></article>';
+    const recipients = (monitor.webhookIds || []).map(id => appState.settings.webhooks.find(hook => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
+    const meta = reminder ? repeatLabel(monitor.repeatMinutes) + (monitor.completedAt ? ' · 已完成' : ' · 下次 ' + reminderDate(monitor.remindAt)) : '每 ' + intervalLabel(monitor.intervalMinutes) + ' 检查 · ' + relativeTime(monitor.lastCheckAt);
+    const id = escapeHtml(monitor.id), source = usesNetworkSource(monitor) ? sourceRouteLabel(monitor) : '';
+    const result = monitor.lastError || (reminder ? monitor.completedAt ? '提醒已送达' : monitor.enabled ? '到时自动发送' : '提醒已暂停' : monitor.lastResult ? friendlyResult(monitor) : monitor.kind === 'unified' ? monitor.last_test_result?.summary || '等待首次检测' : '等待首次检查');
+    const button = (action, label, style = '') => '<button type="button" class="mini-button ' + style + '" data-action="' + action + '" data-id="' + id + '">' + label + '</button>';
+    return '<article class="monitor-item" data-monitor-id="' + id + '" data-kind="' + (reminder ? 'reminder' : 'monitor') + '"><div class="monitor-top"><div class="monitor-heading"><span class="monitor-type-label">' + escapeHtml(reminder ? '定时提醒' : ruleTypeNames[monitor.type] || '监控任务') + '</span><h3 class="monitor-name" title="' + escapeHtml(monitor.label) + '">' + escapeHtml(monitor.label) + '</h3></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
+      + '<div class="monitor-body"><div class="monitor-description" title="' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '">' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '</div><div class="monitor-current"><span>' + (monitor.lastError ? '需要处理' : reminder ? '提醒状态' : '当前结果') + '</span><strong class="' + (monitor.lastError ? 'monitor-error' : '') + '" title="' + escapeHtml(result) + '">' + escapeHtml(result) + '</strong></div></div>'
+      + '<div class="monitor-schedule"><div class="monitor-meta">' + escapeHtml(meta) + '</div><div class="monitor-routing"><span>通知：' + escapeHtml(recipients) + '</span>' + (source ? '<span class="monitor-source-route">出口：' + escapeHtml(source) + '</span>' : '') + '</div></div>'
+      + '<div class="monitor-actions"><div class="monitor-main-actions">' + button('edit', '编辑规则', 'task-edit') + (!monitor.completedAt ? button('toggle', monitor.enabled ? '暂停' : '继续') : '') + (!reminder ? button('check', '立即检查') : '') + '</div>' + button('delete', '删除', 'danger') + '</div></article>';
   }).join('');
-  for (const menu of list.querySelectorAll('.monitor-more')) menu.open = expandedMenus.has(menu.dataset.id);
-  for (const oldEditor of editors) {
-    const fresh = [...list.querySelectorAll('.monitor-route')].find((node) => node.dataset.id === oldEditor.dataset.id);
-    if (fresh) fresh.replaceWith(oldEditor);
-  }
-  if (focused?.isConnected && editors.some((node) => node.contains(focused))) {
-    focused.focus({ preventScroll: true });
-    if (selection && typeof selection[0] === 'number') focused.setSelectionRange(...selection);
-  }
+  filterMonitors();
 }
+
+function filterMonitors() {
+  const filter = $('#task-filters [aria-pressed="true"]')?.dataset.taskFilter || 'all';
+  const query = $('#task-search').value.trim().toLocaleLowerCase();
+  let visible = 0;
+  for (const item of $('#monitor-list').querySelectorAll('.monitor-item')) {
+    const text = item.querySelector('.monitor-name').textContent + ' ' + item.querySelector('.monitor-description').textContent;
+    const show = (filter === 'all' || item.dataset.kind === filter) && text.toLocaleLowerCase().includes(query);
+    item.classList.toggle('hidden', !show);
+    if (show) visible++;
+  }
+  $('#task-no-results').classList.toggle('hidden', visible > 0 || !appState.monitors.length);
+}
+$('#task-search').addEventListener('input', filterMonitors);
+$('#task-filters').addEventListener('click', event => {
+  const button = event.target.closest('[data-task-filter]');
+  if (!button) return;
+  for (const item of $('#task-filters').children) item.setAttribute('aria-pressed', String(item === button));
+  filterMonitors();
+});
 
 function renderEvents() {
   const list = $('#activity-list');
@@ -316,25 +353,29 @@ function renderEvents() {
 
 function renderLogs() {
   const all = appState.logs || [];
-  const logs = $('#log-errors-only').checked ? all.filter((entry) => entry.status === 'error') : all;
-  $('#log-count').textContent = `显示 ${logs.length} 条`;
-  const list = $('#log-list');
-  const scrollTop = list.scrollTop;
-  const expanded = new Set([...list.querySelectorAll('.raw-log[open]')].map((details) => details.dataset.id));
-  const labels = { requestId: '请求编号', networkRoute: '网络路径', error: '原始错误', fetch: '读取过程', errorCode: '错误代码', retryAt: '下次重试时间', instruction: '用户原始指令', conversation: '对话记录', firstModelError: '首次生成校验错误', firstModelResponse: '首次 AI 原始响应', sourceUrl: '提取或填写的来源地址', sourceMode: '来源地址获取方式', sourceCheck: '本地来源检查', requestUrl: '请求地址', model: '模型', apiEndpoint: 'AI 接口', aiRequest: '发送给 AI 的原始请求体', aiResponse: 'AI 原始响应', responseBody: '原始响应内容', aiResponseTruncated: '响应已截断', aiReturnedUrl: 'AI 返回的监控地址', sourceInterpretation: '地址解释', validatedUrl: '最终监控地址', httpStatus: 'HTTP 状态', networkCode: '网络错误码', networkCause: '网络错误详情', validation: '校验结果' };
-  const rawHtml = (entry) => `<details class="raw-log" data-id="${escapeHtml(entry.id)}" ${expanded.has(entry.id) ? 'open' : ''}><summary>查看原始记录</summary><button type="button" class="mini-button copy-log" data-copy-log="${escapeHtml(entry.id)}">复制原始记录</button>${Object.entries(entry.raw).filter(([, value]) => value != null && value !== '').map(([name, value]) => {
-    let display = typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '');
-    if (['aiRequest', 'aiResponse', 'responseBody', 'notification', 'channels'].includes(name)) { try { display = JSON.stringify(JSON.parse(display), null, 2); } catch { /* display the original text */ } }
-    return `<div class="raw-log-field"><b>${escapeHtml(labels[name] || name)}</b><pre>${escapeHtml(display)}</pre></div>`;
-  }).join('')}</details>`;
-  list.innerHTML = logs.length ? logs.map((entry) => `<div class="log-row ${entry.status === 'error' ? 'log-error' : ''}"><strong>${escapeHtml({ monitor: '检查', webhook: '发送', simulation: '模拟发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接', 'proxy-test': '代理测试' }[entry.kind] || entry.kind)} · ${escapeHtml(entry.status === 'error' ? '失败' : '成功')}</strong><span>${escapeHtml(new Date(entry.at).toLocaleString('zh-CN'))} · ${escapeHtml(entry.durationMs)} ms</span><p>${escapeHtml(entry.detail)}</p>${entry.url ? `<small title="${escapeHtml(entry.url)}">${escapeHtml(entry.url)}</small>` : ''}${entry.raw ? rawHtml(entry) : entry.kind === 'parse' ? '<small>旧记录未保存原始请求与回复</small>' : ''}</div>`).join('') : '<p class="field-help">没有符合条件的日志。</p>';
+  const logs = $('#log-errors-only').checked ? all.filter(entry => entry.status === 'error') : all;
+  $('#log-count').textContent = '显示 ' + logs.length + ' 条';
+  const list = $('#log-list'), scrollTop = list.scrollTop;
+  list.innerHTML = logs.length ? logs.map(entry => '<div class="log-row ' + (entry.status === 'error' ? 'log-error' : '') + '"><strong>' + escapeHtml({ monitor: '检查', webhook: '发送', simulation: '模拟发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接', 'proxy-test': '代理测试' }[entry.kind] || entry.kind) + ' · ' + (entry.status === 'error' ? '失败' : '成功') + '</strong><span>' + escapeHtml(new Date(entry.at).toLocaleString('zh-CN')) + ' · ' + escapeHtml(entry.durationMs) + ' ms</span><p>' + escapeHtml(entry.detail) + '</p>' + (entry.url ? '<small>' + escapeHtml(entry.url) + '</small>' : '') + (entry.raw ? '<button type="button" class="mini-button" data-view-log="' + escapeHtml(entry.id) + '">查看原始记录</button>' : '') + '</div>').join('') : '<p class="field-help">没有符合条件的日志。</p>';
   list.scrollTop = scrollTop;
 }
+document.addEventListener('click', event => {
+  const button = event.target.closest('[data-view-log]');
+  if (!button) return;
+  const entry = (appState.logs || []).find(item => item.id === button.dataset.viewLog);
+  if (!entry?.raw) return;
+  const dialog = ruleDialog('原始记录');
+  dialog.querySelector('.rule-dialog-body').innerHTML = '<button type="button" class="mini-button" data-copy-log="' + escapeHtml(entry.id) + '">复制原始记录</button><pre class="raw-record">' + escapeHtml(JSON.stringify(entry.raw, null, 2)) + '</pre>';
+});
 
 function render(force = false, resetEditorId) {
   renderStats();
   renderSourceSettings();
-  renderMonitors(resetEditorId);
+  renderMonitors();
+  if (activeTaskId && activeTaskId === resetEditorId) {
+    const task = appState.monitors.find(item => item.id === activeTaskId);
+    if (task) openTaskEditor(task); else closeTaskEditor();
+  }
   renderEvents();
   renderLogs();
 }
@@ -405,7 +446,7 @@ function updateSendPriorityVisibility() {
 function renderSendTargets(ids) { $('#send-targets').innerHTML = targetOptions(ids); updateSendPriorityVisibility(); }
 $('#send-targets').addEventListener('change', updateSendPriorityVisibility);
 $('#log-errors-only').addEventListener('change', renderLogs);
-$('#log-list').addEventListener('click', (event) => {
+document.addEventListener('click', (event) => {
   const button = event.target.closest('[data-copy-log]');
   if (!button) return;
   const entry = (appState.logs || []).find((item) => item.id === button.dataset.copyLog);
@@ -484,7 +525,7 @@ function addAssistantMessage(role, content) {
 function resetAssistant(instruction = '', keepEditing = false) {
   if (!keepEditing) editingMonitor = null;
   if (!instruction && !keepEditing) {
-    $('#create-proxy-mode').value = 'default'; $('#create-source-proxy').value = '';
+    $('#create-proxy-mode').value = 'default'; refreshChoices(); $('#create-source-proxy').value = '';
     $('#create-proxy-address').classList.add('hidden');
   }
   syncRevisionMode();
@@ -583,6 +624,8 @@ function readSavedRule(editor, monitor) {
   if (monitor.kind === 'dmit') { rule.triggerMode = editor.querySelector('.edit-trigger-mode').value; rule.description = rule.triggerMode === 'any-available' ? '第三方库存列表中，任意套餐有货时通知；首次检查如有货会立即通知' : '第三方库存列表中，套餐由无货变为有货时通知'; }
   if (monitor.kind === 'json') { rule.jsonPath = editor.querySelector('.edit-json-path').value.trim(); rule.operator = editor.querySelector('.edit-operator').value; rule.expected = editor.querySelector('.edit-expected').value.trim(); rule.description = `${rule.jsonPath} ${editor.querySelector('.edit-operator').selectedOptions[0].textContent} ${rule.expected} 时通知`; }
   if (monitor.kind === 'rss') { rule.keyword = editor.querySelector('.edit-keyword').value.trim(); rule.description = rule.keyword ? `出现标题包含「${rule.keyword}」的新条目时通知` : '出现新条目时通知'; }
+  const notification = editor.querySelector('.notification-editor');
+  if (notification) rule.notification = readNotification(notification);
   return { rule, webhookIds: ids };
 }
 
@@ -606,11 +649,11 @@ function syncRevisionMode() {
 }
 function startAIRevision(monitor, editor) {
   let config = monitorConfig(monitor);
-  if (editor?.open) {
+  if (editor?.closest('#task-workspace') && activeTaskId === monitor.id) {
     const pending = readSavedRule(editor, monitor);
     config = { ...config, ...pending.rule, webhookIds: pending.webhookIds };
   }
-  const revision = editor?.open ? Number(editor.dataset.revision) : monitor.revision || 0;
+  const revision = editor?.closest('#task-workspace') && activeTaskId === monitor.id ? Number(editor.dataset.revision) : monitor.revision || 0;
   resetAssistant();
   editingMonitor = { id: monitor.id, revision, original: monitorConfig(monitor), enabled: monitor.enabled };
   assistantInstruction = '请协助我修改当前已创建的任务，保留未要求修改的设置。';
@@ -801,13 +844,6 @@ function basicPlanFields(plan) {
   return fields.join('');
 }
 
-function generatedPlanEditor(plan, id, className = '') {
-  return '<div class="generated-plan-editor"><p class="plain-rule-summary">' + escapeHtml(friendlyRule({ kind: 'generated', plan })) + '</p><div class="plain-plan-fields">' + basicPlanFields(plan) + '</div>'
-    + '<p class="field-help">不确定怎么设置？告诉 AI 你想要的效果即可。</p>'
-    + '<details class="advanced-plan"><summary>高级设置 · 给熟悉接口的用户</summary><p class="field-help">字段路径、条目标识、筛选逻辑等技术参数放在这里。普通设置会自动同步，无需手动填写 JSON。</p>'
-    + '<label class="plan-field" for="' + escapeHtml(id) + '">完整规则（JSON）<textarea data-plan-json id="' + escapeHtml(id) + '" class="' + className + '" rows="8" spellcheck="false">' + escapeHtml(JSON.stringify(plan, null, 2)) + '</textarea></label><p class="advanced-feedback" role="status"></p></details></div>';
-}
-
 function syncPlanEditor(event) {
   const root = event.target.closest('.generated-plan-editor');
   if (!root) return;
@@ -887,10 +923,10 @@ function notificationFields(monitor) {
     + '<label class="field-label" for="' + token + '-title">标题（可留空）</label><input class="notification-title" id="' + token + '-title" type="text" maxlength="200" value="' + escapeHtml(template.title) + '">'
     + '<label class="field-label" for="' + token + '-body">正文</label><textarea class="notification-body" id="' + token + '-body" rows="4" maxlength="2000">' + escapeHtml(template.body) + '</textarea>'
     + '<div class="notification-variables" role="group" aria-label="插入动态内容"><span>插入内容</span>' + common.map(([key, label]) => '<button type="button" class="variable-button" data-variable="' + key + '">' + label + '</button>').join('') + '</div>'
-    + '<p class="field-help">监控地址、任务名称和时间不会在模板之外自动附加。需要时点击上方按钮插入，也可直接删除或替换。想自己组织文案，可删掉“本次详情”，改用条目名称、数值等单独内容。</p>'
+    + '<p class="field-help">点击插入动态内容，也可直接编辑或删除。</p>'
     + '<div class="notification-render" aria-live="polite"><div class="notification-preview-label"><strong>接收效果</strong><span class="notification-basis">准备预览</span></div>'
     + '<p class="notification-note"></p><div class="notification-message"><h4></h4><p></p></div><div class="notification-channel-list"></div>'
-    + '<details class="notification-wire"><summary>查看渠道发送内容</summary><div class="notification-wire-content"></div></details></div>'
+    + '<div class="notification-wire-content hidden" aria-hidden="true"></div></div>'
     + '<div class="notification-feedback" role="status"></div><div class="notification-actions"><button type="button" class="button button-outline" data-notification-action="refresh">刷新预览</button>'
     + '<button type="button" class="button button-outline" data-notification-action="simulate" disabled>发送模拟通知</button></div>'
     + '<p class="field-help simulation-note">模拟消息会实际发送到上方渠道，标题加上【模拟】。不会创建任务或改变任务的检测、提醒进度。</p></section>';
@@ -986,32 +1022,10 @@ function mountDraftNotification(monitor) {
   renderRevisionDiff();
 }
 
-function openNotificationEditor(monitor) {
-  const dialog = $('#notification-dialog');
-  $('#notification-dialog-title').textContent = monitor.label;
-  $('#notification-dialog-body').innerHTML = notificationFields(monitor);
-  const root = $('#notification-dialog .notification-editor');
-  const getRule = () => ({ ...monitor, notification: readNotification(root) });
-  attachNotification(root, getRule, monitor.id);
-  $('#notification-save').onclick = () => withButton($('#notification-save'), async () => {
-    appState = await api('/api/monitors/' + encodeURIComponent(monitor.id), 'PATCH', { rule: { notification: readNotification(root) }, expectedRevision: monitor.revision || 0 });
-    if (!root.isConnected) { render(); return; }
-    dialog.close();
-    render(true);
-    toast('通知内容已保存，下次触发时生效');
-  });
-  dialog.showModal();
-}
-$('#notification-close').addEventListener('click', () => $('#notification-dialog').close());
-$('#notification-dialog').addEventListener('close', () => {
-  const root = $('#notification-dialog .notification-editor');
-  const state = notificationEditors.get(root);
-  if (state) { clearTimeout(state.timer); state.sequence++; }
-  $('#notification-dialog-body').innerHTML = '';
-});
+function openNotificationEditor(monitor) { openTaskEditor(monitor, 'notifications'); }
 
 function monitorSummary(monitor) {
-  if (monitor.kind === 'unified') return unifiedSummary(monitor) + '<p class="plain-rule-summary">' + escapeHtml(unifiedDescription(monitor)) + ' · 每 ' + escapeHtml(intervalLabel(monitor.intervalMinutes)) + '检查</p>' + ruleValidationSummary(monitor) + stockModelSummary(monitor, true) + (monitor.extraction_rule.kind !== 'service' ? '<div class="element-actions"><button type="button" class="button button-outline" data-source-preview>预览服务端页面与检测区域</button></div><p class="field-help">原始库存文字来自实际抓取；确认型号、当前状态和提醒条件后再创建。</p>' : '');
+  if (monitor.kind === 'unified') return unifiedSummary(monitor) + '<p class="plain-rule-summary">' + escapeHtml(unifiedDescription(monitor)) + ' · 每 ' + escapeHtml(intervalLabel(monitor.intervalMinutes)) + '检查</p>' + featurePanel('检测依据与型号库存', ruleValidationSummary(monitor) + stockModelSummary(monitor), 'draft-evidence') + (monitor.extraction_rule.kind !== 'service' ? '<div class="element-actions"><button type="button" class="button button-outline" data-source-preview>预览页面与检测区域</button></div>' : '');
   const items = [
     ['监控对象', monitor.label, false],
     ['检查频率', '每 ' + intervalLabel(monitor.intervalMinutes), false],
@@ -1032,7 +1046,7 @@ function renderPreview(monitor) {
       + '<div class="preview-item"><small>提醒内容</small><strong>' + escapeHtml(monitor.message) + '</strong></div></div>'
       + '<p class="preview-note">时间按此设备的本地时区显示。重复提醒在每轮成功送达后安排下一次；请确认后再创建。</p>'
       + '<div class="field-label">通知到</div><div id="preview-targets" class="target-options">' + targetOptions(monitor.webhookIds) + '</div>'
-      + '<details class="rule-editor"><summary>调整提醒</summary>' + taskEditor(monitor, 'rule') + '</details>'
+      + '<div class="rule-editor">' + taskEditor(monitor, 'rule') + '</div>'
       + '<div id="preview-result" class="preview-result" aria-live="polite"></div>'
       + '<div class="preview-actions"><button class="button button-outline" id="preview-revise-button" type="button">修改需求</button>'
       + '<button class="button button-primary" id="create-button" type="button">确认创建提醒 <span>↗</span></button></div>';
@@ -1044,7 +1058,7 @@ function renderPreview(monitor) {
     ${monitorSummary(monitor)}
     <div class="preview-note">${monitor.sourceNote ? `${escapeHtml(monitor.sourceNote)} ` : ''}${monitor.kind === 'generated' ? '请核对提醒条件。时间和通知选项可以直接调整，也可以继续用一句话修改需求。' : (monitor.kind === 'unified' && monitor.condition.initial === 'notify' || monitor.kind === 'dmit' && monitor.triggerMode === 'any-available') ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'generated' && monitor.plan.sourceType === 'html' ? ' 自动读取遇到网站验证会尝试浏览器；创建前会试跑一次。' : ''}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
     <div class="field-label">通知到</div><div id="preview-targets" class="target-options">${targetOptions(monitor.webhookIds)}</div>
-    <details class="rule-editor"><summary>调整监控规则</summary>${taskEditor(monitor, 'rule')}</details>
+    <div class="rule-editor">${taskEditor(monitor, 'rule')}</div>
     <div id="preview-result" class="preview-result" aria-live="polite"></div><div class="preview-actions"><button class="button button-outline" id="preview-revise-button" type="button">修改需求</button><button class="button button-outline" id="preview-check-button" type="button">试跑一次</button><button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button></div>`;
   if (monitor.assumptions?.length) {
     element.querySelector('.preview-grid, .rule-evidence').insertAdjacentHTML('afterend', '<div class="draft-assumptions"><strong>已为你采用的设置</strong><ul>' + monitor.assumptions.map((text) => '<li>' + escapeHtml(text) + '</li>').join('') + '</ul></div>');
@@ -1074,9 +1088,24 @@ function markPreviewChanged(event) {
 $('#preview').addEventListener('rule-plan-updated', () => { renderRevisionDiff(); queueNotificationRefresh($('#preview .notification-editor')); });
 $('#preview').addEventListener('input', (event) => { renderRevisionDiff(); markPreviewChanged(event); if (!event.target.closest('.notification-editor')) queueNotificationRefresh($('#preview .notification-editor')); });
 $('#preview').addEventListener('change', (event) => { renderRevisionDiff(); updatePriorityVisibility($('#preview'), '#preview-targets'); toggleRepeatFields($('#preview'), 'rule'); markPreviewChanged(event); if (!event.target.closest('.notification-editor')) queueNotificationRefresh($('#preview .notification-editor')); });
-$('#monitor-list').addEventListener('change', (event) => {
+document.addEventListener('change', (event) => {
   const editor = event.target.closest('.monitor-route');
-  if (editor) { updatePriorityVisibility(editor, '.target-options'); toggleRepeatFields(editor, 'edit'); }
+  if (editor) {
+    updatePriorityVisibility(editor, '.target-options'); toggleRepeatFields(editor, 'edit');
+    const notification = editor.querySelector('.notification-editor');
+    if (notification && !notification.contains(event.target)) queueNotificationRefresh(notification);
+  }
+});
+
+document.addEventListener('input', event => {
+  const editor = event.target.closest('.monitor-route');
+  const notification = editor?.querySelector('.notification-editor');
+  if (notification && !notification.contains(event.target)) queueNotificationRefresh(notification);
+});
+
+document.addEventListener('rule-plan-updated', event => {
+  const notification = event.target.closest('.monitor-route')?.querySelector('.notification-editor');
+  if (notification) queueNotificationRefresh(notification);
 });
 
 function collectPreviewRule() {
@@ -1153,7 +1182,9 @@ function showAuth() {
   draftHooks = []; editingMonitor = null;
   appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [], sentCount: 0 };
   for (const selector of ['#monitor-list', '#webhook-list', '#send-targets', '#log-list', '#activity-list']) { const node = $(selector); if (node) node.innerHTML = ''; }
-  if ($('#notification-dialog').open) $('#notification-dialog').close();
+  closeTaskEditor();
+  for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
+  for (const inspection of document.querySelectorAll('.rule-dialog')) inspection.remove();
   setAuthMode('login');
   $('#auth-screen').classList.remove('hidden');
   $('.app-shell').classList.add('auth-hidden');
@@ -1166,7 +1197,7 @@ function showAuth() {
   releaseSourceAction(sourceAction);
   resetSourceResults();
   $('#source-proxy-status').textContent = '';
-  $('#source-test-mode').value = 'http';
+  $('#source-test-mode').value = 'http'; refreshChoices();
   $('#ai-test-result').textContent = '';
   $('#settings-dirty').textContent = '';
   for (const input of document.querySelectorAll('#email-password, #current-password, #new-password, #rotate-code-password')) input.value = '';
@@ -1535,29 +1566,24 @@ $('#preview').addEventListener('click', (event) => {
   });
 });
 
-$('#monitor-list').addEventListener('click', (event) => {
+document.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-action]');
-  if (!button) return;
-  const menu = button.closest('.monitor-more');
-  if (menu) menu.open = false;
+  if (!button || !button.closest('#monitor-list, #task-workspace')) return;
   const { id, action } = button.dataset;
   const monitor = appState.monitors.find((item) => item.id === id);
   if (!monitor) return;
   if (['rule-logs', 'rule-repair'].includes(action)) return;
-  if (action === 'proxy') {
-    const editor = button.closest('article').querySelector('.monitor-route');
-    editor.open = true; selectRuleTab(editor.querySelector('[data-editor-tab="3"]'));
-    editor.querySelector('.source-fetch-proxy').focus(); return;
-  }
-  if (action === 'refine') { try { startAIRevision(monitor, button.closest('article').querySelector('.monitor-route')); } catch (error) { toast(error.message, true); } return; }
+  if (action === 'edit' || action === 'proxy') { openTaskEditor(monitor, action === 'proxy' ? 'source' : undefined); return; }
+  if (action === 'refine') { try { startAIRevision(monitor); } catch (error) { toast(error.message, true); } return; }
   if (action === 'notification') { openNotificationEditor(monitor); return; }
   if (action === 'delete' && !confirm(`删除“${monitor.label}”？`)) return;
   withButton(button, async () => {
     const path = `/api/monitors/${encodeURIComponent(id)}`;
     if (action === 'save-rule') {
-      const editor = button.closest('.monitor-route');
+      const editor = $('#task-workspace .monitor-route');
       const update = readSavedRule(editor, monitor);
       appState = await api(path, 'PATCH', { ...update, expectedRevision: Number(editor.dataset.revision) });
+      closeTaskEditor();
       toast('任务已更新');
     } else if (action === 'check') {
       appState = await api(`${path}/check`, 'POST');
@@ -1580,14 +1606,6 @@ $('#monitor-list').addEventListener('click', (event) => {
     }
     render(true, action === 'save-rule' ? id : undefined);
   });
-});
-
-document.addEventListener('click', event => {
-  for (const menu of document.querySelectorAll('.monitor-more[open]')) if (!menu.contains(event.target)) menu.open = false;
-});
-document.addEventListener('keydown', event => {
-  if (event.key !== 'Escape') return;
-  for (const menu of document.querySelectorAll('.monitor-more[open]')) { menu.open = false; menu.querySelector('summary').focus(); }
 });
 
 async function init() {
@@ -1727,7 +1745,7 @@ $('#source-proxy-clear').addEventListener('click', () => {
   });
 });
 $('#ai-test-log').addEventListener('click', () => {
-  $('#activity .log-panel').open = true;
+  $('#activity .log-panel').scrollIntoView({ block: 'start' });
   $('#log-errors-only').checked = false;
   renderLogs();
 });
@@ -1789,31 +1807,6 @@ $('#source-target-form').addEventListener('submit', (event) => {
     }
   });
 });
-function selectRuleTab(button, focus = false) {
-  const root = button.closest('.rule-panel-editor');
-  root.querySelectorAll('.rule-tab').forEach((tab) => {
-    const active = tab === button;
-    tab.classList.toggle('selected', active);
-    tab.setAttribute('aria-selected', String(active));
-    tab.tabIndex = active ? 0 : -1;
-    document.getElementById(tab.getAttribute('aria-controls')).classList.toggle('hidden', !active);
-  });
-  if (focus) button.focus();
-}
-document.addEventListener('click', (event) => {
-  const button = event.target.closest('[data-editor-tab]');
-  if (button) selectRuleTab(button);
-});
-document.addEventListener('keydown', (event) => {
-  const tab = event.target.closest('[data-editor-tab]');
-  if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-  const tabs = [...tab.closest('.rule-tabs').querySelectorAll('.rule-tab')];
-  let index = tabs.indexOf(tab);
-  index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-  event.preventDefault();
-  selectRuleTab(tabs[index], true);
-});
-
 document.addEventListener('change', (event) => {
   if (!event.target.matches('.source-fetch-proxy')) return;
   const root = event.target.closest('.monitor-route, .rule-editor');

@@ -10,6 +10,8 @@
   <link rel="stylesheet" href="./spatial.css">
   <link rel="stylesheet" href="./premium.css">
   <link rel="stylesheet" href="./controls.css">
+  <link rel="stylesheet" href="./minimal.css">
+  <script src="./choices.js" defer></script>
 </head>
 <body>
   <div class="app-shell" data-view="top">
@@ -167,11 +169,10 @@
             <label class="field-label" for="instruction">告诉我你希望发生什么</label>
             <textarea id="instruction" rows="4" placeholder="例如：每 5 分钟检查一次接口响应，如果 HTTP 状态码不是 200 则通知我">https://api.github.com/repos/google/gemini 出现新的 Release 版本时通知我</textarea>
             
-            <details class="source-optional">
-              <summary>我知道具体监控地址（选填）</summary>
+            <section class="source-optional">
               <label for="instruction-url" class="field-label">来源地址</label>
               <input id="instruction-url" type="text" value="https://api.github.com/repos/google/gemini/releases" autocomplete="off">
-            </details>
+            </section>
             
             <div class="composer-bottom">
               <span id="ai-status">先生成方案，参数可以之后调整</span>
