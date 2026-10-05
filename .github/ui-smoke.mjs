@@ -272,6 +272,29 @@ try {
   const checkedTask = await context.request.post(base + '/api/monitors/' + encodeURIComponent(taskB.id) + '/check');
   assert.ok(checkedTask.ok());
   await page.evaluate(async () => { appState = await api('/api/state'); render(); });
+  const stableLists = await page.evaluate(() => {
+    render();
+    const nodes = ['#monitor-list', '#activity-list', '#log-list'].map(selector => document.querySelector(selector).firstElementChild);
+    render();
+    return nodes.every((node, index) => node === document.querySelector(['#monitor-list', '#activity-list', '#log-list'][index]).firstElementChild);
+  });
+  assert.equal(stableLists, true, 'Unchanged lists retain their DOM nodes');
+  const pollStatuses = [];
+  const observePoll = response => { if (new URL(response.url()).pathname === '/api/state') pollStatuses.push(response.status()); };
+  page.on('response', observePoll);
+  try {
+    const stablePolling = await page.evaluate(async () => {
+      workspaceTag = null;
+      await refreshWorkspace();
+      const nodes = ['#monitor-list', '#activity-list', '#log-list'].map(selector => document.querySelector(selector).firstElementChild);
+      await refreshWorkspace();
+      return Boolean(workspaceTag?.etag) && nodes.every((node, index) => node === document.querySelector(['#monitor-list', '#activity-list', '#log-list'][index]).firstElementChild);
+    });
+    assert.equal(stablePolling, true, 'Conditional polling preserves nodes and an unsaved editor');
+    assert.deepEqual(pollStatuses, [200, 304]);
+    assert.equal(await editorA.locator('.edit-label').inputValue(), '还没有保存的任务 A 草稿');
+  } finally { page.removeListener('response', observePoll); }
+  console.log('PASS unchanged lists and conditional state polling preserve nodes and editing drafts');
   assert.equal(await editorA.locator('.edit-label').inputValue(), '还没有保存的任务 A 草稿', 'Background checks must preserve task A editing draft');
   assert.equal(await editorA.isVisible(), true);
   assert.equal(await page.locator('#task-list-view').isVisible(), false);

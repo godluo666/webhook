@@ -15,6 +15,7 @@ import { assistantMessages } from './lib/assistant.js';
 import { createStore } from './lib/store.js';
 import { createEmailCodeService } from './lib/email.js';
 import { createSourceFetcher, validateFetchOptions } from './lib/source-fetch.js';
+import { createSharedSourceReader } from './lib/shared-source.js';
 import { createBrowserSource } from './lib/browser-source.js';
 import { validateSourceProxy, proxyEndpoint, redactProxy } from './lib/source-proxy.js';
 import { createShadowsocksBridge } from './lib/shadowsocks.js';
@@ -50,7 +51,7 @@ function redactData(value, redact) {
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactData(item, redact)]));
   return value;
 }
-async function fetchSource(url, options = {}) {
+const fetchSource = createSharedSourceReader(async (url, options = {}) => {
   return withSourceProxy(options.proxyUrl, async (proxyUrl, proxyIdentity) => {
     try {
       const result = await readSource(url, { ...options, proxyUrl, proxyIdentity });
@@ -64,7 +65,7 @@ async function fetchSource(url, options = {}) {
       throw error;
     }
   });
-}
+});
 function sourceOptions(user, monitor = {}) {
   const options = validateFetchOptions(monitor.fetch);
   const proxyUrl = options.proxy === 'custom' ? monitor.sourceProxy || '' : options.proxy === 'direct' ? '' : user.settings.sourceProxy || '';
@@ -140,24 +141,30 @@ if ((process.env.HTTP_PROXY || process.env.HTTPS_PROXY) && typeof http.setGlobal
 }
 
 const persist = () => store.persist();
+const preparedLogDirectories = new Set();
 const publicState = (user) => {
   const state = store.publicWorkspace(user);
   state.user.logDirectory = userLogDirectory(logRoot, user);
-  if (!process.env.MONITOR_LOG_ROOT) fs.mkdirSync(state.user.logDirectory, { recursive: true });
+  if (!process.env.MONITOR_LOG_ROOT && !preparedLogDirectories.has(user.id)) {
+    fs.mkdirSync(state.user.logDirectory, { recursive: true });
+    preparedLogDirectories.add(user.id);
+  }
   return state;
 };
 
-function addEvent(user, type, title, detail, monitorId = null) {
+// Monitor observations commit together in checkMonitor; transaction and
+// notification records keep their immediate writes.
+function addEvent(user, type, title, detail, monitorId = null, persistNow = true) {
   user.events.unshift({ id: randomUUID(), type, title, detail, monitorId, at: new Date().toISOString() });
   user.events.length = Math.min(user.events.length, 100);
-  persist();
+  if (persistNow) persist();
 }
 
-function addLog(user, kind, status, detail, url, durationMs, monitorId = null, raw = null) {
+function addLog(user, kind, status, detail, url, durationMs, monitorId = null, raw = null, persistNow = true) {
   const displayUrl = kind === 'webhook' && url ? `${new URL(url).origin}/…` : url;
   user.logs.unshift({ id: randomUUID(), kind, status, detail: String(detail).slice(0, 500), url: displayUrl, durationMs, monitorId, raw, at: new Date().toISOString() });
   user.logs.length = Math.min(user.logs.length, 300);
-  persist();
+  if (persistNow) persist();
 }
 
 function testProxy(user, proxy) {
@@ -295,10 +302,8 @@ function previewSourceSignature(monitor) {
 
 function buildNotificationPreview(user, monitor, observed = null) {
   const now = Date.now();
-  for (const [id, entry] of notificationPreviews) if (entry.expiresAt <= now) notificationPreviews.delete(id);
   const own = [...notificationPreviews].filter(([, entry]) => entry.userId === user.id);
   while (own.length >= 20) notificationPreviews.delete(own.shift()[0]);
-  while (notificationPreviews.size >= 200) notificationPreviews.delete(notificationPreviews.keys().next().value);
   const sample = notificationSample(monitor, observed);
   const payload = renderNotification(monitor, sample.current);
   const simulation = { ...payload, event: 'monitor.simulation', title: '【模拟】' + payload.title };
@@ -394,6 +399,7 @@ async function deliver(user, payload, ids, { includeDisabled = false } = {}) {
 }
 
 async function flushPending(user, monitor) {
+  if (!monitor.pendingNotifications.length) return { sentCount: 0, failedCount: 0 };
   let sentCount = 0;
   let failedCount = 0;
   for (const pending of monitor.pendingNotifications) {
@@ -552,14 +558,13 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
       triggered, condition: monitor.kind === 'unified' ? describeRule(monitor) : monitor.description,
       reason: triggered ? '检测值满足提醒条件，已加入通知队列' : '检测成功，本次没有新的触发变化',
       summary: current.summary
-    });
+    }, false);
     const hasActiveRecipient = monitor.webhookIds.some((id) => user.settings.webhooks.some((hook) => hook.id === id && hook.enabled));
     monitor.lastError = monitor.pendingNotifications.length ? '有通知待发送，将在下次检查时重试' : hasActiveRecipient ? '' : '接收渠道均已停用，请启用至少一个渠道';
     if (!monitor.baselined) {
       monitor.baselined = true;
-      addEvent(user, 'info', '监控基线已建立', `${monitor.label} · ${current.summary}`, monitor.id);
+      addEvent(user, 'info', '监控基线已建立', `${monitor.label} · ${current.summary}`, monitor.id, false);
     }
-    persist();
     return { checked: true, triggered, conditionSatisfied, sentCount, failedCount };
   } catch (error) {
     monitor.lastCheckAt = new Date().toISOString();
@@ -588,8 +593,8 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
       responseBody: error.responseBody || responseSample || null, validation: error.message,
       current_value: null, previous_value: monitor.snapshot?.value ?? null, triggered: false,
       reason: '本次提取失败，保留上次有效状态；未发送状态变化通知'
-    });
-    addEvent(user, 'error', '检查失败', `${monitor.label} · ${error.message}`, monitor.id);
+    }, false);
+    addEvent(user, 'error', '检查失败', `${monitor.label} · ${error.message}`, monitor.id, false);
     return { checked: false, error: error.message, errorCode: error.code || null, retryAt: monitor.sourceRetryAt || null };
   } finally {
     activeChecks.delete(monitor.id);
@@ -671,7 +676,7 @@ async function checkSourceConnection(user, source, monitor = {}) {
   try { options = sourceOptions(user, monitor); } catch (error) { return '已尝试读取，但连接失败：' + error.message; }
   const cacheKey = user.id + ':' + source + ':' + createHash('sha256').update(options.proxyUrl + ':' + options.direct + ':' + options.mode).digest('hex');
   const cached = sourceCheckCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < 30_000) return cached.summary;
+  if (cached) return cached.summary;
   let summary;
   try {
     const normalized = sourceOf(source);
@@ -689,8 +694,7 @@ async function checkSourceConnection(user, source, monitor = {}) {
   } catch (error) {
     summary = '已尝试读取，但连接失败：' + String(error.cause?.code || error.message || '未知错误').slice(0, 160);
   }
-  sourceCheckCache.set(cacheKey, { at: Date.now(), summary });
-  if (sourceCheckCache.size > 64) sourceCheckCache.delete(sourceCheckCache.keys().next().value);
+  sourceCheckCache.set(cacheKey, { summary });
   return summary;
 }
 async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace, conversationInput = [], repairFeedback = '', timeZoneInput = '', draftInput = null) {
@@ -944,6 +948,16 @@ function sendJson(response, status, data, headers = {}) {
   response.end(JSON.stringify(data));
 }
 
+function sendState(request, response, user) {
+  const encoded = JSON.stringify(publicState(user));
+  const etag = '"' + createHash('sha256').update(encoded).digest('hex') + '"';
+  const tags = String(request.headers['if-none-match'] || '').split(',').map(tag => tag.trim().replace(/^W\//, ''));
+  const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'private, no-store', etag };
+  if (tags.includes(etag) || tags.includes('*')) { response.writeHead(304, headers); response.end(); return; }
+  response.writeHead(200, headers);
+  response.end(encoded);
+}
+
 async function readJson(request) {
   let raw = '';
   for await (const chunk of request) {
@@ -1031,7 +1045,7 @@ async function handler(request, response) {
         const recoveryCode = store.rotateRecoveryCode(user, body.password);
         return sendJson(response, 200, { recoveryCode });
       }
-      if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
+      if (request.method === 'GET' && pathname === '/api/state') return sendState(request, response, user);
       const productChoiceMatch=pathname.match(/^\/api\/monitors\/([^/]+)\/order-product\/(preview|select)$/);
       if(productChoiceMatch&&request.method==='POST'){
         const monitor=user.monitors.find(m=>m.id===productChoiceMatch[1]&&m.kind!=='reminder');if(!monitor)return sendJson(response,404,{error:'监控不存在'});
@@ -1382,14 +1396,14 @@ async function handler(request, response) {
           sourceProxy: selectedProxyUrl(user,input,saved),
           webhookIds: input.webhookIds, id: saved?.id };
         const previous = notificationPreviews.get(body.previousPreviewId);
-        const observed = previous?.userId === user.id && previous.expiresAt > Date.now() && previous.sourceSignature === previewSourceSignature(spec)
+        const observed = previous?.userId === user.id && previous.sourceSignature === previewSourceSignature(spec)
           ? previous.observed : saved && previewSourceSignature(saved) === previewSourceSignature(spec) ? saved.snapshot : null;
         return sendJson(response, 200, buildNotificationPreview(user, spec, observed));
       }
       if (request.method === 'POST' && pathname === '/api/notification-simulate') {
         const body = await readJson(request);
         const preview = notificationPreviews.get(body.previewId);
-        if (!preview || preview.userId !== user.id || preview.expiresAt <= Date.now()) return sendJson(response, 404, { error: '预览已失效，请刷新预览后再发送' });
+        if (!preview || preview.userId !== user.id) return sendJson(response, 404, { error: '预览已失效，请刷新预览后再发送' });
         if (preview.monitorId && !user.monitors.some((item) => item.id === preview.monitorId)) return sendJson(response, 404, { error: '任务已删除' });
         if (!preview.hooks.length) throw new Error('请先选择至少一个接收渠道');
         const ids = selectedWebhookIds(user, preview.hooks.map((hook) => hook.id));

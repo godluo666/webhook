@@ -8,6 +8,7 @@ import {chromium} from 'playwright-core';
 const {createOrderBrowser}=await import(pathToFileURL(path.join(process.cwd(),'lib/order-browser.js')));
 const {createOrderAccountService}=await import(pathToFileURL(path.join(process.cwd(),'lib/order-account.js')));
 const {createBrowserSource}=await import(pathToFileURL(path.join(process.cwd(),'lib/browser-source.js')));
+const {createSharedSourceReader}=await import(pathToFileURL(path.join(process.cwd(),'lib/shared-source.js')));
 const executable=process.env.MONITOR_BROWSER_EXECUTABLE||(process.platform==='win32'?'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe':'/usr/bin/chromium');
 process.env.MONITOR_BROWSER_EXECUTABLE=executable;
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -71,6 +72,14 @@ try{
  const waiting=read(base,{userId:'reader-queued',signal:queued.signal});queued.abort();await assert.rejects(waiting);first.abort();await assert.rejects(reading);await assertReleased();assert.equal(launches,countBefore+1,'Canceled queue does not launch another browser');
  assert.deepEqual((await fs.readdir(path.join(process.env.MONITOR_TEMP_DIR || dataDir,'browser-tmp'))).filter(name=>name.startsWith('source-')),[]);
  console.log('PASS canceled running and queued monitor previews release browser profiles and remove waiting entries');
+ const rawBefore=launches;
+ await Promise.all(Array.from({length:3},()=>read(base,{userId:'same-reader'})));
+ await assertReleased();assert.equal(launches-rawBefore,3);
+ const shared=createSharedSourceReader(read),sharedBefore=launches;
+ const snapshots=await Promise.all(Array.from({length:6},()=>shared(base,{userId:'same-reader'})));
+ assert.equal(launches-sharedBefore,1);assert.ok(snapshots.every(snapshot=>snapshot.body.includes('Product')));assert.equal(shared.active,0);await assertReleased();
+ await shared(base,{userId:'same-reader'});assert.equal(launches-sharedBefore,2);await assertReleased();
+ console.log('PASS six overlapping monitor reads launch one Chromium; a later check launches fresh Chromium; zero retained processes or profiles');
  console.log('PASS '+launches+' browser launches, '+processes.size+' owned process IDs checked; zero processes, temporary profiles or proxy leases remain');
 }finally{
  for(const browser of browsers)await browser.close().catch(()=>{});

@@ -14,6 +14,8 @@ let authMode = 'login';
 let emailVerificationEnabled = false;
 let workspaceEpoch = 0;
 let stateSyncVersion = 0;
+let workspacePoll = null, workspaceTag = null;
+let renderedMarkup = new WeakMap();
 let aiInputRevision = 0;
 const pendingActions = new Map();
 const emailTimers = new Map();
@@ -122,13 +124,14 @@ async function api(path, method = 'GET', body, options = {}) {
   const assertCurrent = () => { if (epoch !== workspaceEpoch) throw staleOperation(); };
   let response;
   try {
-    response = await fetch(path, { method, signal: options.signal, headers: { 'x-radar-request-id': requestId, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    response = await fetch(path, { method, signal: options.signal, headers: { 'x-radar-request-id': requestId, ...(options.etag ? { 'if-none-match': options.etag } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   } catch (cause) {
     assertCurrent();
     const error = new Error((options.signal?.aborted ? '操作超时，请查看账户状态后再继续。请求 ' : '页面与 Radar 服务的连接中断，请检查服务或反向代理是否正常。请求 ') + requestId + ' · ' + method + ' ' + path);
     error.code = 'RADAR_CONNECTION_FAILED'; error.requestId = requestId; error.cause = cause;
     throw error;
   }
+  if (options.allowNotModified && response.status === 304) { assertCurrent(); return null; }
   let result;
   try { result = await response.json(); }
   catch {
@@ -143,6 +146,7 @@ async function api(path, method = 'GET', body, options = {}) {
     error.code = result.code; error.requestId = result.requestId || requestId; error.status = response.status;
     throw error;
   }
+  if (options.responseInfo) options.responseInfo.etag = response.headers.get('etag');
   return result;
 }
 
@@ -310,26 +314,39 @@ function closeTaskEditor() {
 }
 $('#task-close').addEventListener('click', closeTaskEditor);
 
+function setListMarkup(element, html) {
+  if (renderedMarkup.get(element) === html && element.childNodes.length) return;
+  element.innerHTML = html;
+  renderedMarkup.set(element, html);
+}
+
+function refreshRelativeTimes() {
+  for (const element of document.querySelectorAll('[data-relative-time]')) {
+    const text = relativeTime(element.dataset.relativeTime);
+    if (element.textContent !== text) element.textContent = text;
+  }
+}
+
 function renderMonitors() {
   const list = $('#monitor-list');
   if (!appState.monitors.length) {
     $('#task-no-results').classList.add('hidden');
-    list.innerHTML = '<div class="empty-state"><strong>还没有任务</strong><span>创建监控或定时提醒，让关心的事自动通知你。</span><a class="button button-primary" href="#create">创建第一个任务</a></div>';
+    setListMarkup(list, '<div class="empty-state"><strong>还没有任务</strong><span>创建监控或定时提醒，让关心的事自动通知你。</span><a class="button button-primary" href="#create">创建第一个任务</a></div>');
     return;
   }
-  list.innerHTML = appState.monitors.map(monitor => {
+  setListMarkup(list, appState.monitors.map(monitor => {
     const reminder = monitor.kind === 'reminder';
     const status = monitor.completedAt ? ['已发送', ''] : !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastSourceError === 'SOURCE_CHALLENGE' ? ['等待网站验证', 'error'] : monitor.lastError ? [reminder ? '发送待重试' : '检查异常', 'error'] : reminder ? ['等待提醒', 'paused'] : monitor.baselined ? ['运行中', ''] : ['等待检查', 'paused'];
     const recipients = (monitor.webhookIds || []).map(id => appState.settings.webhooks.find(hook => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
-    const meta = reminder ? repeatLabel(monitor.repeatMinutes) + (monitor.completedAt ? ' · 已完成' : ' · 下次 ' + reminderDate(monitor.remindAt)) : '每 ' + intervalLabel(monitor.intervalMinutes) + ' 检查 · ' + relativeTime(monitor.lastCheckAt);
+    const meta = reminder ? escapeHtml(repeatLabel(monitor.repeatMinutes) + (monitor.completedAt ? ' · 已完成' : ' · 下次 ' + reminderDate(monitor.remindAt))) : escapeHtml('每 ' + intervalLabel(monitor.intervalMinutes) + ' 检查 · ') + '<span data-relative-time="' + escapeHtml(monitor.lastCheckAt || '') + '">' + escapeHtml(relativeTime(monitor.lastCheckAt)) + '</span>';
     const id = escapeHtml(monitor.id), source = usesNetworkSource(monitor) ? sourceRouteLabel(monitor) : '';
     const result = monitor.lastError || (reminder ? monitor.completedAt ? '提醒已送达' : monitor.enabled ? '到时自动发送' : '提醒已暂停' : monitor.lastResult ? friendlyResult(monitor) : monitor.kind === 'unified' ? monitor.last_test_result?.summary || '等待首次检测' : '等待首次检查');
     const button = (action, label, style = '') => '<button type="button" class="mini-button ' + style + '" data-action="' + action + '" data-id="' + id + '">' + label + '</button>';
     return '<article class="monitor-item" data-monitor-id="' + id + '" data-kind="' + (reminder ? 'reminder' : 'monitor') + '"><div class="monitor-top"><div class="monitor-heading"><span class="monitor-type-label">' + escapeHtml(reminder ? '定时提醒' : ruleTypeNames[monitor.type] || '监控任务') + '</span><h3 class="monitor-name" title="' + escapeHtml(monitor.label) + '">' + escapeHtml(monitor.label) + '</h3></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
       + '<div class="monitor-body"><div class="monitor-description" title="' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '">' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '</div><div class="monitor-current"><span>' + (monitor.lastError ? '需要处理' : reminder ? '提醒状态' : '当前结果') + '</span><strong class="' + (monitor.lastError ? 'monitor-error' : '') + '" title="' + escapeHtml(result) + '">' + escapeHtml(result) + '</strong></div></div>'
-      + '<div class="monitor-schedule"><div class="monitor-meta">' + escapeHtml(meta) + '</div><div class="monitor-routing"><span>通知：' + escapeHtml(recipients) + '</span>' + (source ? '<span class="monitor-source-route">出口：' + escapeHtml(source) + '</span>' : '') + '</div></div>'
+      + '<div class="monitor-schedule"><div class="monitor-meta">' + meta + '</div><div class="monitor-routing"><span>通知：' + escapeHtml(recipients) + '</span>' + (source ? '<span class="monitor-source-route">出口：' + escapeHtml(source) + '</span>' : '') + '</div></div>'
       + '<div class="monitor-actions"><div class="monitor-main-actions">' + button('edit', '编辑规则', 'task-edit') + (!monitor.completedAt ? button('toggle', monitor.enabled ? '暂停' : '继续') : '') + (!reminder ? button('check', '立即检查') : '') + '</div>' + button('delete', '删除', 'danger') + '</div></article>';
-  }).join('');
+  }).join(''));
   filterMonitors();
 }
 
@@ -356,10 +373,10 @@ $('#task-filters').addEventListener('click', event => {
 function renderEvents() {
   const list = $('#activity-list');
   if (!appState.events.length) {
-    list.innerHTML = '<div class="activity-empty">还没有活动记录。发送一条测试通知试试。</div>';
+    setListMarkup(list, '<div class="activity-empty">还没有活动记录。发送一条测试通知试试。</div>');
     return;
   }
-  list.innerHTML = appState.events.slice(0, 8).map((event) => `<div class="activity-row"><span class="event-dot ${escapeHtml(event.type)}"></span><div><div class="event-title">${escapeHtml(event.title)}</div><div class="event-detail">${escapeHtml(event.detail)}</div><div class="event-time">${escapeHtml(relativeTime(event.at))}</div></div></div>`).join('');
+  setListMarkup(list, appState.events.slice(0, 8).map((event) => `<div class="activity-row"><span class="event-dot ${escapeHtml(event.type)}"></span><div><div class="event-title">${escapeHtml(event.title)}</div><div class="event-detail">${escapeHtml(event.detail)}</div><div class="event-time" data-relative-time="${escapeHtml(event.at)}">${escapeHtml(relativeTime(event.at))}</div></div></div>`).join(''));
 }
 
 function renderLogs() {
@@ -367,7 +384,7 @@ function renderLogs() {
   const logs = $('#log-errors-only').checked ? all.filter(entry => entry.status === 'error') : all;
   $('#log-count').textContent = '显示 ' + logs.length + ' 条';
   const list = $('#log-list'), scrollTop = list.scrollTop;
-  list.innerHTML = logs.length ? logs.map(entry => '<div class="log-row ' + (entry.status === 'error' ? 'log-error' : '') + '"><strong>' + escapeHtml({ monitor: '检查', webhook: '发送', simulation: '模拟发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接', 'proxy-test': '代理测试' }[entry.kind] || entry.kind) + ' · ' + (entry.status === 'error' ? '失败' : '成功') + '</strong><span>' + escapeHtml(new Date(entry.at).toLocaleString('zh-CN')) + ' · ' + escapeHtml(entry.durationMs) + ' ms</span><p>' + escapeHtml(entry.detail) + '</p>' + (entry.url ? '<small>' + escapeHtml(entry.url) + '</small>' : '') + (entry.raw ? '<button type="button" class="mini-button" data-view-log="' + escapeHtml(entry.id) + '">查看原始记录</button>' : '') + '</div>').join('') : '<p class="field-help">没有符合条件的日志。</p>';
+  setListMarkup(list, logs.length ? logs.map(entry => '<div class="log-row ' + (entry.status === 'error' ? 'log-error' : '') + '"><strong>' + escapeHtml({ monitor: '检查', webhook: '发送', simulation: '模拟发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接', 'proxy-test': '代理测试' }[entry.kind] || entry.kind) + ' · ' + (entry.status === 'error' ? '失败' : '成功') + '</strong><span>' + escapeHtml(new Date(entry.at).toLocaleString('zh-CN')) + ' · ' + escapeHtml(entry.durationMs) + ' ms</span><p>' + escapeHtml(entry.detail) + '</p>' + (entry.url ? '<small>' + escapeHtml(entry.url) + '</small>' : '') + (entry.raw ? '<button type="button" class="mini-button" data-view-log="' + escapeHtml(entry.id) + '">查看原始记录</button>' : '') + '</div>').join('') : '<p class="field-help">没有符合条件的日志。</p>');
   list.scrollTop = scrollTop;
 }
 document.addEventListener('click', event => {
@@ -380,6 +397,7 @@ document.addEventListener('click', event => {
 });
 
 function render(force = false, resetEditorId) {
+  if (force) renderedMarkup = new WeakMap();
   renderStats();
   renderSourceSettings();
   renderMonitors();
@@ -1182,6 +1200,7 @@ async function withDrawerAction(button, work) {
 }
 
 function showAuth() {
+  workspacePoll?.abort(); workspaceTag = null; renderedMarkup = new WeakMap();
   workspaceEpoch++; stateSyncVersion++;
   for (const [button, operation] of pendingActions) { operation.controls.forEach((control, i) => { control.disabled = operation.disabled[i]; }); button.disabled = false; button.removeAttribute('aria-busy'); }
   pendingActions.clear();
@@ -1217,6 +1236,7 @@ function showAuth() {
 }
 
 function showWorkspace(state) {
+  workspacePoll?.abort(); workspaceTag = null;
   workspaceEpoch++; stateSyncVersion++;
   sourceSettingsEpoch += 1;
   appState = state;
@@ -1621,17 +1641,27 @@ document.addEventListener('click', (event) => {
   });
 });
 
+async function refreshWorkspace() {
+  if (document.hidden || workspacePoll || $('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy || pendingActions.size) return;
+  workspacePoll = new AbortController();
+  const epoch = sourceSettingsEpoch, userId = appState.user?.id, version = stateSyncVersion, authEpoch = workspaceEpoch;
+  const isCurrent = () => epoch === sourceSettingsEpoch && version === stateSyncVersion && !pendingActions.size && userId === appState.user?.id && !$('.app-shell').classList.contains('auth-hidden');
+  const responseInfo = {};
+  const etag = workspaceTag?.authEpoch === authEpoch && workspaceTag.userId === userId ? workspaceTag.etag : null;
+  try {
+    const state = await api('/api/state', 'GET', undefined, { etag, allowNotModified: true, responseInfo, signal: AbortSignal.any([workspacePoll.signal, AbortSignal.timeout(20000)]) });
+    if (isCurrent()) {
+      if (state) { appState = state; workspaceTag = { authEpoch, userId, etag: responseInfo.etag }; render(); }
+      else refreshRelativeTimes();
+    }
+  } catch (error) { if (isCurrent() && error.message === '请先登录') showAuth(); }
+  finally { workspacePoll = null; }
+}
+
 async function init() {
-    let polling=null;window.addEventListener('pagehide',()=>polling?.abort());
-    setInterval(async () => {
-      if (document.hidden || polling || $('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy || pendingActions.size) return;
-      polling=new AbortController();
-      const epoch = sourceSettingsEpoch, userId = appState.user?.id, version = stateSyncVersion;
-      const isCurrent = () => epoch === sourceSettingsEpoch && version === stateSyncVersion && !pendingActions.size && userId === appState.user?.id && !$('.app-shell').classList.contains('auth-hidden');
-      try { const state = await api('/api/state','GET',undefined,{signal:AbortSignal.any([polling.signal,AbortSignal.timeout(20000)])}); if (isCurrent()) { appState = state; render(); } }
-      catch (error) { if (isCurrent() && error.message === '请先登录') showAuth(); }
-      finally{polling=null;}
-    }, 30000);
+  window.addEventListener('pagehide', () => workspacePoll?.abort());
+  document.addEventListener('visibilitychange', () => { if (document.hidden) workspacePoll?.abort(); });
+  setInterval(refreshWorkspace, 30000);
   try {
     const status = await api('/api/auth/status');
     if (status.signupCodeRequired) $('#auth-screen').dataset.signupCodeRequired = '1';
