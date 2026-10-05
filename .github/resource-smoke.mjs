@@ -36,7 +36,7 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/slow'){const timer=setTimeout(()=>res.end(html),5000);res.once('close',()=>clearTimeout(timer));}else res.end(html);
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const base='http://127.0.0.1:'+server.address().port;
-const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;throw error;}};
+const alive=pid=>{try{process.kill(pid,0);return true;}catch(error){if(error.code==='ESRCH')return false;if(error.code==='EPERM')return true;throw error;}};
 async function assertReleased(){
  for(let i=0;i<80;i++){
   const running=[...processes].filter(alive),existing=[];for(const directory of profiles){try{await fs.stat(directory);existing.push(directory);}catch(error){if(error.code!=='ENOENT')throw error;}}
@@ -57,9 +57,11 @@ try{
  await assert.rejects(openBrowser({url:base+'/missing'},{loginCheck:{url:base+'/missing'}}),error=>error.code==='ORDER_LOGIN_UNVERIFIED');await assertReleased();
  const one=await openBrowser({url:base},{loginOnly:true}),two=await openBrowser({url:base},{loginOnly:true});
  await assert.rejects(openBrowser({url:base},{loginOnly:true}),error=>error.code==='ORDER_BROWSER_BUSY');
+ const restored=await one.remote.finish();assert.equal(restored.check.url,base+'/','Saving remains usable with another login window open');
  const reserved=await openBrowser({url:base,program:{checkout:{}},executionMode:'submit'},{});
+ const secondOrder=await openBrowser({url:base,program:{checkout:{}},executionMode:'submit'},{});
  await assert.rejects(openBrowser({url:base,program:{checkout:{}},executionMode:'submit'},{}),error=>error.code==='ORDER_BROWSER_BUSY');
- await one.close();await two.close();await reserved.close();await assertReleased();
+ await one.close();await two.close();await reserved.close();await secondOrder.close();await assertReleased();
  console.log('PASS actual Chromium concurrency limit and reserved triggered-order capacity; no orders submitted');
  console.log('PASS login expiry, canceled startup, browser watchdog and failed login release resources without a later operation');
  const read=createBrowserSource({dataDir,launchContext:async(profile,options)=>{profiles.add(profile);const context=await chromium.launchPersistentContext(profile,{...options,executablePath:executable});await track(context.browser());return context;}});
