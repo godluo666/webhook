@@ -113,8 +113,9 @@ test('多渠道选择、单独测试与失败渠道重试', async () => {
     assert.equal(saved.settings.hasAiKey, true);
     assert.equal(JSON.stringify(saved).includes('secret-test-key'), false);
     const parsed = await request(base, '/api/parse', 'POST', { instruction: `监控 http://127.0.0.1:${mockPort}/source 当库存恢复时提醒我` });
-    assert.equal(parsed.monitor.kind, 'generated');
-    assert.equal(parsed.monitor.plan.keyword, '有货');
+    assert.equal(parsed.monitor.kind, 'unified');
+    assert.equal(parsed.monitor.type, 'product_stock');
+    assert.equal(parsed.monitor.last_test_result.current_value, 'out_of_stock');
     assert.equal(parsed.parser, 'ai');
     assert.deepEqual(aiCalls, ['Bearer secret-test-key']);
     const dmit = await request(base, '/api/parse', 'POST', { instruction: 'DMIT 套餐补货，第三方库存列表中，任意有货时通知' });
@@ -686,7 +687,7 @@ test('先生成可确认草稿，补上地址即可试跑与创建，不必再�
   }
 });
 
-test('AI 追问可默认的参数时先尝试生成，并保留本次方案说明', async () => {
+test('AI 追问可默认的参数时先尝试生成，使用已验证的条件说明方案', async () => {
   let calls = 0;
   const mock = http.createServer(async (req, res) => {
     if (req.url === '/health') { res.writeHead(200); res.end('ok'); return; }
@@ -714,7 +715,8 @@ test('AI 追问可默认的参数时先尝试生成，并保留本次方案说�
     const ready = await request(base, '/api/parse', 'POST', { instruction: '这个服务变慢就通知我', sourceUrl: 'http://127.0.0.1:' + port + '/health' });
     assert.equal(ready.status, 'ready');
     assert.equal(ready.monitor.plan.thresholdMs, 3000);
-    assert.match(ready.message, /先按超过 3 秒/);
+    assert.match(ready.message, /接口响应超过 3 秒/);
+    assert.match(ready.message, /通过自动验证/);
     assert.equal(ready.assumptions.length, 2);
     assert.equal(calls, 2);
   } finally {
@@ -1120,7 +1122,7 @@ test('AI 连接测试修复完整地址斜杠，并保留脱敏原始响应与�
   }
 });
 
-test('代理一键应用仅修改本账户网页任务并保留检测基线，代理凭据不回显', async () => {
+test('账户代理更新保留各规则出口选择与检测基线，且凭据不回显', async () => {
   const source = http.createServer((req, res) => {
     if (req.url === '/proxy-probe') { res.setHeader('content-type', 'application/json'); res.end('{"ip":"203.0.113.10"}'); return; }
     res.end('no stock');
@@ -1142,7 +1144,8 @@ test('代理一键应用仅修改本账户网页任务并保留检测基线，�
     assert.equal(saved.settings.hasSourceProxy, true);
     assert.equal(saved.settings.sourceProxyEndpoint, proxy.endpoint);
     assert.equal(JSON.stringify(saved).includes('apply-private-secret'), false);
-    assert.equal(saved.monitors[0].fetch.proxy, 'default');
+    assert.equal(saved.monitors[0].fetch.proxy, 'direct');
+    assert.deepEqual(saved.monitors[0], previous);
     assert.equal(saved.monitors[0].fetch.mode, 'http');
     assert.deepEqual(saved.monitors[0].snapshot, previous.snapshot);
     assert.equal(saved.monitors[0].baselined, previous.baselined);

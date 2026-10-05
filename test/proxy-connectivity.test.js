@@ -191,7 +191,8 @@ test('proxy connectivity needs no target, reports exit IP without saving, and im
     assert.equal(saved.settings.sourceProxyEndpoint, proxy.endpoint);
     assert.equal(saved.settings.sourceProxyTest.ip, report.ip);
     assert.ok(Number.isFinite(Date.parse(saved.settings.sourceProxyTest.testedAt)));
-    assert.equal(saved.monitors[0].fetch.proxy, 'default');
+    assert.equal(saved.monitors[0].fetch.proxy, 'direct');
+    assert.deepEqual(monitorState(saved.monitors[0]), previousMonitor);
     assert.deepEqual(saved.monitors[0].snapshot, created.monitors[0].snapshot);
     assert.equal(saved.monitors[0].baselined, created.monitors[0].baselined);
     const again = await app.ok(alice, '/api/source-proxy', 'PUT', { applyAll: true });

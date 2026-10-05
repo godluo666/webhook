@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/spatial.css">
   <link rel="stylesheet" href="/premium.css">
   <link rel="stylesheet" href="/controls.css">
+  <script src="/rule-ui.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -54,13 +55,20 @@
               <div class="card-title-row"><div><div class="eyebrow">SMART MONITOR</div><h2 id="create-heading">描述你想关注的事</h2></div><div class="section-icon purple" aria-hidden="true">✦</div></div>
               <p id="create-subtitle" class="section-subtitle">说出你想关注的事。AI 会先拟好方案，自动试跑；确认后开始监控或定时提醒。</p>
 <section id="revision-context" class="revision-context hidden" aria-label="正在修改的任务"><div><span>正在修改</span><strong id="revision-task-name"></strong><p>AI 对话只属于本次修改，确认后更新原任务。</p></div><button id="cancel-revision" class="button button-outline" type="button">取消修改</button></section>
+              <div class="monitor-type-options" aria-label="创建监控">
+                <button type="button" data-monitor-type="product_stock"><strong>商品库存</strong><span>有货时提醒我 · 默认30秒</span></button>
+                <button type="button" data-monitor-type="price_change"><strong>价格变化</strong><span>降价或低于目标价格</span></button>
+                <button type="button" data-monitor-type="webpage_change"><strong>网页变化</strong><span>关注内容有变化</span></button>
+                <button type="button" data-monitor-type="api_monitor"><strong>接口状态</strong><span>异常或恢复时提醒</span></button>
+              </div>
               <form id="parse-form">
                 <label for="instruction" class="field-label">告诉我你希望发生什么</label>
-                <textarea id="instruction" rows="4" placeholder="例如：订单接口连续失败 3 次通知我；或明天上午 9 点提醒我开会"></textarea>
-                <details class="source-optional"><summary>我知道具体监控地址（选填）</summary><label for="instruction-url" class="field-label">来源地址</label><input id="instruction-url" type="text" placeholder="https://example.com/health、tcp://主机:端口 或 log:app.log" autocomplete="off"><p id="local-source-hint" class="field-help"></p></details>
-                <div class="composer-bottom"><span id="ai-status">先生成方案，参数可以之后调整</span><button class="button button-primary" type="submit" id="parse-button"><span>生成方案</span><span>↗</span></button></div>
+                <textarea id="instruction" rows="4" placeholder="例如：帮我监控这个商品什么时候有货；价格低于100通知我"></textarea>
+                <div class="source-optional"><label for="instruction-url" class="field-label">商品、网页或接口链接</label><input id="instruction-url" type="text" placeholder="粘贴商品、网页或接口链接" autocomplete="off"><details class="advanced-source"><summary>其他来源 · 本机日志或 TCP</summary><p id="local-source-hint" class="field-help"></p></details></div>
+                <details id="create-source-settings" class="advanced-source"><summary>此任务的网络出口（选填）</summary><label class="field-label" for="create-proxy-mode">网络出口</label><select id="create-proxy-mode"><option value="default">账户默认出口</option><option value="direct">直接连接 · 跳过代理</option><option value="custom">独立代理 · 仅此任务</option></select><div id="create-proxy-address" class="hidden"><label class="field-label" for="create-source-proxy">此任务的代理地址</label><input id="create-source-proxy" type="password" autocomplete="new-password" spellcheck="false" placeholder="http://user:pass@host:port 或 ss://…"></div><p class="field-help">页面分析、验证和后续检测都使用此出口。每条监控可以设置不同代理。</p></details>
+                <div class="element-actions"><button type="button" class="button button-outline" id="create-pick-element">直接选择网页元素</button><span class="field-help">自动分析没有找到目标时，可以点选价格或库存区域。</span></div><div class="composer-bottom"><span id="ai-status">先生成方案，参数可以之后调整</span><button class="button button-primary" type="submit" id="parse-button"><span>生成方案</span><span>↗</span></button></div>
               </form>
-              <p class="assistant-context-note">对话只保留在当前创建草稿中。每次仅发送原始需求、当前规则草稿和最近 6 条对话；创建、重新开始或退出后清空。</p>
+              <p class="assistant-context-note">对话只保留在当前创建草稿中。每次发送原始需求、页面分析摘要、当前规则草稿和最近 6 条对话；创建、重新开始或退出后清空。</p>
               <section id="assistant-dialog" class="assistant-dialog hidden" aria-label="AI 监控助手"><div class="assistant-dialog-head"><span class="assistant-avatar" aria-hidden="true">✦</span><div><strong id="assistant-title">AI 创建助手</strong><span id="assistant-phase" role="status">等待需求</span></div><button id="assistant-reset" class="mini-button assistant-reset" type="button">重新开始</button></div><div id="assistant-messages" class="assistant-messages" role="log" aria-live="polite"></div><form id="assistant-reply-form" class="assistant-reply-form"><label for="assistant-reply" class="field-label">继续聊，或告诉我想改哪里</label><div class="assistant-reply-row"><textarea id="assistant-reply" rows="2" maxlength="2000" placeholder="不确定也没关系，可以问我原因，或直接说出你的想法"></textarea><button type="submit" id="assistant-reply-button" class="button button-outline">发送消息</button></div></form></section>
               <p id="source-check-result" class="source-check-result hidden" role="status"></p><div id="preview" class="preview hidden" aria-live="polite"></div>
             </section>
@@ -85,20 +93,20 @@
 <section id="settings" class="workspace-section settings-card">
               <div class="section-heading"><div><div class="eyebrow">PREFERENCES</div><h2 id="settings-page-title">通知渠道</h2><p id="settings-page-subtitle">管理 Webhook 接收地址与发送方式。</p></div></div>
 
-              <div class="settings-layout"><form id="settings-form" class="stacked-form settings-content">
+              <div class="settings-layout"><div class="stacked-form settings-content">
                 <section id="channels" class="settings-group"><div class="settings-group-head"><div><h3>接收地址</h3><p>添加和管理 Webhook 接收地址。</p></div><button type="button" id="add-webhook" class="button button-outline">添加渠道</button></div>
                 <div class="channel-table-wrap"><table class="channel-table"><thead><tr><th>名称</th><th>类型</th><th>状态</th><th>地址</th><th></th></tr></thead><tbody id="webhook-list"></tbody></table></div><div id="channel-empty" class="channel-empty hidden">还没有通知渠道。添加一个 Webhook 地址开始使用。</div><aside id="webhook-drawer" class="webhook-drawer hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title"><div class="drawer-head"><div><span class="eyebrow">CHANNEL</span><h3 id="drawer-title">添加渠道</h3></div><button type="button" id="drawer-close" class="mini-button" aria-label="关闭编辑面板">关闭</button></div><div id="drawer-fields"></div><div class="drawer-actions"><button type="button" id="drawer-delete" class="mini-button danger hidden">删除渠道</button><button type="button" id="drawer-test" class="button button-outline">测试连接</button><button type="button" id="drawer-save" class="button button-dark">保存渠道</button></div></aside><div id="drawer-backdrop" class="drawer-backdrop hidden"></div>
                 <p class="field-help">最多可添加 20 个渠道。点击编辑可设置发送格式和渠道专属选项。</p>
                 </section>
-                <section id="ai-settings" class="ai-settings settings-group" aria-labelledby="ai-settings-title"><div class="ai-settings-heading"><h3 id="ai-settings-title">AI 生成设置</h3><p>自然语言生成规则需要你的 OpenAI 兼容 Chat Completions API</p></div>
+                <section id="ai-settings" class="ai-settings settings-group" aria-labelledby="ai-settings-title"><form id="settings-form" class="stacked-form" novalidate><div class="ai-settings-heading"><h3 id="ai-settings-title">AI 生成设置</h3><p>自然语言生成规则需要你的 OpenAI 兼容 Chat Completions API</p></div>
                   <label for="ai-base-url" class="field-label">API 地址</label><input id="ai-base-url" type="url" placeholder="https://api.openai.com/v1" autocomplete="off">
                   <label for="ai-model" class="field-label">模型名称</label><input id="ai-model" type="text" placeholder="填写兼容 Chat Completions 的模型名" autocomplete="off">
                   <label for="ai-key" class="field-label">API Key <span id="key-indicator" class="key-indicator"></span></label><input id="ai-key" type="password" placeholder="未设置" autocomplete="new-password">
                   <div class="ai-key-actions"><span class="field-help">已保存的 Key 不会在页面中回显；输入新 Key 后保存即可替换。</span><button id="clear-ai-key-button" type="button" class="mini-button danger hidden">清除已保存的 Key</button></div>
                   <div class="ai-test-row"><button type="button" id="ai-test-button" class="button button-outline">测试 API 连接</button><span id="ai-test-result" aria-live="polite"></span></div><a id="ai-test-log" href="#activity" class="field-help hidden">查看连接日志 ↗</a>
-                </section>
-                <div class="settings-actions"><span id="settings-dirty" class="dirty-indicator" aria-live="polite"></span><button class="button button-dark" type="submit" id="save-button">保存渠道</button></div>
-              </form></div>
+                <div class="settings-actions"><span id="settings-dirty" class="dirty-indicator" aria-live="polite"></span><button class="button button-dark" type="submit" id="save-button">保存 AI 设置</button></div>
+                </form></section>
+              </div></div>
             </section>
 
 <section id="fetch-settings" class="workspace-section source-settings">

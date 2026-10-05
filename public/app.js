@@ -12,6 +12,32 @@ let drawerReturnFocus = null;
 let toastTimer;
 let authMode = 'login';
 let emailVerificationEnabled = false;
+let workspaceEpoch = 0;
+let stateSyncVersion = 0;
+let aiInputRevision = 0;
+const pendingActions = new Map();
+const emailTimers = new Map();
+let drawerAction = null;
+
+function staleOperation() { const error = new Error('此操作所属的会话已结束'); error.code = 'STALE_OPERATION'; return error; }
+function randomId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  if (globalThis.crypto?.getRandomValues) globalThis.crypto.getRandomValues(bytes);
+  else bytes.forEach((_, index) => { bytes[index] = Math.floor(Math.random() * 256); });
+  bytes[6] = (bytes[6] & 15) | 64; bytes[8] = (bytes[8] & 63) | 128;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join('-');
+}
+async function copyText(value) {
+  try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(value); return; } } catch { /* fall back on HTTP or denied clipboard permission */ }
+  const focused = document.activeElement, input = document.createElement('textarea');
+  input.value = value; input.readOnly = true; input.style.cssText = 'position:fixed;left:-10000px;top:0';
+  document.body.append(input); input.select();
+  try { if (!document.execCommand('copy')) throw new Error('复制失败，请手动选择内容'); }
+  finally { input.remove(); if (focused?.isConnected) focused.focus(); }
+}
+
 
 const sidebarShell = $('.app-shell');
 const sidebarToggle = $('#sidebar-toggle');
@@ -60,7 +86,7 @@ function syncNavigation(resetScroll = false) {
   $('#current-page-label').textContent = pageLabel;
   $('#settings-page-title').textContent = view === 'ai-settings' ? 'AI 设置' : '通知渠道';
   $('#settings-page-subtitle').textContent = view === 'ai-settings' ? '配置生成规则所用的模型与 API。' : '管理 Webhook 接收地址与发送方式。';
-  $('#save-button').textContent = view === 'ai-settings' ? '保存 AI 设置' : '保存渠道';
+  $('#save-button').textContent = '保存 AI 设置';
   document.title = pageLabel + ' · Webhook Radar';
   if (resetScroll) requestAnimationFrame(() => window.scrollTo({ top: 0, behavior: 'instant' }));
 }
@@ -92,11 +118,13 @@ function toast(message, error = false) {
 }
 
 async function api(path, method = 'GET', body) {
-  const requestId = globalThis.crypto?.randomUUID?.() || Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
+  const requestId = randomId(), epoch = workspaceEpoch;
+  const assertCurrent = () => { if (epoch !== workspaceEpoch) throw staleOperation(); };
   let response;
   try {
     response = await fetch(path, { method, headers: { 'x-radar-request-id': requestId, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
   } catch (cause) {
+    assertCurrent();
     const error = new Error('页面与 Radar 服务的连接中断，请检查服务或反向代理是否正常。请求 ' + requestId + ' · ' + method + ' ' + path);
     error.code = 'RADAR_CONNECTION_FAILED'; error.requestId = requestId; error.cause = cause;
     throw error;
@@ -104,10 +132,12 @@ async function api(path, method = 'GET', body) {
   let result;
   try { result = await response.json(); }
   catch {
+    assertCurrent();
     const error = new Error('Radar 返回 HTTP ' + response.status + '，但响应不是有效 JSON。请检查反向代理和服务日志。请求 ' + requestId + ' · ' + path);
     error.code = 'RADAR_INVALID_RESPONSE'; error.requestId = requestId;
     throw error;
   }
+  assertCurrent();
   if (!response.ok) {
     const error = new Error(result.error || '请求失败：HTTP ' + response.status);
     error.code = result.code; error.requestId = result.requestId || requestId; error.status = response.status;
@@ -136,16 +166,58 @@ function renderStats() {
 }
 
 
-function usesWebSource(monitor) {
-  return monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && ['log', 'service'].includes(monitor.plan.sourceType));
+function usesNetworkSource(monitor) {
+  return monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && monitor.plan?.sourceType === 'log');
+}
+function readCreateSourceSettings() {
+  const proxy = $('#create-proxy-mode').value, sourceProxy = $('#create-source-proxy').value.trim();
+  if (proxy === 'custom' && !sourceProxy) throw new Error('请填写此任务的代理地址，或选择账户默认／直接连接');
+  return { fetch: { mode: 'auto', proxy }, ...(proxy === 'custom' ? { sourceProxy } : {}) };
+}
+$('#create-proxy-mode').addEventListener('change', () => $('#create-proxy-address').classList.toggle('hidden', $('#create-proxy-mode').value !== 'custom'));
+function sourceRouteLabel(monitor) {
+  const proxy = monitor.fetch?.proxy || 'default';
+  if (proxy === 'custom') return '独立代理 · ' + (monitor.sourceProxyEndpoint || '待配置') + (monitor.sourceProxyTest?.ip ? ' · 出口 IP ' + monitor.sourceProxyTest.ip : '');
+  if (proxy === 'direct') return '直接连接';
+  return appState.settings.hasSourceProxy ? '账户默认代理 · ' + appState.settings.sourceProxyEndpoint : '账户默认 · 服务器出口';
+}
+function intervalLabel(minutes) {
+  const seconds = Math.round(Number(minutes) * 60000) / 1000;
+  if (seconds < 60) return seconds + ' 秒';
+  if (seconds % 3600 === 0) return seconds / 3600 + ' 小时';
+  return Number((seconds / 60).toFixed(4)) + ' 分钟';
+}
+function intervalFields(monitor, scope) {
+  const minutes = Number(monitor.intervalMinutes) || 5;
+  const unit = minutes < 1 ? 'seconds' : minutes % 60 === 0 ? 'hours' : 'minutes';
+  const value = unit === 'seconds' ? Number((minutes * 60).toFixed(4)) : unit === 'hours' ? minutes / 60 : minutes;
+  const attr = scope === 'edit' ? 'class="edit-interval"' : 'id="rule-interval"';
+  return '<label>多久检查一次<div class="interval-control"><input ' + attr + ' type="number" min="0" step="any" value="' + value + '" aria-label="检查间隔"><select class="interval-unit" aria-label="检查间隔单位">'
+    + [['seconds', '秒'], ['minutes', '分钟'], ['hours', '小时']].map(([key, name]) => '<option value="' + key + '" ' + (key === unit ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></div><span class="interval-presets">' + [10, 30, 60, 300, 600].map(seconds => '<button type="button" class="mini-button" data-interval-preset="' + seconds + '">' + (seconds < 60 ? seconds + '秒' : seconds / 60 + '分钟') + '</button>').join('') + '</span><span class="field-help">快捷值仅供选择，可自定义 1 秒起的周期；只改周期会保留检测条件与历史。</span></label>';
+}
+function readInterval(root, selector) {
+  const value = Number(root.querySelector(selector).value);
+  const unit = root.querySelector('.interval-unit')?.value || 'minutes';
+  const minutes = value * ({ seconds: 1 / 60, minutes: 1, hours: 60 }[unit]);
+  if (!Number.isFinite(minutes) || minutes < 1 / 60 || !Number.isSafeInteger(Math.round(minutes * 60000))) throw new Error('请输入至少 1 秒的有效检查间隔');
+  return minutes;
 }
 function sourceFetchFields(monitor) {
-  if (!usesWebSource(monitor)) return '';
+  if (!usesNetworkSource(monitor)) return '';
   const mode = monitor.fetch?.mode || 'auto', proxy = monitor.fetch?.proxy || 'default';
-  return '<label>读取方式<select class="source-fetch-mode">'
-    + [['auto', '自动 · 遇到验证时尝试浏览器'], ['browser', '浏览器 · 等待页面加载'], ['http', '直接请求 · 适合公开接口']].map(([value, name]) => '<option value="' + value + '" ' + (mode === value ? 'selected' : '') + '>' + name + '</option>').join('')
-    + '</select></label><label>网络出口<select class="source-fetch-proxy"><option value="default" ' + (proxy === 'default' ? 'selected' : '') + '>账户设置' + (appState.settings.hasSourceProxy ? ' · 使用代理' : ' · 服务器出口') + '</option><option value="direct" ' + (proxy === 'direct' ? 'selected' : '') + '>直接连接 · 跳过代理</option></select></label>'
-    + '<p class="field-help editor-wide">真实浏览器仍可能被出口 IP 限制。可在<a href="#fetch-settings">读取设置</a>配置代理并测试目标网站。代理仅用于监控读取。</p>';
+  const service = monitor.kind === 'unified' && monitor.extraction_rule?.kind === 'service' || monitor.kind === 'generated' && monitor.plan?.sourceType === 'service';
+  const method = service ? '<input type="hidden" class="source-fetch-mode" value="http"><p class="field-help editor-wide">通过下方选择的出口检测服务状态。</p>' : '<label>读取方式<select class="source-fetch-mode">'
+    + [['auto', '自动 · 遇到验证时尝试浏览器'], ['browser', '浏览器 · 等待页面加载'], ['http', '直接请求 · 适合公开接口']].map(([value, name]) => '<option value="' + value + '" ' + (mode === value ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></label>';
+  return method + '<label>网络出口<select class="source-fetch-proxy"><option value="default" ' + (proxy === 'default' ? 'selected' : '') + '>账户设置' + (appState.settings.hasSourceProxy ? ' · 使用代理' : ' · 服务器出口') + '</option><option value="direct" ' + (proxy === 'direct' ? 'selected' : '') + '>直接连接 · 跳过代理</option><option value="custom" ' + (proxy === 'custom' ? 'selected' : '') + '>独立代理 · 仅此任务</option></select></label>'
+    + '<div class="source-custom-proxy editor-wide ' + (proxy === 'custom' ? '' : 'hidden') + '"><label>此任务的代理地址<input class="source-proxy-input" type="password" autocomplete="new-password" spellcheck="false" value="' + escapeHtml(monitor.sourceProxy || '') + '" placeholder="' + (monitor.hasSourceProxy ? '已保存独立代理；留空保持当前地址' : 'http://user:pass@host:port 或 ss://…') + '"></label>'
+    + '<div class="rule-proxy-actions"><button type="button" class="button button-outline" data-source-proxy-test>测试独立代理</button><span class="rule-proxy-result" role="status">' + escapeHtml(monitor.sourceProxyEndpoint ? monitor.sourceProxyEndpoint + (monitor.sourceProxyTest?.ip ? ' · ' + sourceConnectionSummary(monitor.sourceProxyTest) : '') + (monitor.sourceProxyTest?.testedAt ? ' · 验证于 ' + new Date(monitor.sourceProxyTest.testedAt).toLocaleString('zh-CN') : '') : '保存前会验证代理连通性；验证失败保留原设置。') + '</span></div></div>'
+    + '<p class="field-help editor-wide">每条监控可以使用不同代理。此处选择优先于账户默认出口，AI 修改和修复会保留此设置。</p>';
+}
+function readSourceProxy(root, monitor) {
+  const custom = root.querySelector('.source-fetch-proxy')?.value === 'custom';
+  const value = root.querySelector('.source-proxy-input')?.value.trim();
+  if (custom && !value && !monitor.hasSourceProxy && !monitor.sourceProxy) throw new Error('请填入此任务的独立代理地址，或选择账户默认／直接连接');
+  return custom ? value || monitor.sourceProxy || undefined : undefined;
 }
 function readSourceFetch(root, monitor) {
   return root.querySelector('.source-fetch-mode') ? { mode: root.querySelector('.source-fetch-mode').value, proxy: root.querySelector('.source-fetch-proxy').value } : monitor.fetch;
@@ -159,6 +231,7 @@ function conditionFields(monitor, scope) {
   const attr = (key) => scope === 'edit' ? 'class="edit-' + key + '"' : 'id="rule-' + key + '"';
   const field = (name, key, value, type = 'text') => '<label>' + name + '<input ' + attr(key) + ' type="' + type + '" value="' + escapeHtml(value || '') + '"></label>';
   const select = (name, key, options) => '<label>' + name + '<select ' + attr(key) + '>' + options + '</select></label>';
+  if (monitor.kind === 'unified') return unifiedRuleEditor(monitor);
   if (monitor.kind === 'generated') return generatedPlanEditor(monitor.plan, scope === 'edit' ? 'edit-plan-' + monitor.id : 'rule-plan', scope === 'edit' ? 'edit-plan' : '');
   if (monitor.kind === 'webpage') return field('要关注的文字', 'keyword', monitor.keyword) + select('什么时候提醒', 'mode', '<option value="contains" ' + (monitor.mode === 'contains' ? 'selected' : '') + '>文字出现时</option><option value="absent" ' + (monitor.mode === 'absent' ? 'selected' : '') + '>文字消失时</option>');
   if (monitor.kind === 'dmit') return select('什么时候提醒', 'trigger-mode', '<option value="restock" ' + (monitor.triggerMode !== 'any-available' ? 'selected' : '') + '>由无货变为有货</option><option value="any-available" ' + (monitor.triggerMode === 'any-available' ? 'selected' : '') + '>任意有货 · 首次满足也通知</option>');
@@ -181,33 +254,55 @@ function taskEditor(monitor, scope = 'edit') {
   ], token);
   const source = '<div class="rule-fields">' + (monitor.kind !== 'dmit' ? field('要关注的地址或日志文件', 'url', monitor.url, 'text') : '<p class="field-help editor-wide">使用第三方库存数据源。</p>') + sourceFetchFields(monitor) + '</div>';
   return ruleSections([
-    ['基本信息', '<div class="rule-fields">' + field('任务名称', 'label', monitor.label, 'text', 'maxlength="60"') + field('多久检查一次（分钟）', 'interval', monitor.intervalMinutes, 'number', 'min="' + (monitor.kind === 'generated' && ['service', 'log'].includes(monitor.plan.sourceType) ? 1 : 5) + '" max="1440"') + '</div><p class="field-help">复杂的条件可以通过“与 AI 修改”调整，确认后才会更新。</p>'],
+    ['基本信息', '<div class="rule-fields">' + field('任务名称', 'label', monitor.label, 'text', 'maxlength="60"') + intervalFields(monitor, scope) + '</div><p class="field-help">支持秒、分钟、小时，保存后随时调整。复杂条件可通过“与 AI 修改”更新。</p>'],
     ['提醒条件', '<div class="rule-fields">' + conditionFields(monitor, scope) + '</div>'],
     ['通知', notifications],
     ['读取设置', source + '<p class="field-help">修改来源地址或提醒条件会重新记录状态。仅切换读取方式或代理会保留上次有效状态。</p>']
   ], token);
 }
-function renderMonitors() {
+function renderMonitors(resetEditorId) {
   const list = $('#monitor-list');
+  const expandedMenus = new Set([...list.querySelectorAll('.monitor-more[open]')].map(node => node.dataset.id));
+  const editors = [...list.querySelectorAll('.monitor-route[open]')].filter((node) => node.dataset.id !== resetEditorId);
+  const focused = document.activeElement;
+  const selection = focused && 'selectionStart' in focused ? [focused.selectionStart, focused.selectionEnd] : null;
   if (!appState.monitors.length) { list.innerHTML = '<div class="empty-state"><strong>还没有任务</strong><span>在智能创建中描述你的需求。</span></div>'; return; }
   list.innerHTML = appState.monitors.map((monitor) => {
     const reminder = monitor.kind === 'reminder';
     const status = monitor.completedAt ? ['已发送', ''] : !monitor.enabled ? ['已暂停', 'paused'] : monitor.lastSourceError === 'SOURCE_CHALLENGE' ? ['等待网站验证', 'error'] : monitor.lastError ? [reminder ? '发送待重试' : '检查异常', 'error'] : reminder ? ['等待提醒', 'paused'] : monitor.baselined ? ['运行中', ''] : ['等待检查', 'paused'];
     const recipients = (monitor.webhookIds || []).map((id) => appState.settings.webhooks.find((hook) => hook.id === id)?.name).filter(Boolean).join('、') || '未设置';
-    const meta = reminder ? escapeHtml(repeatLabel(monitor.repeatMinutes) + ' · 下次 ' + reminderDate(monitor.remindAt)) : '每 ' + monitor.intervalMinutes + ' 分钟检查 · ' + escapeHtml(relativeTime(monitor.lastCheckAt)) + (monitor.lastFetch ? ' · ' + (monitor.lastFetch.method === 'browser' ? '浏览器读取' : '直接请求') + (monitor.lastFetch.route === 'proxy' ? ' · 代理出口' : '') : '');
+    const meta = reminder ? escapeHtml(repeatLabel(monitor.repeatMinutes) + ' · 下次 ' + reminderDate(monitor.remindAt)) : '每 ' + intervalLabel(monitor.intervalMinutes) + ' 检查 · ' + escapeHtml(relativeTime(monitor.lastCheckAt)) + (monitor.lastFetch ? ' · ' + (monitor.lastFetch.method === 'browser' ? '浏览器读取' : '直接请求') + (monitor.lastFetch.route === 'proxy' ? ' · 代理出口' : '') : '');
     const id = escapeHtml(monitor.id);
-    return '<article class="monitor-item"><div class="monitor-top"><div><div class="monitor-name">' + escapeHtml(monitor.label) + '</div><div class="monitor-description">' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '</div></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
-      + '<div class="monitor-meta">' + meta + '</div><div class="monitor-result">接收渠道：' + escapeHtml(recipients) + '</div>'
+    const source = usesNetworkSource(monitor) ? sourceRouteLabel(monitor) : '';
+    const result = monitor.lastResult ? friendlyResult(monitor) : monitor.kind === 'unified' ? monitor.last_test_result?.summary || '等待首次检测' : '等待首次检查';
+    const repair = !reminder && monitor.kind === 'unified' && (monitor.repair_suggestion || monitor.lastError);
+    return '<article class="monitor-item" data-monitor-id="' + id + '"><div class="monitor-top"><div class="monitor-heading"><span class="monitor-type-label">' + escapeHtml(reminder ? '定时提醒' : ruleTypeNames[monitor.type] || '监控任务') + '</span><div class="monitor-name">' + escapeHtml(monitor.label) + '</div></div><span class="monitor-status ' + status[1] + '">' + status[0] + '</span></div>'
+      + '<div class="monitor-description" title="' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '">' + escapeHtml(reminder ? monitor.message : friendlyRule(monitor)) + '</div>'
+      + '<div class="monitor-current"><span>' + (monitor.lastError ? '上次有效结果' : '当前检测结果') + '</span><strong>' + escapeHtml(result) + '</strong></div>'
       + (monitor.lastError ? '<div class="monitor-result monitor-error">' + escapeHtml(monitor.lastError) + '</div>' : '')
-      + (monitor.lastResult ? '<div class="monitor-result">' + (monitor.lastError && !reminder ? '上次有效结果：' : '') + escapeHtml(friendlyResult(monitor)) + '</div>' : '')
-      + (monitor.sourceRetryAt ? '<p class="field-help">下次重试：' + escapeHtml(reminderDate(monitor.sourceRetryAt)) + '。立即检查可提前重试。</p>' : '')
+      + '<div class="monitor-meta">' + meta + '</div><div class="monitor-routing"><span title="' + escapeHtml(recipients) + '">通知：' + escapeHtml(recipients) + '</span>' + (source ? '<span class="monitor-source-route" title="' + escapeHtml(source) + '">出口：' + escapeHtml(source) + '</span>' : '') + '</div>'
+      + (monitor.sourceRetryAt ? '<p class="field-help">下次重试：' + escapeHtml(reminderDate(monitor.sourceRetryAt)) + '</p>' : '')
       + '<details class="monitor-route" data-id="' + id + '" data-revision="' + (monitor.revision || 0) + '"><summary>编辑' + (reminder ? '提醒' : '监控') + '</summary>' + taskEditor(monitor)
       + '<div class="editor-footer"><span>保存后应用本次修改</span><button class="button button-primary" data-action="save-rule" data-id="' + id + '" type="button">保存修改</button></div></details>'
-      + '<div class="monitor-actions"><button class="button button-outline" data-action="refine" data-id="' + id + '">与 AI 修改</button><button class="mini-button" data-action="notification" data-id="' + id + '">通知内容与预览</button>'
-      + (!reminder ? '<button class="mini-button" data-action="check" data-id="' + id + '">立即检查</button>' : '')
+      + '<div class="monitor-actions"><button class="mini-button" data-action="refine" data-id="' + id + '">与 AI 修改</button>'
+      + (!reminder ? '<button class="mini-button" data-action="check" data-id="' + id + '">立即检查</button><button class="mini-button" data-action="rule-logs" data-id="' + id + '">检测记录</button>' : '')
+      + (repair ? '<button class="mini-button monitor-repair-action" data-action="rule-repair" data-id="' + id + '">查看修复建议</button>' : '')
+      + '<details class="monitor-more" data-id="' + id + '"><summary>更多操作</summary><div class="monitor-more-menu">'
+      + (usesNetworkSource(monitor) ? '<button class="mini-button" data-action="proxy" data-id="' + id + '">代理出口</button>' : '')
+      + '<button class="mini-button" data-action="notification" data-id="' + id + '">通知内容与预览</button>'
+      + (!reminder && monitor.kind === 'unified' && !repair ? '<button class="mini-button" data-action="rule-repair" data-id="' + id + '">重新分析与修复</button>' : '')
       + (!monitor.completedAt ? '<button class="mini-button" data-action="toggle" data-id="' + id + '">' + (monitor.enabled ? '暂停' : '继续') + '</button>' : '')
-      + '<button class="mini-button danger" data-action="delete" data-id="' + id + '">删除</button></div></article>';
+      + '<button class="mini-button danger" data-action="delete" data-id="' + id + '">删除</button></div></details></div></article>';
   }).join('');
+  for (const menu of list.querySelectorAll('.monitor-more')) menu.open = expandedMenus.has(menu.dataset.id);
+  for (const oldEditor of editors) {
+    const fresh = [...list.querySelectorAll('.monitor-route')].find((node) => node.dataset.id === oldEditor.dataset.id);
+    if (fresh) fresh.replaceWith(oldEditor);
+  }
+  if (focused?.isConnected && editors.some((node) => node.contains(focused))) {
+    focused.focus({ preventScroll: true });
+    if (selection && typeof selection[0] === 'number') focused.setSelectionRange(...selection);
+  }
 }
 
 function renderEvents() {
@@ -236,10 +331,10 @@ function renderLogs() {
   list.scrollTop = scrollTop;
 }
 
-function render(force = false) {
+function render(force = false, resetEditorId) {
   renderStats();
   renderSourceSettings();
-  if (force || !$('#monitor-list .monitor-route[open]')) renderMonitors();
+  renderMonitors(resetEditorId);
   renderEvents();
   renderLogs();
 }
@@ -283,8 +378,9 @@ function hookFields(hook) {
 }
 
 function openWebhookDrawer(hook = null) {
+  if (drawerAction) return;
   drawerReturnFocus = document.activeElement;
-  editingHookDraft = hook ? { ...hook } : { id: crypto.randomUUID(), name: '', url: '', enabled: true, format: 'auto', priority: 3 };
+  editingHookDraft = hook ? { ...hook } : { id: randomId(), name: '', url: '', enabled: true, format: 'auto', priority: 3 };
   $('#drawer-title').textContent = hook ? '编辑渠道' : '添加渠道';
   $('#drawer-fields').innerHTML = hookFields(editingHookDraft);
   $('#drawer-delete').classList.toggle('hidden', !hook);
@@ -293,7 +389,8 @@ function openWebhookDrawer(hook = null) {
   $('#drawer-fields .hook-name').focus();
 }
 
-function closeWebhookDrawer() {
+function closeWebhookDrawer(force = false) {
+  if (drawerAction && !force) return;
   editingHookDraft = null;
   $('#webhook-drawer').classList.add('hidden');
   $('#drawer-backdrop').classList.add('hidden');
@@ -313,7 +410,7 @@ $('#log-list').addEventListener('click', (event) => {
   if (!button) return;
   const entry = (appState.logs || []).find((item) => item.id === button.dataset.copyLog);
   if (!entry?.raw) return;
-  navigator.clipboard.writeText(JSON.stringify(entry.raw, null, 2)).then(() => toast('原始记录已复制')).catch(() => toast('复制失败，请手动选择日志内容', true));
+  copyText(JSON.stringify(entry.raw, null, 2)).then(() => toast('原始记录已复制')).catch(() => toast('复制失败，请手动选择日志内容', true));
 });
 
 function populateSettings() {
@@ -330,21 +427,23 @@ function populateSettings() {
   $('#settings-dirty').textContent = '';
 }
 
-function settingsBody() {
-  const webhooks = draftHooks.map((hook) => ({ ...hook }));
-  return { webhooks, aiBaseUrl: $('#ai-base-url').value.trim(), aiModel: $('#ai-model').value.trim(), aiKey: $('#ai-key').value.trim() };
+function settingsBody(scope = 'ai') {
+  if (scope === 'channels') return { webhooks: draftHooks.map((hook) => ({ ...hook })) };
+  return { aiBaseUrl: $('#ai-base-url').value.trim(), aiModel: $('#ai-model').value.trim(), aiKey: $('#ai-key').value.trim() };
 }
 
-async function saveSettings(silent = false) {
+async function saveSettings(silent = false, scope = 'ai') {
+  const inputRevision = aiInputRevision;
   const currentOptions = $('#send-targets').querySelectorAll('input[type="checkbox"]');
   const previouslySelected = currentOptions.length ? selectedIds($('#send-targets')) : null;
-  appState = await api('/api/settings', 'PUT', settingsBody());
+  appState = await api('/api/settings', 'PUT', settingsBody(scope));
   draftHooks = (appState.settings.webhooks || []).map((hook) => ({ ...hook }));
   renderWebhooks();
   renderSendTargets(previouslySelected);
-  $('#ai-key').value = '';
-
-  $('#settings-dirty').textContent = '';
+  if (scope === 'ai' && inputRevision === aiInputRevision) {
+    $('#ai-key').value = '';
+    $('#settings-dirty').textContent = '';
+  }
   render(true);
   if (!silent) toast('设置已保存');
 }
@@ -352,10 +451,9 @@ async function saveSettings(silent = false) {
 async function ensureSettings() {
   const targets = $('#preview-targets');
   const selected = targets?.querySelector('input[type="checkbox"]') ? selectedIds(targets) : null;
-  await saveSettings(true);
   if (targets) {
     const retained = selected?.filter((id) => activeHooks().some((hook) => hook.id === id));
-    targets.innerHTML = targetOptions(retained?.length ? retained : undefined);
+    targets.innerHTML = targetOptions(selected == null ? undefined : retained);
     updatePriorityVisibility($('#preview'), '#preview-targets');
   }
   if (!activeHooks().length) { location.hash = '#channels'; throw new Error('请先添加并启用一个 Webhook 地址'); }
@@ -365,8 +463,8 @@ function assistantPhase(status) {
   const labels = { answer: '可以继续提问或调整方案', draft: '方案已拟好，补上目标即可', generating: '正在根据描述拟定方案…', need_more_info: '等待你补充信息', ready: '规则已生成，等待确认', created: '任务已创建', failed: '处理遇到问题，可以继续补充' };
   $('#assistant-dialog').dataset.status = status;
   $('#assistant-phase').textContent = labels[status] || '等待需求';
-  $('#assistant-reply-button').disabled = status === 'generating';
-  $('#parse-button').disabled = status === 'generating';
+  $('#assistant-reply-button').disabled = status === 'generating' || pendingActions.has($('#assistant-reply-button'));
+  $('#parse-button').disabled = status === 'generating' || pendingActions.has($('#parse-button'));
   if (editingMonitor) renderRevisionDiff();
 }
 
@@ -385,6 +483,10 @@ function addAssistantMessage(role, content) {
 
 function resetAssistant(instruction = '', keepEditing = false) {
   if (!keepEditing) editingMonitor = null;
+  if (!instruction && !keepEditing) {
+    $('#create-proxy-mode').value = 'default'; $('#create-source-proxy').value = '';
+    $('#create-proxy-address').classList.add('hidden');
+  }
   syncRevisionMode();
   assistantRequestId++;
   assistantInstruction = instruction;
@@ -411,10 +513,14 @@ async function askAssistant() {
   assistantPhase('generating');
   try {
     await prepareAiSettings();
+    if (requestId !== assistantRequestId) return;
     assistantConversation = assistantConversation.slice(-6);
     const previousDraft = previewMonitor ? collectPreviewRule() : null;
+    const routing = previousDraft || readCreateSourceSettings();
+    const privateProxy = routing.sourceProxy;
+    if (previousDraft) delete previousDraft.sourceProxy;
     const draftUrl = previewMonitor && previewMonitor.kind !== 'reminder' ? ($('#draft-url') || $('#rule-url'))?.value.trim() : '';
-    const result = await api('/api/parse', 'POST', { monitorId: editingMonitor?.id, expectedRevision: editingMonitor?.revision, instruction: assistantInstruction, draft: previousDraft, sourceUrl: draftUrl || $('#instruction-url').value.trim(), conversation: assistantConversation, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    const result = await api('/api/parse', 'POST', { monitorId: editingMonitor?.id, expectedRevision: editingMonitor?.revision, instruction: assistantInstruction, draft: previousDraft, fetch: routing.fetch, sourceProxy: privateProxy, sourceUrl: draftUrl || $('#instruction-url').value.trim(), conversation: assistantConversation, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
     if (requestId !== assistantRequestId) return;
     if (result.sourceCheck) {
       $('#source-check-result').textContent = result.sourceCheck;
@@ -436,7 +542,7 @@ async function askAssistant() {
       return;
     }
     if (!['ready', 'draft'].includes(result.status) || !result.monitor) throw new Error('AI 未返回可确认的监控规则');
-    previewMonitor = { ...result.monitor, webhookIds: previousDraft?.webhookIds, priority: previousDraft?.priority ?? result.monitor.priority, sourceNote: result.sourceNote || '', assumptions: result.assumptions || [], missingSource: result.status === 'draft' };
+    previewMonitor = { ...result.monitor, ...(privateProxy && usesNetworkSource(result.monitor) && result.monitor.fetch?.proxy === 'custom' ? { sourceProxy: privateProxy } : {}), webhookIds: previousDraft?.webhookIds, priority: previousDraft?.priority ?? result.monitor.priority, sourceNote: result.sourceNote || '', assumptions: result.assumptions || [], missingSource: result.status === 'draft' };
     const explanation = result.message || (result.monitor.kind === 'reminder' ? '已为你安排好提醒。看一下时间和重复方式，确认即可。' : '我先按你的描述拟好了方案，可以直接确认，也可以告诉我想改哪里。');
     addAssistantMessage('assistant', explanation);
     assistantConversation.push({ role: 'assistant', content: explanation });
@@ -464,8 +570,9 @@ function readSavedRule(editor, monitor) {
     rule.remindAt = editor.querySelector('.edit-remind-at').value === reminderInput(monitor.remindAt) ? monitor.remindAt : time.toISOString();
     rule.message = editor.querySelector('.edit-message').value.trim();
     rule.repeatMinutes = repeatMinutesFrom(editor, 'edit');
-  } else rule.intervalMinutes = Number(editor.querySelector('.edit-interval').value);
-  if (usesWebSource(monitor)) rule.fetch = readSourceFetch(editor, monitor);
+  } else rule.intervalMinutes = readInterval(editor, '.edit-interval');
+  if (usesNetworkSource(monitor)) { rule.fetch = readSourceFetch(editor, monitor); const proxy = readSourceProxy(editor, monitor); if (proxy) rule.sourceProxy = proxy; }
+  if (monitor.kind === 'unified') Object.assign(rule, readUnifiedRule(editor));
   if (monitor.kind === 'generated') { try { rule.plan = JSON.parse(editor.querySelector('.edit-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
   if (editor.querySelector('.edit-url')) rule.url = editor.querySelector('.edit-url').value.trim();
   if (monitor.kind === 'webpage') {
@@ -480,13 +587,14 @@ function readSavedRule(editor, monitor) {
 }
 
 function monitorConfig(monitor) {
-  const fields = ['kind', 'url', 'label', 'description', 'intervalMinutes', 'severity', 'plan', 'fetch', 'notification', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'message', 'remindAt', 'repeatMinutes', 'priority', 'webhookIds'];
+  const fields = ['schema_version', 'type', 'name', 'detection_method', 'target_element', 'extraction_rule', 'condition', 'interval', 'confidence', 'last_test_result', 'explanation', 'product', 'kind', 'url', 'label', 'description', 'intervalMinutes', 'severity', 'plan', 'fetch', 'notification', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'message', 'remindAt', 'repeatMinutes', 'priority', 'webhookIds', 'hasSourceProxy', 'sourceProxyEndpoint', 'sourceProxyTest'];
   return structuredClone(Object.fromEntries(fields.filter((key) => monitor[key] !== undefined).map((key) => [key, monitor[key]])));
 }
 function syncRevisionMode() {
   const editing = Boolean(editingMonitor);
   $('#revision-context').classList.toggle('hidden', !editing);
   $('#parse-form').classList.toggle('hidden', editing);
+  $('.monitor-type-options')?.classList.toggle('hidden', editing);
   $('#assistant-title').textContent = editing ? 'AI 修改助手' : 'AI 创建助手';
   $('.assistant-context-note').textContent = editing ? '对话仅用于本次修改。每次发送当前草稿和最近 6 条消息；确认更新、取消、退出或刷新页面后清空。' : '对话只保留在当前创建草稿中。每次仅发送原始需求、当前规则草稿和最近 6 条对话；创建、重新开始或退出后清空。';
   $('#revision-task-name').textContent = editingMonitor?.original.label || '';
@@ -527,9 +635,10 @@ function revisionChanges(before, after) {
   compare('关注地址', before.url || '', after.url || '');
   if (before.kind !== 'reminder') {
     compare('读取方式', before.fetch?.mode || 'auto', after.fetch?.mode || 'auto', (v) => ({ auto: '自动', http: '直接请求', browser: '浏览器' })[v]);
-    compare('网络出口', before.fetch?.proxy || 'default', after.fetch?.proxy || 'default', (v) => v === 'direct' ? '直接连接' : '账户设置');
-    compare('检查频率', Number(before.intervalMinutes), Number(after.intervalMinutes), (v) => '每 ' + v + ' 分钟');
-    const condition = (m) => [m.kind, m.plan, m.keyword, m.mode, m.triggerMode, m.jsonPath, m.operator, m.expected];
+    compare('网络出口', before.fetch?.proxy || 'default', after.fetch?.proxy || 'default', (v) => ({ direct: '直接连接', default: '账户设置', custom: '独立代理' })[v]);
+    compare('检查频率', Number(before.intervalMinutes), Number(after.intervalMinutes), (v) => '每 ' + intervalLabel(v));
+    if (after.fetch?.proxy === 'custom' && after.sourceProxy) changes.push(['独立代理地址', before.hasSourceProxy ? '已保存的独立代理' : '未设置', '验证后使用新代理']);
+    const condition = (m) => [m.kind, m.type, m.detection_method, m.target_element, m.extraction_rule, m.condition, m.plan, m.keyword, m.mode, m.triggerMode, m.jsonPath, m.operator, m.expected];
     if (JSON.stringify(condition(before)) !== JSON.stringify(condition(after))) {
       const previousCondition = friendlyRule(before), nextCondition = friendlyRule(after);
       changes.push(previousCondition === nextCondition ? ['检测细节', '原来的取值与筛选方式', '检测参数已调整，可在下方高级设置中查看'] : ['提醒条件', previousCondition, nextCondition]);
@@ -562,7 +671,7 @@ function renderRevisionDiff() {
       ? '<dl>' + changes.map(([label, before, after]) => '<div><dt>' + escapeHtml(label) + '</dt><dd><span class="change-before">' + escapeHtml(before) + '</span><span class="change-arrow" aria-hidden="true">→</span><strong>' + escapeHtml(after) + '</strong></dd></div>').join('') + '</dl>'
       : '<p>当前还是原来的设置。告诉 AI 你想调整的地方，或直接修改下方选项。</p>')
       + '<p class="field-help">' + (editingMonitor.enabled ? '确认后更新这一个任务，不会另建副本。' : '这个任务目前已暂停，保存修改后仍保持暂停。') + ' 调整检测方式或来源会重新记录状态，并取消旧条件下未送出的通知；修改文案和频率会保留检测记录。</p>';
-    $('#create-button').disabled = !changes.length || $('#assistant-dialog').dataset.status === 'generating';
+    $('#create-button').disabled = !changes.length || $('#assistant-dialog').dataset.status === 'generating' || pendingActions.has($('#create-button'));
   } catch (error) { box.textContent = error.message; $('#create-button').disabled = true; }
 }
 function cancelAIRevision() {
@@ -626,6 +735,7 @@ function reminderInput(value) {
 }
 
 function friendlyRule(monitor) {
+  if (monitor.kind === 'unified') return unifiedDescription(monitor);
   if (monitor.kind === 'reminder') return monitor.message;
   const plan = monitor.plan || {};
   const mode = plan.mode || monitor.mode;
@@ -648,6 +758,7 @@ function friendlyRule(monitor) {
 }
 
 function friendlyResult(monitor) {
+  if (monitor.kind === 'unified') return monitor.lastResult || '当前状态：' + ruleValue(monitor.snapshot?.value);
   const result = String(monitor.lastResult || '');
   const path = monitor.plan?.path || monitor.jsonPath;
   const prefix = path + ' = ';
@@ -747,7 +858,7 @@ async function testPreviewSource(automatic = false) {
   resultBox.className = 'preview-result checking';
   resultBox.textContent = '正在按这个方案试跑一次…';
   try {
-    const result = await api('/api/preview-check', 'POST', rule);
+    const result = await api('/api/preview-check', 'POST', { ...rule, monitorId: editingMonitor?.id, expectedRevision: editingMonitor?.revision });
     if (previewMonitor !== draft) return;
     if (JSON.stringify(collectPreviewRule()) !== signature) { resultBox.className = 'preview-result'; resultBox.textContent = '方案已修改，重新试跑即可查看最新结果。'; return; }
     resultBox.className = 'preview-result ' + (result.healthy === false ? 'warning' : 'success');
@@ -883,7 +994,8 @@ function openNotificationEditor(monitor) {
   const getRule = () => ({ ...monitor, notification: readNotification(root) });
   attachNotification(root, getRule, monitor.id);
   $('#notification-save').onclick = () => withButton($('#notification-save'), async () => {
-    appState = await api('/api/monitors/' + encodeURIComponent(monitor.id), 'PATCH', { rule: { notification: readNotification(root) } });
+    appState = await api('/api/monitors/' + encodeURIComponent(monitor.id), 'PATCH', { rule: { notification: readNotification(root) }, expectedRevision: monitor.revision || 0 });
+    if (!root.isConnected) { render(); return; }
     dialog.close();
     render(true);
     toast('通知内容已保存，下次触发时生效');
@@ -899,9 +1011,10 @@ $('#notification-dialog').addEventListener('close', () => {
 });
 
 function monitorSummary(monitor) {
+  if (monitor.kind === 'unified') return unifiedSummary(monitor) + '<p class="plain-rule-summary">' + escapeHtml(unifiedDescription(monitor)) + ' · 每 ' + escapeHtml(intervalLabel(monitor.intervalMinutes)) + '检查</p>' + ruleValidationSummary(monitor) + stockModelSummary(monitor, true) + (monitor.extraction_rule.kind !== 'service' ? '<div class="element-actions"><button type="button" class="button button-outline" data-source-preview>预览服务端页面与检测区域</button></div><p class="field-help">原始库存文字来自实际抓取；确认型号、当前状态和提醒条件后再创建。</p>' : '');
   const items = [
     ['监控对象', monitor.label, false],
-    ['检查频率', '每 ' + monitor.intervalMinutes + ' 分钟', false],
+    ['检查频率', '每 ' + intervalLabel(monitor.intervalMinutes), false],
     ['什么时候提醒', friendlyRule(monitor), true]
   ];
   if (monitor.url) items.push(['关注的地址', monitor.url, true]);
@@ -929,12 +1042,12 @@ function renderPreview(monitor) {
   }
   element.innerHTML = `<div class="preview-head"><span>✦ &nbsp; 监控规则预览</span><span>AI 本次生成 · 待确认</span></div>
     ${monitorSummary(monitor)}
-    <div class="preview-note">${monitor.sourceNote ? `${escapeHtml(monitor.sourceNote)} ` : ''}${monitor.kind === 'generated' ? '请核对提醒条件。时间和通知选项可以直接调整，也可以继续用一句话修改需求。' : monitor.kind === 'dmit' && monitor.triggerMode === 'any-available' ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'generated' && monitor.plan.sourceType === 'html' ? ' 自动读取遇到网站验证会尝试浏览器；创建前会试跑一次。' : ''}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
+    <div class="preview-note">${monitor.sourceNote ? `${escapeHtml(monitor.sourceNote)} ` : ''}${monitor.kind === 'generated' ? '请核对提醒条件。时间和通知选项可以直接调整，也可以继续用一句话修改需求。' : (monitor.kind === 'unified' && monitor.condition.initial === 'notify' || monitor.kind === 'dmit' && monitor.triggerMode === 'any-available') ? '首次检查发现有货会立即通知；持续有货不会重复发送。' : '首次检查只记录当前状态。后续条件发生变化时发送通知。'}${monitor.kind === 'generated' && monitor.plan.sourceType === 'html' ? ' 自动读取遇到网站验证会尝试浏览器；创建前会试跑一次。' : ''}${monitor.kind === 'dmit' ? '库存数据来自第三方，购买前请以官方页面为准。' : ''}</div>
     <div class="field-label">通知到</div><div id="preview-targets" class="target-options">${targetOptions(monitor.webhookIds)}</div>
     <details class="rule-editor"><summary>调整监控规则</summary>${taskEditor(monitor, 'rule')}</details>
     <div id="preview-result" class="preview-result" aria-live="polite"></div><div class="preview-actions"><button class="button button-outline" id="preview-revise-button" type="button">修改需求</button><button class="button button-outline" id="preview-check-button" type="button">试跑一次</button><button class="button button-primary" id="create-button" type="button">确认并开始监控 <span>↗</span></button></div>`;
   if (monitor.assumptions?.length) {
-    element.querySelector('.preview-grid').insertAdjacentHTML('afterend', '<div class="draft-assumptions"><strong>已为你采用的设置</strong><ul>' + monitor.assumptions.map((text) => '<li>' + escapeHtml(text) + '</li>').join('') + '</ul></div>');
+    element.querySelector('.preview-grid, .rule-evidence').insertAdjacentHTML('afterend', '<div class="draft-assumptions"><strong>已为你采用的设置</strong><ul>' + monitor.assumptions.map((text) => '<li>' + escapeHtml(text) + '</li>').join('') + '</ul></div>');
   }
   if (monitor.missingSource) {
     element.querySelector('#rule-url').closest('label').classList.add('hidden');
@@ -951,7 +1064,7 @@ function updatePriorityVisibility(container, targetsSelector) {
   if (targets && priority) priority.classList.toggle('hidden', !hasNtfyTarget(selectedIds(targets)));
 }
 function markPreviewChanged(event) {
-  if (!event.target.matches('[data-plan-key], [data-plan-json], .source-fetch-mode, .source-fetch-proxy, #draft-url, #rule-url, #rule-keyword, #rule-mode, #rule-json-path, #rule-operator, #rule-expected')) return;
+  if (!event.target.matches('[data-plan-key], [data-plan-json], .source-fetch-mode, .source-fetch-proxy, .source-proxy-input, [data-unified-key], .unified-json, .interval-unit, #rule-interval, #draft-url, #rule-url, #rule-keyword, #rule-mode, #rule-json-path, #rule-operator, #rule-expected')) return;
   const result = $('#preview-result');
   if (result && previewMonitor?.kind !== 'reminder') {
     result.className = 'preview-result';
@@ -983,9 +1096,10 @@ function collectPreviewRule() {
     rule.repeatMinutes = repeatMinutesFrom($('#preview'), 'rule');
     return rule;
   }
-  rule.intervalMinutes = Number($('#rule-interval').value);
-  if (usesWebSource(rule)) rule.fetch = readSourceFetch($('#preview'), rule);
+  rule.intervalMinutes = readInterval($('#preview'), '#rule-interval');
+  if (usesNetworkSource(rule)) { rule.fetch = readSourceFetch($('#preview'), rule); const proxy = readSourceProxy($('#preview'), rule); if (proxy) rule.sourceProxy = proxy; else delete rule.sourceProxy; }
   if ($('#rule-url')) rule.url = ($('#draft-url') || $('#rule-url')).value.trim();
+  if (rule.kind === 'unified') Object.assign(rule, readUnifiedRule($('#preview')));
   if (rule.kind === 'generated') { try { rule.plan = JSON.parse($('#rule-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
   if (rule.kind === 'dmit') { rule.triggerMode = $('#rule-trigger-mode').value; rule.description = rule.triggerMode === 'any-available' ? '第三方库存列表中，任意套餐有货时通知；首次检查如有货会立即通知' : '第三方库存列表中，套餐由无货变为有货时通知'; }
   if (rule.kind === 'json') { rule.jsonPath = $('#rule-json-path').value.trim(); rule.operator = $('#rule-operator').value; rule.expected = $('#rule-expected').value.trim(); rule.description = `${rule.jsonPath} ${$('#rule-operator').selectedOptions[0].textContent} ${rule.expected} 时通知`; }
@@ -995,11 +1109,50 @@ function collectPreviewRule() {
 }
 
 async function withButton(button, work) {
-  button.disabled = true;
-  try { await work(); } catch (error) { toast(error.message, true); } finally { button.disabled = false; }
+  if (pendingActions.has(button)) return;
+  const group = ['save-button', 'ai-test-button', 'clear-ai-key-button'].includes(button.id) ? [...document.querySelectorAll('#settings-form button, #settings-form input')] : [];
+  if (group.some((control) => pendingActions.has(control))) return;
+  const operation = { epoch: workspaceEpoch, controls: group, disabled: group.map((control) => control.disabled) };
+  group.forEach((control) => { control.disabled = true; });
+  pendingActions.set(button, operation); stateSyncVersion++;
+  button.disabled = true; button.setAttribute('aria-busy', 'true');
+  try { await work(); } catch (error) { if (operation.epoch === workspaceEpoch && error.code !== 'STALE_OPERATION') toast(error.message, true); }
+  finally {
+    if (pendingActions.get(button) === operation) {
+      pendingActions.delete(button); stateSyncVersion++;
+      operation.controls.forEach((control, i) => { control.disabled = operation.disabled[i]; });
+      button.disabled = false; button.removeAttribute('aria-busy');
+      if (['parse-button', 'assistant-reply-button'].includes(button.id)) button.disabled = $('#assistant-dialog').dataset.status === 'generating';
+      if (button.id === 'create-button' && previewMonitor) renderRevisionDiff();
+    }
+  }
+}
+async function withDrawerAction(button, work) {
+  if (drawerAction) return;
+  const controls = [...document.querySelectorAll('#webhook-drawer button, #webhook-drawer input, #webhook-drawer select')];
+  const operation = { controls, disabled: controls.map((control) => control.disabled) };
+  drawerAction = operation;
+  controls.forEach((control) => { control.disabled = true; });
+  $('#webhook-drawer').setAttribute('aria-busy', 'true');
+  await withButton(button, work);
+  if (drawerAction !== operation) return;
+  drawerAction = null; controls.forEach((control, i) => { control.disabled = operation.disabled[i]; });
+  $('#webhook-drawer').removeAttribute('aria-busy');
 }
 
 function showAuth() {
+  workspaceEpoch++; stateSyncVersion++;
+  for (const [button, operation] of pendingActions) { operation.controls.forEach((control, i) => { control.disabled = operation.disabled[i]; }); button.disabled = false; button.removeAttribute('aria-busy'); }
+  pendingActions.clear();
+  if (drawerAction) { drawerAction.controls.forEach((control, i) => { control.disabled = drawerAction.disabled[i]; }); drawerAction = null; }
+  closeWebhookDrawer(true); $('#webhook-drawer').removeAttribute('aria-busy');
+  for (const [button, timer] of emailTimers) { clearInterval(timer); button.disabled = false; button.textContent = '发送验证码'; }
+  emailTimers.clear();
+  for (const selector of ['#send-register-code', '#send-bind-code']) { $(selector).disabled = false; $(selector).textContent = '发送验证码'; }
+  $('#recovery-code-screen').classList.add('hidden'); $('#recovery-code-value').textContent = '';
+  draftHooks = []; editingMonitor = null;
+  appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [], sentCount: 0 };
+  for (const selector of ['#monitor-list', '#webhook-list', '#send-targets', '#log-list', '#activity-list']) { const node = $(selector); if (node) node.innerHTML = ''; }
   if ($('#notification-dialog').open) $('#notification-dialog').close();
   setAuthMode('login');
   $('#auth-screen').classList.remove('hidden');
@@ -1020,6 +1173,7 @@ function showAuth() {
 }
 
 function showWorkspace(state) {
+  workspaceEpoch++; stateSyncVersion++;
   sourceSettingsEpoch += 1;
   appState = state;
   $('#auth-screen').classList.add('hidden');
@@ -1062,6 +1216,7 @@ $('#show-recover').addEventListener('click', () => setAuthMode('recover'));
 
 function sendEmailCode(button, status, requestBody) {
   if (button.disabled) return;
+  const epoch = workspaceEpoch;
   button.disabled = true;
   api('/api/auth/email-code', 'POST', requestBody).then((result) => {
     let remaining = result.retryAfterSeconds || 60;
@@ -1069,11 +1224,14 @@ function sendEmailCode(button, status, requestBody) {
     toast('验证码已发送');
     button.textContent = `${remaining} 秒后重发`;
     const timer = setInterval(() => {
+      if (epoch !== workspaceEpoch) { clearInterval(timer); return; }
       remaining -= 1;
       button.textContent = remaining > 0 ? `${remaining} 秒后重发` : '发送验证码';
-      if (remaining <= 0) { clearInterval(timer); button.disabled = false; }
+      if (remaining <= 0) { clearInterval(timer); emailTimers.delete(button); button.disabled = false; }
     }, 1000);
+    emailTimers.set(button, timer);
   }).catch((error) => {
+    if (epoch !== workspaceEpoch || error.code === 'STALE_OPERATION') return;
     button.disabled = false;
     status.textContent = error.message;
     toast(error.message, true);
@@ -1090,7 +1248,7 @@ function showRecoveryCode(code) {
   $('#close-recovery-code').focus();
 }
 $('#copy-recovery-code').addEventListener('click', async () => {
-  try { await navigator.clipboard.writeText($('#recovery-code-value').textContent); toast('恢复码已复制'); }
+  try { await copyText($('#recovery-code-value').textContent); toast('恢复码已复制'); }
   catch { toast('复制失败，请手动选择恢复码', true); }
 });
 $('#close-recovery-code').addEventListener('click', () => {
@@ -1147,10 +1305,9 @@ $('#rotate-code-form').addEventListener('submit', (event) => {
   });
 });
 
-$('#logout-button').addEventListener('click', async () => {
-  try { await api('/api/auth/logout', 'POST'); showAuth(); appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [], sentCount: 0 }; }
-  catch (error) { toast(error.message, true); }
-});
+$('#logout-button').addEventListener('click', () => withButton($('#logout-button'), async () => {
+  await api('/api/auth/logout', 'POST'); showAuth();
+}));
 
 $('#add-webhook').addEventListener('click', () => {
   if (draftHooks.length >= 20) return toast('最多添加 20 个 Webhook 地址', true);
@@ -1162,8 +1319,8 @@ $('#webhook-list').addEventListener('click', (event) => {
   const hook = draftHooks.find((item) => item.id === button.closest('.webhook-row').dataset.id);
   if (hook) openWebhookDrawer(hook);
 });
-$('#drawer-close').addEventListener('click', closeWebhookDrawer);
-$('#drawer-backdrop').addEventListener('click', closeWebhookDrawer);
+$('#drawer-close').addEventListener('click', () => closeWebhookDrawer());
+$('#drawer-backdrop').addEventListener('click', () => closeWebhookDrawer());
 document.addEventListener('keydown', (event) => {
   const drawer = $('#webhook-drawer');
   if (drawer.classList.contains('hidden')) return;
@@ -1200,14 +1357,14 @@ async function saveDrawer() {
   const previous = draftHooks.map((item) => ({ ...item }));
   if (index < 0) draftHooks.push(hook);
   else draftHooks[index] = hook;
-  try { await saveSettings(true); }
-  catch (error) { draftHooks = previous; renderWebhooks(); throw error; }
-  closeWebhookDrawer();
+  try { await saveSettings(true, 'channels'); }
+  catch (error) { if (error.code !== 'STALE_OPERATION') { draftHooks = previous; renderWebhooks(); } throw error; }
+  closeWebhookDrawer(true);
   toast('渠道已保存');
   return hook.id;
 }
-$('#drawer-save').addEventListener('click', () => withButton($('#drawer-save'), saveDrawer));
-$('#drawer-test').addEventListener('click', () => withButton($('#drawer-test'), async () => {
+$('#drawer-save').addEventListener('click', () => withDrawerAction($('#drawer-save'), saveDrawer));
+$('#drawer-test').addEventListener('click', () => withDrawerAction($('#drawer-test'), async () => {
   const id = await saveDrawer();
   if (!id) return;
   const report = await api('/api/test-webhook', 'POST', { webhookId: id });
@@ -1215,16 +1372,16 @@ $('#drawer-test').addEventListener('click', () => withButton($('#drawer-test'), 
   render(true);
   toast(report.failed.length ? report.failed[0].name + '：' + report.failed[0].error : '测试通知已发送', Boolean(report.failed.length));
 }));
-$('#drawer-delete').addEventListener('click', () => withButton($('#drawer-delete'), async () => {
+$('#drawer-delete').addEventListener('click', () => withDrawerAction($('#drawer-delete'), async () => {
   if (!editingHookDraft) return;
   const id = editingHookDraft.id;
   const usedBy = appState.monitors.filter((monitor) => monitor.webhookIds?.includes(id)).length;
   if (usedBy && !confirm('这个渠道被 ' + usedBy + ' 个任务使用。删除后这些任务的接收渠道会更新，继续吗？')) return;
   const previous = draftHooks.map((item) => ({ ...item }));
   draftHooks = draftHooks.filter((hook) => hook.id !== id);
-  try { await saveSettings(true); }
-  catch (error) { draftHooks = previous; renderWebhooks(); throw error; }
-  closeWebhookDrawer();
+  try { await saveSettings(true, 'channels'); }
+  catch (error) { if (error.code !== 'STALE_OPERATION') { draftHooks = previous; renderWebhooks(); } throw error; }
+  closeWebhookDrawer(true);
   toast('渠道已删除');
 }));
 $('#settings-form').addEventListener('input', () => { $('#settings-dirty').textContent = '未保存'; });
@@ -1248,6 +1405,7 @@ $('#ai-test-button').addEventListener('click', () => {
       $('#ai-test-log').classList.remove('hidden');
       api('/api/state').then((state) => { appState = state; render(); }).catch(() => {});
     } catch (error) {
+      if (error.code === 'STALE_OPERATION') throw error;
       result.textContent = error.message + (error.requestId && error.code !== 'RADAR_CONNECTION_FAILED' ? '\n请求编号：' + error.requestId : '');
       result.className = 'error';
       $('#ai-test-log').classList.toggle('hidden', !error.code || error.code === 'RADAR_CONNECTION_FAILED');
@@ -1265,7 +1423,7 @@ $('#clear-ai-key-button').addEventListener('click', () => {
   });
 });
 for (const selector of ['#ai-base-url', '#ai-model', '#ai-key']) {
-  $(selector).addEventListener('input', () => { $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; $('#ai-test-log').classList.add('hidden'); });
+  $(selector).addEventListener('input', () => { aiInputRevision++; $('#ai-test-result').textContent = ''; $('#ai-test-result').className = ''; $('#ai-test-log').classList.add('hidden'); });
 }
 
 $('#send-form').addEventListener('submit', (event) => {
@@ -1380,9 +1538,17 @@ $('#preview').addEventListener('click', (event) => {
 $('#monitor-list').addEventListener('click', (event) => {
   const button = event.target.closest('button[data-action]');
   if (!button) return;
+  const menu = button.closest('.monitor-more');
+  if (menu) menu.open = false;
   const { id, action } = button.dataset;
   const monitor = appState.monitors.find((item) => item.id === id);
   if (!monitor) return;
+  if (['rule-logs', 'rule-repair'].includes(action)) return;
+  if (action === 'proxy') {
+    const editor = button.closest('article').querySelector('.monitor-route');
+    editor.open = true; selectRuleTab(editor.querySelector('[data-editor-tab="3"]'));
+    editor.querySelector('.source-fetch-proxy').focus(); return;
+  }
   if (action === 'refine') { try { startAIRevision(monitor, button.closest('article').querySelector('.monitor-route')); } catch (error) { toast(error.message, true); } return; }
   if (action === 'notification') { openNotificationEditor(monitor); return; }
   if (action === 'delete' && !confirm(`删除“${monitor.label}”？`)) return;
@@ -1412,11 +1578,26 @@ $('#monitor-list').addEventListener('click', (event) => {
       appState = await api(path, 'DELETE');
       toast(monitor.kind === 'reminder' ? '提醒已删除' : '监控已删除');
     }
-    render(true);
+    render(true, action === 'save-rule' ? id : undefined);
   });
 });
 
+document.addEventListener('click', event => {
+  for (const menu of document.querySelectorAll('.monitor-more[open]')) if (!menu.contains(event.target)) menu.open = false;
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  for (const menu of document.querySelectorAll('.monitor-more[open]')) { menu.open = false; menu.querySelector('summary').focus(); }
+});
+
 async function init() {
+    setInterval(async () => {
+      if ($('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy || pendingActions.size) return;
+      const epoch = sourceSettingsEpoch, userId = appState.user?.id, version = stateSyncVersion;
+      const isCurrent = () => epoch === sourceSettingsEpoch && version === stateSyncVersion && !pendingActions.size && userId === appState.user?.id && !$('.app-shell').classList.contains('auth-hidden');
+      try { const state = await api('/api/state'); if (isCurrent()) { appState = state; render(); } }
+      catch (error) { if (isCurrent() && error.message === '请先登录') showAuth(); }
+    }, 30000);
   try {
     const status = await api('/api/auth/status');
     if (status.signupCodeRequired) $('#auth-screen').dataset.signupCodeRequired = '1';
@@ -1424,14 +1605,8 @@ async function init() {
     setAuthMode(authMode);
     if (status.authenticated) showWorkspace(await api('/api/state'));
     else showAuth();
-    setInterval(async () => {
-      if ($('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy) return;
-      const epoch = sourceSettingsEpoch, userId = appState.user?.id;
-      const isCurrent = () => epoch === sourceSettingsEpoch && userId === appState.user?.id && !$('.app-shell').classList.contains('auth-hidden');
-      try { const state = await api('/api/state'); if (isCurrent()) { appState = state; render(); } }
-      catch (error) { if (isCurrent() && error.message === '请先登录') showAuth(); }
-    }, 30000);
-  } catch (error) { showAuth(); toast(`无法连接本地服务：${error.message}`, true); }
+
+  } catch (error) { if (error.code === 'STALE_OPERATION') return; showAuth(); toast(`无法连接本地服务：${error.message}`, true); }
 }
 $('#send-priority-slot').innerHTML = priorityPicker('send-priority', null, true);
 setAuthMode('login');
@@ -1463,9 +1638,9 @@ function sourceConnectionSummary(result = {}) {
 
 function renderSourceSettings(reset = false) {
   const { hasSourceProxy, sourceProxyEndpoint, sourceProxyTest } = appState.settings;
-  const covered = appState.monitors.filter(monitor => usesWebSource(monitor) && monitor.fetch?.proxy !== 'direct').length;
+  const covered = appState.monitors.filter(monitor => usesNetworkSource(monitor) && (!monitor.fetch?.proxy || monitor.fetch.proxy === 'default')).length;
   const verified = sourceProxyTest?.ip ? ' · 验证时出口 IP：' + sourceProxyTest.ip : '';
-  $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网页 / 接口任务使用此出口' + verified : '当前使用服务器出口 · 先验证代理，再应用到监控';
+  $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网络监控任务使用此出口' + verified : '当前使用服务器出口 · 先验证代理，再应用到监控';
   $('#source-proxy-clear').classList.toggle('hidden', !hasSourceProxy);
   $('#source-proxy').placeholder = hasSourceProxy ? '已保存 · 留空可测试已有代理，输入新地址以替换' : 'ss://节点分享链接 或 http://主机:端口';
   if (reset) { $('#source-proxy').value = ''; resetSourceResults(); }
@@ -1520,9 +1695,9 @@ $('#source-settings-form').addEventListener('submit', (event) => {
       $('#source-proxy').value = '';
       $('#source-proxy-result').textContent = '';
       render();
-      status.textContent = '验证通过，已应用到监控 · ' + sourceConnectionSummary(state.settings.sourceProxyTest);
+      status.textContent = '验证通过，已应用到账户默认出口 · ' + sourceConnectionSummary(state.settings.sourceProxyTest);
       status.className = 'field-help success';
-      toast('代理验证通过，已应用到当前账户的网页与接口监控');
+      toast('代理验证通过，已应用到使用账户默认出口的网页与接口监控');
     } catch (error) {
       if (!isCurrent()) return;
       const uncertain = !error.status || error.status >= 500;
@@ -1637,4 +1812,40 @@ document.addEventListener('keydown', (event) => {
   index = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
   event.preventDefault();
   selectRuleTab(tabs[index], true);
+});
+
+document.addEventListener('change', (event) => {
+  if (!event.target.matches('.source-fetch-proxy')) return;
+  const root = event.target.closest('.monitor-route, .rule-editor');
+  root?.querySelector('.source-custom-proxy')?.classList.toggle('hidden', event.target.value !== 'custom');
+});
+document.addEventListener('input', (event) => {
+  if (!event.target.matches('.source-proxy-input')) return;
+  const status = event.target.closest('.source-custom-proxy').querySelector('.rule-proxy-result');
+  status.className = 'rule-proxy-result';
+  status.textContent = '保存前会验证代理连通性；验证失败保留原设置。';
+});
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-source-proxy-test]');
+  if (!button) return;
+  const panel = button.closest('.source-custom-proxy'), root = button.closest('.monitor-route, .rule-editor');
+  const input = panel.querySelector('.source-proxy-input'), status = panel.querySelector('.rule-proxy-result');
+  const monitorId = root?.dataset.id || editingMonitor?.id;
+  const monitor = appState.monitors.find((item) => item.id === monitorId);
+  const proxyUrl = input.value.trim() || (root?.classList.contains('rule-editor') ? previewMonitor?.sourceProxy : '');
+  if (!proxyUrl && !monitor?.hasSourceProxy) { status.textContent = '请先填入独立代理地址'; status.className = 'rule-proxy-result error'; input.focus(); return; }
+  withButton(button, async () => {
+    const epoch = workspaceEpoch;
+    input.disabled = true;
+    status.textContent = '正在验证连接与出口 IP…'; status.className = 'rule-proxy-result';
+    try {
+      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl: proxyUrl || undefined, monitorId: proxyUrl ? undefined : monitorId });
+      if (!panel.isConnected) return;
+      status.textContent = '连接成功 · ' + sourceConnectionSummary(result);
+      status.className = 'rule-proxy-result success';
+    } catch (error) {
+      if (error.code !== 'STALE_OPERATION' && panel.isConnected) { status.textContent = error.message; status.className = 'rule-proxy-result error'; }
+      throw error;
+    } finally { if (epoch === workspaceEpoch && input.isConnected) input.disabled = false; }
+  });
 });

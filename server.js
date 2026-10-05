@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { DMIT_PRICING_URL, DMIT_STOCK_URL, inspectPage, isTransition } from './lib/monitor.js';
 import { validateGeneratedPlan, inspectGenerated, transitionGenerated, describeGeneratedPlan } from './lib/generated.js';
 import { validateLocalSource, inspectLog, inspectService, userLogDirectory } from './lib/sources.js';
@@ -16,6 +16,13 @@ import { createBrowserSource } from './lib/browser-source.js';
 import { validateSourceProxy, proxyEndpoint, redactProxy } from './lib/source-proxy.js';
 import { createShadowsocksBridge } from './lib/shadowsocks.js';
 import { createProxyTester } from './lib/proxy-connectivity.js';
+import { validateMonitorRule, evaluateRule, describeRule, displayValue, ruleSignature, legacyRuleView } from './lib/monitor-rule.js';
+import { analysisForAI, inferGoal } from './lib/page-analysis.js';
+import { createRuleService } from './lib/rule-service.js';
+import { normalizeAiPlan } from './lib/ai-rule-compat.js';
+import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/rule-policy.js';
+import { createScheduler } from './lib/scheduler.js';
+import { createElementPreview, selectedElement } from './lib/element-picker.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -54,7 +61,46 @@ async function fetchSource(url, options = {}) {
 }
 function sourceOptions(user, monitor = {}) {
   const options = validateFetchOptions(monitor.fetch);
-  return { userId: user.id, mode: options.mode, direct: options.proxy === 'direct', proxyUrl: options.proxy === 'direct' ? '' : user.settings.sourceProxy || '' };
+  const proxyUrl = options.proxy === 'custom' ? monitor.sourceProxy || '' : options.proxy === 'direct' ? '' : user.settings.sourceProxy || '';
+  if (options.proxy === 'custom' && !proxyUrl) throw Object.assign(new Error('此任务选择了独立代理，请填写并验证代理地址'), { code: 'SOURCE_PROXY_MISSING' });
+  return { userId: user.id, mode: options.mode, direct: options.proxy === 'direct', proxyUrl };
+}
+
+async function inspectRoutedService(url, plan, options) {
+  return withSourceProxy(options.proxyUrl, async (proxyUrl, proxyIdentity) => {
+    const result = await inspectService(url, plan, { ...options, proxyUrl });
+    return { ...result, fetch: { method: url.startsWith('tcp://') ? 'tcp' : 'http', route: options.proxyUrl ? 'proxy' : options.direct ? 'direct' : 'server', ...(proxyIdentity ? { proxyType: 'shadowsocks' } : {}) } };
+  });
+}
+function inspectMonitorService(user, monitor, plan) {
+  return inspectRoutedService(monitor.url, plan, sourceOptions(user, monitor));
+}
+const ruleService = createRuleService({ fetchSource, sourceOptions, inspectService: inspectRoutedService });
+function mergeRule(current, patch = {}) {
+  const next = { ...current, ...patch };
+  if (current?.kind === 'unified') {
+    for (const key of ['condition', 'target_element', 'extraction_rule']) if (patch[key]) next[key] = { ...current[key], ...patch[key] };
+    if (patch.name !== undefined && patch.label === undefined) next.label = patch.name;
+    if (patch.interval !== undefined && patch.intervalMinutes === undefined) delete next.intervalMinutes;
+  }
+  return next;
+}
+function supportsMonitorProxy(monitor) {
+  return monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && monitor.plan?.sourceType === 'log');
+}
+
+async function prepareMonitorProxy(user, spec, input = {}, saved = null, forceTest = false) {
+  const raw = input.sourceProxy;
+  const hasNewProxy = raw != null && String(raw).trim() !== '';
+  const proxy = raw === null ? '' : hasNewProxy ? validateSourceProxy(raw) : saved?.sourceProxy || '';
+  if (!supportsMonitorProxy(spec) && (spec.fetch?.proxy === 'custom' || hasNewProxy)) throw new Error('独立代理用于网络监控；本地日志与日历提醒不产生网络读取');
+  if (spec.fetch?.proxy === 'custom' && !proxy) throw Object.assign(new Error('请为此任务填写独立代理，或选择账户默认代理 / 直接连接'), { code: 'SOURCE_PROXY_MISSING' });
+  let verified = proxy && saved?.sourceProxy === proxy ? saved.sourceProxyTest || null : null;
+  if (proxy && (hasNewProxy || spec.fetch?.proxy === 'custom' && (forceTest || !verified || saved?.fetch?.proxy !== 'custom'))) {
+    const report = await testProxy(user, proxy);
+    verified = { ip: report.ip, testedAt: report.testedAt, durationMs: report.durationMs };
+  }
+  return { sourceProxy: proxy, sourceProxyTest: verified };
 }
 if ((process.env.HTTP_PROXY || process.env.HTTPS_PROXY) && typeof http.setGlobalProxyFromEnv === 'function') {
   http.setGlobalProxyFromEnv({ ...process.env, NO_PROXY: [process.env.NO_PROXY, 'localhost', '127.0.0.1', '::1'].filter(Boolean).join(',') });
@@ -154,10 +200,16 @@ function selectedWebhookIds(user, ids) {
 
 function validateMonitor(candidate, options = {}) {
   const notification = validateNotification(candidate?.notification);
+  if (candidate?.kind === 'unified' || candidate?.schema_version === 1 && candidate?.type) {
+    return { ...validateMonitorRule(candidate), notification, fetch: validateFetchOptions(candidate.fetch) };
+  }
   if (!candidate || !['dmit', 'dmit-product', 'webpage', 'json', 'rss', 'github', 'generated', 'reminder'].includes(candidate.kind)) throw new Error('无法识别监控类型');
   const fetchOptions = validateFetchOptions(candidate.fetch);
-  const minInterval = candidate.kind === 'generated' && ['service', 'log'].includes(candidate.plan?.sourceType) ? 1 : 5;
-  const intervalMinutes = Math.max(minInterval, Math.min(1440, Number(candidate.intervalMinutes) || 5));
+  if (fetchOptions.proxy === 'custom' && !supportsMonitorProxy(candidate)) throw new Error('独立代理用于网络监控；本地日志与日历提醒不产生网络读取');
+  const intervalMinutes = candidate.intervalMinutes == null || candidate.intervalMinutes === '' ? 5 : Number(candidate.intervalMinutes);
+  if (candidate.kind !== 'reminder') {
+    validateInterval(intervalMinutes * 60);
+  }
   const label = String(candidate.label || '未命名监控').trim().slice(0, 60);
   const description = String(candidate.description || '').trim().slice(0, 180);
   const severity = ['info', 'warning', 'critical'].includes(candidate.severity) ? candidate.severity : 'warning';
@@ -205,7 +257,7 @@ function validateMonitor(candidate, options = {}) {
 }
 
 function previewSourceSignature(monitor) {
-  return JSON.stringify([monitor.kind, monitor.url, monitor.plan, monitor.keyword, monitor.mode, monitor.jsonPath, monitor.operator, monitor.expected, monitor.triggerMode, validateFetchOptions(monitor.fetch)]);
+  return JSON.stringify([monitor.kind, monitor.url, monitor.kind === 'unified' ? ruleSignature(monitor) : null, monitor.plan, monitor.keyword, monitor.mode, monitor.jsonPath, monitor.operator, monitor.expected, monitor.triggerMode, validateFetchOptions(monitor.fetch), monitor.fetch?.proxy === 'custom' ? createHash('sha256').update(monitor.sourceProxy || '').digest('hex') : '']);
 }
 
 function buildNotificationPreview(user, monitor, observed = null) {
@@ -372,10 +424,13 @@ async function checkReminder(user, reminder) {
     return { checked: false, error: error.message };
   } finally {
     activeChecks.delete(reminder.id);
+    scheduleMonitor(user, reminder);
+    persist();
   }
 }
 
 function currentStateMatches(monitor, current) {
+  if (monitor.kind === 'unified') return monitor.type === 'product_stock' || ['changed', 'transition', 'available'].includes(monitor.condition.operator) ? null : current.matched === true;
   if (monitor.kind === 'dmit') return monitor.triggerMode === 'any-available' ? current.available > 0 : null;
   if (['webpage', 'json'].includes(monitor.kind)) return current.matched === true;
   if (monitor.kind !== 'generated') return null;
@@ -385,7 +440,7 @@ function currentStateMatches(monitor, current) {
   return current.matched === true;
 }
 
-async function checkMonitor(user, monitor, { manual = false } = {}) {
+async function checkMonitor(user, monitor, { manual = false, observed = null } = {}) {
   if (monitor.kind === 'reminder') return checkReminder(user, monitor);
   if (!manual && Date.parse(monitor.sourceRetryAt) > Date.now()) return { checked: false, skipped: true, retryAt: monitor.sourceRetryAt };
   if (activeChecks.has(monitor.id)) return { checked: false, skipped: true };
@@ -402,8 +457,14 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
     sentCount += retried.sentCount;
     failedCount += retried.failedCount;
     let current;
-    if (monitor.kind === 'generated' && monitor.plan.sourceType === 'service') {
-      current = await inspectService(monitor.url, monitor.plan);
+    if (observed) { current = structuredClone(observed); fetchDetails = current.fetch; responseStatus = current.httpStatus; }
+    else if (monitor.kind === 'unified') {
+      current = await ruleService.observe(user, monitor);
+      fetchDetails = current.fetch;
+      responseStatus = current.httpStatus;
+    } else if (monitor.kind === 'generated' && monitor.plan.sourceType === 'service') {
+      current = await inspectMonitorService(user, monitor, monitor.plan);
+      fetchDetails = current.fetch;
       responseStatus = current.httpStatus;
     } else if (monitor.kind === 'generated' && monitor.plan.sourceType === 'log') {
       current = inspectLog(logRoot, user, monitor, monitor.snapshot);
@@ -416,7 +477,7 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
       responseSample = html.slice(0, 4000);
       current = monitor.kind === 'generated' ? inspectGenerated(monitor.plan, html) : inspectPage(monitor, html);
     }
-    const transitioned = monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
+    const transitioned = monitor.kind === 'unified' ? evaluateRule(monitor, current, monitor.snapshot).triggered : monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
     const conditionSatisfied = currentStateMatches(monitor, current);
     const triggered = transitioned || manual && conditionSatisfied === true && !hadPending;
     if (triggered) {
@@ -440,10 +501,23 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
     monitor.sourceRetryAt = null;
     monitor.lastSourceError = '';
     if (fetchDetails) monitor.lastFetch = { method: fetchDetails.method, route: fetchDetails.route, at: new Date().toISOString() };
+    const previousSnapshot = monitor.snapshot;
     monitor.snapshot = current;
+    if (monitor.kind === 'unified') {
+      monitor.status = monitor.enabled ? 'active' : 'paused';
+      monitor.repair_suggestion = null;
+      monitor.extraction_failures = 0;
+    }
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastResult = current.summary;
-    addLog(user, 'monitor', 'success', `${monitor.label} · ${responseStatus ? `HTTP ${responseStatus} · ` : ''}${current.summary}`, monitor.url, Date.now() - started, monitor.id, fetchDetails ? { fetch: fetchDetails } : null);
+    addLog(user, 'monitor', 'success', `${monitor.label} · ${responseStatus ? `HTTP ${responseStatus} · ` : ''}${current.summary}`, monitor.url, Date.now() - started, monitor.id, {
+      fetch: fetchDetails || null, current_value: current.value ?? current.summary,
+      previous_value: previousSnapshot?.value ?? null, changed: previousSnapshot ? current.content_hash && previousSnapshot.content_hash ? current.content_hash !== previousSnapshot.content_hash : JSON.stringify(previousSnapshot.value ?? previousSnapshot.summary) !== JSON.stringify(current.value ?? current.summary) : false,
+      ...(current.items ? { items: current.items, triggered_items: current.triggered_items || [] } : {}),
+      triggered, condition: monitor.kind === 'unified' ? describeRule(monitor) : monitor.description,
+      reason: triggered ? '检测值满足提醒条件，已加入通知队列' : '检测成功，本次没有新的触发变化',
+      summary: current.summary
+    });
     const hasActiveRecipient = monitor.webhookIds.some((id) => user.settings.webhooks.some((hook) => hook.id === id && hook.enabled));
     monitor.lastError = monitor.pendingNotifications.length ? '有通知待发送，将在下次检查时重试' : hasActiveRecipient ? '' : '接收渠道均已停用，请启用至少一个渠道';
     if (!monitor.baselined) {
@@ -455,6 +529,17 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
   } catch (error) {
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastError = error.message;
+    if (monitor.kind === 'unified' && error.code === 'RULE_EXTRACTION') {
+      monitor.status = 'needs_repair';
+      monitor.extraction_failures = (monitor.extraction_failures || 0) + 1;
+      if (!monitor.repair_suggestion && (!monitor.last_repair_at || Date.now() - Date.parse(monitor.last_repair_at) >= 30 * 60_000)) {
+        monitor.last_repair_at = new Date().toISOString();
+        try {
+          monitor.repair_suggestion = await ruleService.repair(user, monitor);
+          addEvent(user, 'info', '发现规则修复建议', monitor.repair_suggestion.reason, monitor.id);
+        } catch (repairError) { monitor.repair_error = repairError.message; }
+      }
+    }
     if (error.code?.startsWith('SOURCE_')) {
       monitor.sourceFailures = Math.min(20, (monitor.sourceFailures || 0) + 1);
       monitor.lastSourceError = error.code;
@@ -465,12 +550,16 @@ async function checkMonitor(user, monitor, { manual = false } = {}) {
       errorCode: error.code || null, fetch: error.fetchDetails || fetchDetails || null, retryAt: monitor.sourceRetryAt || null,
       requestUrl: monitor.url, httpStatus: error.responseStatus || responseStatus || null,
       networkCode: error.networkCode || null, networkCause: error.networkCause || null,
-      responseBody: error.responseBody || responseSample || null, validation: error.message
+      responseBody: error.responseBody || responseSample || null, validation: error.message,
+      current_value: null, previous_value: monitor.snapshot?.value ?? null, triggered: false,
+      reason: '本次提取失败，保留上次有效状态；未发送状态变化通知'
     });
     addEvent(user, 'error', '检查失败', `${monitor.label} · ${error.message}`, monitor.id);
     return { checked: false, error: error.message, errorCode: error.code || null, retryAt: monitor.sourceRetryAt || null };
   } finally {
     activeChecks.delete(monitor.id);
+    scheduleMonitor(user, monitor);
+    persist();
   }
 }
 
@@ -482,7 +571,24 @@ function aiEndpoint(baseUrl) {
 }
 
 function instructionUrl(input) {
-  return input.match(/tcp:\/\/(?:\[[^\]]+\]|[a-z0-9.-]+):\d{1,5}/i)?.[0] || input.match(/https?:\/\/[^\s<>"'“”‘’，。；、（）()]+/i)?.[0] || input.match(/\blog:[a-z0-9._/-]+/i)?.[0] || '';
+  return input.match(/tcp:\/\/(?:\[[^\]]+\]|[a-z0-9.-]+):\d{1,5}/i)?.[0] || [...input.matchAll(/https?:\/\/[^\s<>"'“”‘’，。；、（）()\[\]]+/gi)].map(match => match[0].replace(/[.!]+$/, '')).find(url => !/\/aff\.php(?:\?|$)|[?&]aff=|[?&]affiliate=/i.test(url)) || input.match(/\blog:[a-z0-9._/-]+/i)?.[0] || '';
+}
+
+function attachRequestedLink(rule, input) {
+  if (!/附上|带上|加上|链接|add|aff|推广|下单/i.test(input)) return;
+  const link = [...String(input).matchAll(/https?:\/\/[^\s<>"'“”‘’，。；、（）()\[\]]+/gi)].map(match => match[0].replace(/[.!]+$/, '')).find(url => /\/aff\.php(?:\?|$)|[?&]aff=|[?&]affiliate=/i.test(url));
+  if (link && !rule.notification?.body?.includes(link)) rule.notification = validateNotification({ ...rule.notification, body: (rule.notification?.body || '{{details}}') + '\n下单链接：' + link });
+}
+function verifiedRuleSettings(rule) {
+  const period = rule.interval < 60 ? rule.interval + ' 秒' : rule.interval / 60 + ' 分钟';
+  return ['每 ' + period + '检查一次', describeRule(rule)];
+}
+function verifiedRuleMessage(rule) {
+  const result = rule.last_test_result;
+  const snapshot = result?.snapshot;
+  const current = snapshot?.summary || result?.summary || '当前状态：' + displayValue(result?.current_value);
+  const period = rule.interval < 60 ? rule.interval + ' 秒' : rule.interval / 60 + ' 分钟';
+  return '已读取实际来源并通过自动验证。' + current + '。每 ' + period + '检查一次；' + describeRule(rule) + '。' + (rule.condition.initial === 'notify' ? '首次检查已满足条件也会通知；' + (rule.type === 'product_stock' ? '同一型号持续有货不会重复通知。' : '条件持续满足不会重复通知。') : '首次只记录当前状态，之后满足条件才通知。') + '确认后保存并开始运行。';
 }
 
 function needMoreInfo(questions) {
@@ -524,9 +630,11 @@ function draftPresentation(parsed) {
   };
 }
 
-async function checkSourceConnection(user, source) {
+async function checkSourceConnection(user, source, monitor = {}) {
   if (!source) return '';
-  const cacheKey = user.id + ':' + source + ':' + (user.settings.sourceProxy ? 'proxy' : 'server');
+  let options;
+  try { options = sourceOptions(user, monitor); } catch (error) { return '已尝试读取，但连接失败：' + error.message; }
+  const cacheKey = user.id + ':' + source + ':' + createHash('sha256').update(options.proxyUrl + ':' + options.direct + ':' + options.mode).digest('hex');
   const cached = sourceCheckCache.get(cacheKey);
   if (cached && Date.now() - cached.at < 30_000) return cached.summary;
   let summary;
@@ -536,10 +644,10 @@ async function checkSourceConnection(user, source) {
       inspectLog(logRoot, user, { url: normalized, plan: { keyword: '', initial: 'baseline' } }, null, true);
       summary = '已尝试读取：账户日志文件可访问。文件内容未发送给 AI。';
     } else if (normalized.startsWith('tcp://')) {
-      const result = await inspectService(normalized, { mode: 'unavailable' });
+      const result = await inspectMonitorService(user, { ...monitor, url: normalized }, { mode: 'unavailable' });
       summary = '已尝试连接：' + result.summary;
     } else {
-      const result = await fetchSource(normalized, sourceOptions(user));
+      const result = await fetchSource(normalized, options);
       const type = (result.headers['content-type'] || '类型未知').split(';')[0].slice(0, 60);
       summary = '已尝试读取：HTTP ' + result.status + ' · ' + (result.metadata.method === 'browser' ? '浏览器' : '直接请求') + ' · ' + type + '。响应内容未发送给 AI。';
     }
@@ -568,7 +676,7 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   trace.sourceMode = followupUrl ? '从补充信息提取' : fixedSourceUrl ? '单独填写' : sourceInput ? '单独填写的地址无效' : sourceUrl ? '从指令提取' : '未提供';
   if (!user.settings.aiKey) throw new Error('按需生成监控逻辑需要先在设置中填写 AI API Key');
   if (!user.settings.aiModel) throw new Error('请先填写 AI 模型名称');
-  if (sourceUrl && (sourceInput || !/提醒我|每隔.{0,20}提醒|每天.{0,20}提醒/.test(fullInput))) trace.sourceCheck = await checkSourceConnection(user, sourceUrl);
+  if (sourceUrl && (sourceInput || !/提醒我|每隔.{0,20}提醒|每天.{0,20}提醒/.test(fullInput))) trace.sourceCheck = await checkSourceConnection(user, sourceUrl, draftInput || {});
   const dmit = /\bdmit\b/i.test(fullInput);
   let timeZone = String(timeZoneInput || '').slice(0, 80);
   try { new Intl.DateTimeFormat('en-US', { timeZone }); } catch { timeZone = 'Asia/Shanghai'; }
@@ -579,9 +687,19 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   trace.apiEndpoint = new URL(endpoint).origin + new URL(endpoint).pathname;
   let draft = null;
   try { if (draftInput) draft = validateMonitor(draftInput, { allowMissingSource: true, allowPastReminder: true }); } catch { /* the latest user instruction can repair an incomplete draft */ }
+  let pageAnalysis = null;
+  if (/^https?:\/\//.test(sourceUrl) && (!draft || draft.kind === 'unified' && /修复|重新分析|换.*区域|检测方式/.test(fullInput))) {
+    try {
+      pageAnalysis = await ruleService.analyze(user, sourceUrl, draftInput || {});
+      trace.pageAnalysis = analysisForAI(pageAnalysis);
+    } catch (error) {
+      trace.pageAnalysis = { url: sourceUrl, error: error.message };
+      if (inferGoal(fullInput, draft).type === 'api_monitor') pageAnalysis = { url: sourceUrl, product: { name: draft?.label || '接口状态监控' }, candidates: [] };
+    }
+  }
   const aiRequest = {
       model: user.settings.aiModel,
-      messages: assistantMessages({ timeZone, sourceUrl, sourceInput, fixedSourceUrl, draft, instruction: input, turns, repairFeedback })
+      messages: assistantMessages({ timeZone, sourceUrl, sourceInput, fixedSourceUrl, draft, instruction: input, turns, repairFeedback, pageAnalysis: analysisForAI(pageAnalysis) })
     };
   trace.aiRequest = JSON.stringify(aiRequest).slice(0, 16000);
   const text = await fetchText(endpoint, {
@@ -597,10 +715,17 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     const content = String(result.choices?.[0]?.message?.content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     parsed = JSON.parse(content);
   } catch { const error = new Error('AI 返回内容无法解析'); error.repairable = true; throw error; }
+  if (parsed?.status === 'answer' && pageAnalysis && /监控|检查|检测|补货|有货.*通知|通知.*有货/.test(fullInput) && !/为什么|怎么|是不是|[吗？?]/.test(userTurns.at(-1) || input)) {
+    parsed = { ...parsed, status: 'ready', goal: inferGoal(fullInput, draft) };
+  }
   if (parsed?.status === 'answer') {
     const message = String(parsed.message || '').trim().slice(0, 1200);
     if (message) return { status: 'answer', message };
     return needMoreInfo(['请再告诉我你想了解的地方。']);
+  }
+  if (parsed?.status === 'need_more_info' && pageAnalysis) {
+    const known = inferGoal(fullInput, draft);
+    if (known.explicit && (known.type === 'product_stock' || known.type === 'price_change' && known.requested_condition) && pageAnalysis.candidates.some(candidate => candidate.type === known.type) && /字段|页面|样例|path|selector|库存/.test(JSON.stringify(parsed.questions || parsed.message))) parsed = { status: 'ready', goal: known };
   }
   if (parsed?.status === 'need_more_info') {
     const followup = needMoreInfo(parsed.questions || parsed.message);
@@ -628,6 +753,45 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     if (/补充|提供|缺少|不明确|不清楚/.test(String(parsed.error))) return needMoreInfo(parsed.error);
     throw new Error(String(parsed.error));
   }
+  if (parsed?.goal || draft?.kind === 'unified') {
+    if (!sourceUrl) return needMoreInfo(['请粘贴要关注的商品、网页或接口地址。']);
+    const rawGoal = parsed.goal || {};
+    const latestIntent = userTurns.slice().reverse().find(turn => inferGoal(turn, draft).explicit || /任意|补货|只要|有货就通知/.test(turn)) || userTurns.at(-1) || input;
+    const inferred = inferGoal(draft?.kind === 'unified' ? userTurns.at(-1) || input : latestIntent, draft);
+    const type = draft?.kind === 'unified' && !inferred.explicit && !inferred.condition_change ? draft.type : rawGoal.type || draft?.type || inferred.type;
+    if (rawGoal.type && inferred.explicit && type !== inferred.type && (!draft || inferred.type === draft.type)) {
+      throw Object.assign(new Error('AI 选择的监控目标与用户需求不一致，请保留用户要求的 ' + inferred.type + ' 目标并重新生成。'), { repairable: true });
+    }
+    const latestUserInput = userTurns.at(-1) || input;
+    const allowNotificationChange = !draft || /文案|标题|正文|(?:改|修改|调整|更新).{0,8}(?:通知|提醒|消息)|(?:通知|提醒|消息).{0,8}(?:内容|文案|标题|正文)/.test(latestUserInput);
+    const goal = {
+      type, name: draft && !/名称|名字|命名|任务名|叫做|改名/.test(latestUserInput) ? draft.name || draft.label : rawGoal.name || draft?.name,
+      condition: resolveRuleCondition(inferred.type === type ? inferred : { ...inferred, type, standard_condition: false, requested_condition: false }, rawGoal.condition, draft),
+      interval: resolveInterval(type, draft ? userTurns.at(-1) || input : fullInput, draft),
+      all_models: inferred.all_models,
+      candidate_id: rawGoal.candidate_id
+    };
+    let built;
+    const sameSource = draft?.kind === 'unified' && sourceUrl === draft.url && type === draft.type;
+    if (sameSource && !repairFeedback && !/修复|重新分析|换.*区域|检测方式/.test(fullInput)) {
+      const rule = validateMonitor({ ...draft, condition: goal.condition, label: goal.name || draft.label, intervalMinutes: (goal.interval ?? draft.interval) / 60, notification: parsed.notification && allowNotificationChange ? { ...draft.notification, ...parsed.notification } : draft.notification });
+      const report = await ruleService.test(user, { ...rule, sourceProxy: draftInput?.sourceProxy || '' });
+      built = { rule: { ...rule, confidence: report.confidence, last_test_result: report }, attempts: [{ attempt: 1, passed: true }] };
+    } else {
+      if (!pageAnalysis && draft) {
+        pageAnalysis = await ruleService.analyze(user, sourceUrl, draftInput || {});
+        trace.pageAnalysis = analysisForAI(pageAnalysis);
+      }
+      if (!pageAnalysis) throw Object.assign(new Error('无法取得真实页面数据，请检查地址或读取设置'), { code: 'RULE_VALIDATION_FAILED' });
+      built = await ruleService.build(user, goal, pageAnalysis, draftInput ? { ...draftInput, ...(draftInput.interval == null && draftInput.intervalMinutes != null ? { interval: draftInput.intervalMinutes * 60 } : {}) } : null);
+      if (parsed.notification && allowNotificationChange) built.rule.notification = validateNotification({ ...built.rule.notification, ...parsed.notification });
+    }
+    trace.ruleTests = built.attempts;
+    delete built.rule.sourceProxy;
+    attachRequestedLink(built.rule, fullInput);
+    return { status: 'ready', monitor: built.rule, parser: 'ai', analysis: built.analysis || analysisForAI(pageAnalysis), ...draftPresentation(parsed),
+      message: verifiedRuleMessage(built.rule), assumptions: verifiedRuleSettings(built.rule) };
+  }
   let output = ['ready', 'draft'].includes(parsed?.status) && parsed.monitor ? parsed.monitor : parsed;
   if (draft && output && typeof output === 'object' && !Array.isArray(output)) {
     const kind = output.kind || (output.remindAt ? 'reminder' : output.plan ? 'generated' : draft.kind);
@@ -654,14 +818,9 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     let plan;
     try { plan = validateGeneratedPlan(output.plan); }
     catch (error) { error.repairable = true; error.question = '你希望什么时候收到提醒？可以说“打不开时”或“出现某种变化时”。'; throw error; }
-    const minimum = ['service', 'log'].includes(plan.sourceType) ? 1 : 5;
-    const monitor = {
-      kind: 'generated', url: '', plan, notification: validateNotification(output.notification),
-      label: String(output.label || '新监控').trim().slice(0, 60),
-      intervalMinutes: Math.max(minimum, Math.min(1440, Number(output.intervalMinutes) || 5)),
-      severity: ['info', 'warning', 'critical'].includes(output.severity) ? output.severity : 'warning',
-      description: describeGeneratedPlan(plan)
-    };
+    let monitor;
+    try { monitor = validateMonitor({ ...output, kind: 'generated', url: '', plan, label: output.label || '新监控' }, { allowMissingSource: true }); }
+    catch (error) { error.repairable = true; throw error; }
     return { status: 'draft', monitor, parser: 'ai', missing: ['source'], ...presentation,
       message: presentation.message || '我已拟好监控方案。填入你平时访问的网址，就可以试跑并确认创建。' };
   }
@@ -700,6 +859,10 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
     try { decodedPath = decodeURIComponent(new URL(expected).pathname); } catch { /* URL was already validated */ }
     if (/(?:存在|包含|出现).*(?:通知|这两个字)/.test(decodedPath)) return needMoreInfo(['请确认真实网页地址。网址后面的中文描述可能被当成了路径。']);
   }
+  if (draftInput?.fetch) output.fetch = validateFetchOptions(draftInput.fetch);
+  const requestedInterval = inferGoal(draft ? userTurns.at(-1) || input : fullInput, draft).interval;
+  if (requestedInterval != null) output.intervalMinutes = requestedInterval / 60;
+  else if (draft?.intervalMinutes != null) output.intervalMinutes = draft.intervalMinutes;
   let candidate;
   try { candidate = validateMonitor({ ...output, kind: output.kind && output.kind === draft?.kind ? output.kind : 'generated' }); }
   catch (error) {
@@ -720,7 +883,11 @@ async function parseInstructionAttempt(user, instruction, sourceUrlInput, trace,
   if (dmit && !sourceUrl && anyAvailable && (candidate.plan.mode !== 'any' || candidate.plan.initial !== 'notify')) invalidAiRule('AI 没有按“任意有货”生成规则，请调整指令后重试');
   if (dmit && !sourceUrl && !anyAvailable && /补货|恢复供货|重新有货/.test(triggerIntent) && (candidate.plan.mode !== 'item-transition' || candidate.plan.initial !== 'baseline')) invalidAiRule('AI 没有按“补货变化”生成规则，请调整指令后重试');
   trace.validatedUrl = candidate.url;
-  return { status: 'ready', monitor: candidate, parser: 'ai', sourceNote, ...presentation };
+  let normalized;
+  try { normalized = await normalizeAiPlan(user, candidate, { instruction: draft ? userTurns.at(-1) || input : fullInput, analysis: pageAnalysis, ruleService, editing: Boolean(trace.editingMonitorId) || dmit && !sourceUrl, privateSourceProxy: draftInput?.sourceProxy || '', hasNotification: Boolean(output.notification) }); }
+  catch (error) { if (error.code !== 'RULE_VALIDATION_FAILED') error.repairable = true; throw error; }
+  attachRequestedLink(normalized, fullInput);
+  return { status: 'ready', monitor: normalized, parser: 'ai', sourceNote, ...presentation, ...(normalized.kind === 'unified' ? { message: verifiedRuleMessage(normalized), assumptions: verifiedRuleSettings(normalized) } : {}) };
 }
 
 async function parseInstruction(user, instruction, sourceUrlInput, trace, conversationInput = [], timeZone = '', draftInput = null) {
@@ -894,19 +1061,14 @@ async function handler(request, response) {
           try { verified = await testProxy(user, proxy); }
           catch (error) { return sendJson(response, error.status || 400, { error: error.message, code: error.code || 'PROXY_TEST_FAILED' }); }
           if ((user.settings.sourceProxyVersion || 0) !== version) return sendJson(response, 409, { error: '代理配置已在验证期间更改，请重新验证后应用', code: 'PROXY_CONFIG_CHANGED' });
-          if (body.applyAll && user.monitors.some(monitor => monitor.fetch?.proxy === 'direct' && activeChecks.has(monitor.id))) return sendJson(response, 409, { error: '代理已验证，有直接连接的任务正在检查，请等待检查完成后再应用', code: 'SOURCE_CHECK_BUSY' });
         }
         user.settings.sourceProxy = proxy;
         user.settings.sourceProxyTest = verified ? { ip: verified.ip, testedAt: verified.testedAt, durationMs: verified.durationMs } : null;
         user.settings.sourceProxyVersion = version + 1;
         for (const monitor of user.monitors) {
-          const webSource = monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && ['log', 'service'].includes(monitor.plan.sourceType));
+          const webSource = supportsMonitorProxy(monitor);
           if (!webSource) continue;
-          if (body.applyAll && request.method === 'PUT' && monitor.fetch?.proxy === 'direct') {
-            monitor.fetch = { ...validateFetchOptions(monitor.fetch), proxy: 'default' };
-            monitor.revision = (monitor.revision || 0) + 1;
-          }
-          if (monitor.fetch?.proxy === 'direct') continue;
+          if (['direct', 'custom'].includes(monitor.fetch?.proxy)) continue;
           Object.assign(monitor, { sourceRetryAt: null, sourceFailures: 0, lastSourceError: '', lastFetch: null });
         }
         for (const key of sourceCheckCache.keys()) if (key.startsWith(user.id + ':')) sourceCheckCache.delete(key);
@@ -915,8 +1077,11 @@ async function handler(request, response) {
       }
       if (request.method === 'POST' && pathname === '/api/source-proxy/test') {
         const body = await readJson(request);
-        const proxyUrl = validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
-        if (!proxyUrl) throw new Error('请先填写或保存代理地址');
+        const monitor = body.monitorId ? user.monitors.find(item => item.id === body.monitorId) : null;
+        if (body.monitorId && !monitor) return sendJson(response, 404, { error: '任务不存在' });
+        const candidateProxy = String(body.proxyUrl || '').trim();
+        const proxyUrl = validateSourceProxy(candidateProxy || (monitor ? monitor.sourceProxy : user.settings.sourceProxy));
+        if (!proxyUrl) throw Object.assign(new Error(monitor ? '此任务尚未保存独立代理，请先填写代理地址' : '请先填写或保存代理地址'), { code: 'SOURCE_PROXY_MISSING' });
         if (!String(body.targetUrl || '').trim()) {
           try { return sendJson(response, 200, await testProxy(user, proxyUrl)); }
           catch (error) { return sendJson(response, error.status || 400, { error: error.message, code: error.code || 'PROXY_TEST_FAILED' }); }
@@ -936,8 +1101,8 @@ async function handler(request, response) {
       if (request.method === 'PUT' && pathname === '/api/settings') {
         const body = await readJson(request);
         const webhooks = validateWebhooks(body.webhooks ?? user.settings.webhooks);
-        const aiBaseUrl = body.aiBaseUrl ? urlOf(body.aiBaseUrl, 'AI API 地址') : 'https://api.openai.com/v1';
-        const aiModel = String(body.aiModel || '').trim().slice(0, 100);
+        const aiBaseUrl = body.aiBaseUrl === undefined ? user.settings.aiBaseUrl : body.aiBaseUrl ? urlOf(body.aiBaseUrl, 'AI API 地址') : 'https://api.openai.com/v1';
+        const aiModel = body.aiModel === undefined ? user.settings.aiModel : String(body.aiModel || '').trim().slice(0, 100);
         const aiKey = body.aiKey ? String(body.aiKey).trim().slice(0, 500) : user.settings.aiKey;
         user.settings = { ...user.settings, webhooks, aiBaseUrl, aiModel, aiKey };
         const keptIds = new Set(webhooks.map((hook) => hook.id));
@@ -954,8 +1119,77 @@ async function handler(request, response) {
             monitor.lastError = '';
           }
         }
+        for (const monitor of user.monitors) scheduleMonitor(user, monitor);
         persist();
         return sendJson(response, 200, publicState(user));
+      }
+      if (request.method === 'POST' && pathname === '/api/analyze') {
+        const body = await readJson(request);
+        const saved = body.monitorId ? user.monitors.find(m => m.id === body.monitorId) : null;
+        if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
+        const input = mergeRule(saved || {}, body.rule || {});
+        input.sourceProxy = body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || '';
+        const goal = inferGoal(body.instruction || '', input, body.type);
+        if (body.condition) goal.condition = body.condition;
+        const analysis = await ruleService.analyze(user, urlOf(body.url || input.url, '监控地址'), input, { browser: body.browser === true });
+        const built = await ruleService.build(user, { ...goal, name: input.label, interval: resolveInterval(goal.type, body.instruction || '', input, body.interval ?? (body.intervalMinutes != null ? body.intervalMinutes * 60 : undefined)) }, analysis, input);
+        return sendJson(response, 200, { status: 'ready', monitor: built.rule, analysis: built.analysis, attempts: built.attempts });
+      }
+      if (request.method === 'POST' && pathname === '/api/element-preview') {
+        const body = await readJson(request);
+        const saved = body.monitorId ? user.monitors.find(m => m.id === body.monitorId) : null;
+        if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
+        const input = { ...saved, ...body.rule, sourceProxy: body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || '' };
+        const url = urlOf(body.url || input.url, '监控地址');
+        const source = await fetchSource(url, { ...sourceOptions(user, input), ...(body.browser ? { mode: 'browser' } : {}) });
+        return sendJson(response, 200, { ...createElementPreview(user.id, url, source.body, source.metadata.method, input), fetch: { method: source.metadata.method, route: source.metadata.route } });
+      }
+      if (request.method === 'POST' && pathname === '/api/select-element') {
+        const body = await readJson(request);
+        const selected = selectedElement(user.id, body.previewId, body.index);
+        const saved = body.monitorId ? user.monitors.find(m => m.id === body.monitorId) : null;
+        if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
+        const input = mergeRule(saved || {}, body.rule || {});
+        const inferred = inferGoal(body.instruction || '', input, body.type);
+        const type = inferred.type;
+        const collection = type === 'product_stock' && body.scope === 'all_models' ? selected.collection : null;
+        if (body.scope === 'all_models' && !collection) throw new Error('请点击某个型号的库存文字；当前区域无法验证全部型号库存');
+        const draft = {
+          ...input, kind: 'unified', type, url: selected.url, label: input.label || '网页区域监控',
+          detection_method: selected.method === 'browser' ? 'browser' : 'dom', target_element: collection ? { label: '各型号库存区域' } : selected.target,
+          extraction_rule: collection || { kind: type === 'product_stock' ? 'stock' : type === 'price_change' ? 'number' : 'text', ...(selected.attribute ? { attribute: selected.attribute } : {}) },
+          condition: body.condition || (input.type === type ? input.condition : inferred.condition),
+          interval: input.interval ?? (type === 'product_stock' ? 30 : 300), sourceProxy: body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || ''
+        };
+        const spec = validateMonitor(draft);
+        const report = await ruleService.test(user, { ...spec, sourceProxy: draft.sourceProxy });
+        return sendJson(response, 200, { status: 'ready', monitor: { ...spec, confidence: report.confidence, last_test_result: report } });
+      }
+      const repairMatch = pathname.match(/^\/api\/monitors\/([^/]+)\/(repair|logs)$/);
+      if (repairMatch) {
+        const monitor = user.monitors.find(m => m.id === repairMatch[1]);
+        if (!monitor) return sendJson(response, 404, { error: '任务不存在' });
+        if (request.method === 'GET' && repairMatch[2] === 'logs') return sendJson(response, 200, { logs: user.logs.filter(log => log.monitorId === monitor.id).slice(0, 100) });
+        if (request.method === 'POST' && repairMatch[2] === 'repair') {
+          if (monitor.kind !== 'unified') throw new Error('此任务使用旧版检测方式，可以通过“与 AI 修改”升级或重新选择网页区域');
+          const revision = monitor.revision || 0;
+          let proposal;
+          if (user.settings.aiKey && user.settings.aiModel) {
+            try {
+              const trace = {};
+              const parsed = await parseInstruction(user, '修复这个任务：重新分析当前页面，寻找新的检测区域，保留原来的监控目标、条件、频率与通知内容。', monitor.url, trace, [], '', monitor);
+              if (!parsed.monitor || parsed.monitor.kind !== 'unified') throw new Error('AI 未返回修复目标');
+              const proposed = { ...parsed.monitor, condition: monitor.condition, interval: monitor.interval, intervalMinutes: monitor.intervalMinutes, notification: monitor.notification };
+              const tested = await ruleService.test(user, { ...proposed, sourceProxy: monitor.sourceProxy || '' });
+              proposal = { rule: { ...proposed, last_test_result: tested, confidence: tested.confidence }, reason: 'AI 已重新分析当前页面，替代区域通过实际检测。确认后更新原任务。', previous_target: monitor.target_element, proposed_at: new Date().toISOString(), revision };
+            } catch { proposal = await ruleService.repair(user, monitor); }
+          } else proposal = await ruleService.repair(user, monitor);
+          if (!user.monitors.includes(monitor)) return sendJson(response, 404, { error: '任务已删除' });
+          if ((monitor.revision || 0) !== revision) return sendJson(response, 409, { error: '任务已修改，请重新分析' });
+          monitor.repair_suggestion = proposal;
+          persist();
+          return sendJson(response, 200, proposal);
+        }
       }
       if (request.method === 'POST' && pathname === '/api/parse') {
         const body = await readJson(request);
@@ -964,38 +1198,53 @@ async function handler(request, response) {
         if (body.monitorId && !savedMonitor) return sendJson(response, 404, { error: '任务不存在' });
         const revision = savedMonitor?.revision || 0;
         if (savedMonitor && body.expectedRevision != null && body.expectedRevision !== revision) return sendJson(response, 409, { error: '任务已被修改，请重新打开任务后再与 AI 调整' });
-        const trace = {};
-        const safeTrace = () => Object.fromEntries(Object.entries(trace).map(([name, value]) => [name, typeof value === 'string' && user.settings.aiKey ? value.replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : value]));
+        const parsingUser = { ...user, settings: { ...user.settings } };
+        const redact = value => {
+          const secrets = [parsingUser.settings.aiKey, user.settings.aiKey].filter(Boolean).flatMap(key => [key, encodeURIComponent(key), JSON.stringify(key).slice(1, -1)]);
+          let safe = [...new Set(secrets)].sort((a, b) => b.length - a.length).reduce((text, secret) => text.replaceAll(secret, '[已隐藏的 API Key]'), String(value));
+          for (const proxy of [parsingUser.settings.sourceProxy, savedMonitor?.sourceProxy, body.sourceProxy, body.draft?.sourceProxy].filter(Boolean)) safe = redactProxy(safe, proxy);
+          return safe;
+        };
+        const trace = { editingMonitorId: savedMonitor?.id || null };
+        const safeTrace = () => redactData(trace, redact);
         try {
-          const draft = body.draft || savedMonitor;
+          const privateProxy = body.sourceProxy !== undefined ? body.sourceProxy : body.draft?.sourceProxy;
+          const selectedProxy = privateProxy === null ? '' : privateProxy ? validateSourceProxy(privateProxy) : savedMonitor?.sourceProxy || '';
+          const draft = body.draft ? { ...body.draft, sourceProxy: selectedProxy } : savedMonitor ? { ...savedMonitor, sourceProxy: selectedProxy } : body.fetch ? { fetch: validateFetchOptions(body.fetch), sourceProxy: selectedProxy } : null;
           const source = savedMonitor ? instructionUrl(String(body.instruction || '')) || body.sourceUrl || draft?.url : body.sourceUrl;
-          const parsed = await parseInstruction(user, body.instruction, source, trace, body.conversation, body.timeZone, draft);
+          const parsed = await parseInstruction(parsingUser, body.instruction, source, trace, body.conversation, body.timeZone, draft);
           if (savedMonitor) {
             if (!user.monitors.includes(savedMonitor)) return sendJson(response, 404, { error: '任务已删除，本次方案未应用' });
             if ((savedMonitor.revision || 0) !== revision) return sendJson(response, 409, { error: '任务在生成期间被修改，请重新打开后再调整' });
             if (parsed.monitor && ((parsed.monitor.kind === 'reminder') !== (savedMonitor.kind === 'reminder'))) return sendJson(response, 200, { status: 'answer', message: '这会把任务改成另一种类别。当前修改保留原任务类别；你可以取消修改后创建新的监控或提醒。' });
             parsed.editing = { monitorId: savedMonitor.id, revision };
           }
+          if (parsed.monitor) {
+            if (parsed.monitor.kind !== 'unified') parsed.monitor.monitor_rule = legacyRuleView(parsed.monitor);
+            parsed.monitor.hasSourceProxy = Boolean(draft?.sourceProxy);
+            parsed.monitor.sourceProxyEndpoint = proxyEndpoint(draft?.sourceProxy);
+            parsed.monitor.sourceProxyTest = draft?.sourceProxy && draft.sourceProxy === savedMonitor?.sourceProxy ? savedMonitor.sourceProxyTest || null : null;
+          }
           if (trace.sourceCheck) parsed.sourceCheck = trace.sourceCheck;
           if (parsed.status === 'answer') {
             trace.validation = '已回答用户问题';
             addLog(user, 'parse', 'success', 'AI 已回答本轮问题，等待用户继续', null, Date.now() - started, null, safeTrace());
-            return sendJson(response, 200, parsed);
+            return sendJson(response, 200, redactData(parsed, redact));
           }
           if (parsed.status === 'need_more_info') {
             trace.validation = '需要补充信息';
-            addLog(user, 'parse', 'success', `AI 需要补充信息：${parsed.questions.join('；')}`, null, Date.now() - started, null, safeTrace());
-            return sendJson(response, 200, parsed);
+            addLog(user, 'parse', 'success', redact(`AI 需要补充信息：${parsed.questions.join('；')}`), null, Date.now() - started, null, safeTrace());
+            return sendJson(response, 200, redactData(parsed, redact));
           }
           trace.validation = parsed.status === 'draft' ? '草稿已生成，待补充目标' : '通过';
           addLog(user, 'parse', 'success', `AI 解析生成 ${parsed.monitor.kind} 规则`, null, Date.now() - started, null, safeTrace());
-          return sendJson(response, 200, parsed);
+          return sendJson(response, 200, redactData(parsed, redact));
         } catch (error) {
           if (error.responseStatus) trace.httpStatus = error.responseStatus;
           if (error.responseBody) trace.aiResponse = error.responseBody;
           if (error.networkCode) trace.networkCode = error.networkCode;
           if (error.networkCause) trace.networkCause = error.networkCause;
-          const safeError = new Error(user.settings.aiKey ? String(error.message).replaceAll(user.settings.aiKey, '[已隐藏的 API Key]') : String(error.message));
+          const safeError = new Error(redact(error.message));
           trace.validation = safeError.message;
           addLog(user, 'parse', 'error', safeError.message, null, Date.now() - started, null, safeTrace());
           throw safeError;
@@ -1007,6 +1256,7 @@ async function handler(request, response) {
         if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
         const input = saved ? { ...saved, ...body.rule, kind: body.rule?.kind || saved.kind } : body.rule;
         const spec = { ...validateMonitor(input, { allowMissingSource: true, allowPastReminder: Boolean(saved) }), priority: input.priority,
+          sourceProxy: input.sourceProxy === null ? '' : input.sourceProxy ? validateSourceProxy(input.sourceProxy) : saved?.sourceProxy || '',
           webhookIds: input.webhookIds, id: saved?.id };
         const previous = notificationPreviews.get(body.previousPreviewId);
         const observed = previous?.userId === user.id && previous.expiresAt > Date.now() && previous.sourceSignature === previewSourceSignature(spec)
@@ -1032,15 +1282,30 @@ async function handler(request, response) {
       }
       if (request.method === 'POST' && pathname === '/api/preview-check') {
         const input = await readJson(request);
+        const saved = input.monitorId ? user.monitors.find(item => item.id === input.monitorId) : null;
+        if (input.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
+        const revision = saved?.revision || 0;
+        if (saved && input.expectedRevision != null && input.expectedRevision !== revision) return sendJson(response, 409, { error: '任务已修改，请重新打开后再试跑', code: 'MONITOR_CHANGED' });
         const spec = { ...validateMonitor(input), priority: input.priority, webhookIds: input.webhookIds };
+        const proxySettings = await prepareMonitorProxy(user, spec, input, saved, true);
+        if (saved && !user.monitors.includes(saved)) return sendJson(response, 404, { error: '任务已删除，本次试跑未开始' });
+        if (saved && (saved.revision || 0) !== revision) return sendJson(response, 409, { error: '任务在验证代理期间已修改，请重新打开后再试跑', code: 'MONITOR_CHANGED' });
+        Object.assign(spec, proxySettings);
         const started = Date.now();
         let status;
         let responseSample = '';
         let fetchDetails;
         try {
           let result;
-          if (spec.kind === 'generated' && spec.plan.sourceType === 'service') {
-            result = await inspectService(spec.url, spec.plan);
+          let testResult = null;
+          if (spec.kind === 'unified') {
+            testResult = await ruleService.test(user, spec);
+            result = testResult.snapshot;
+            fetchDetails = result.fetch;
+            status = result.httpStatus;
+          } else if (spec.kind === 'generated' && spec.plan.sourceType === 'service') {
+            result = await inspectMonitorService(user, spec, spec.plan);
+            fetchDetails = result.fetch;
             status = result.httpStatus;
           } else if (spec.kind === 'generated' && spec.plan.sourceType === 'log') result = inspectLog(logRoot, user, spec, null, true);
           else {
@@ -1053,7 +1318,7 @@ async function handler(request, response) {
             result = spec.kind === 'generated' ? inspectGenerated(spec.plan, body) : inspectPage(spec, body);
           }
           addLog(user, 'preview', 'success', `来源测试 · ${status ? `HTTP ${status} · ` : ''}${result.summary}`, spec.url, Date.now() - started, null, fetchDetails ? { fetch: fetchDetails } : null);
-          return sendJson(response, 200, { fetch: fetchDetails, status: status || null, healthy: result.healthy, summary: result.summary, notificationPreview: buildNotificationPreview(user, spec, result) });
+          return sendJson(response, 200, { fetch: fetchDetails, status: status || null, healthy: result.healthy, summary: result.summary, last_test_result: testResult, notificationPreview: buildNotificationPreview(user, spec, result) });
         } catch (error) {
           addLog(user, 'preview', 'error', `来源测试 · ${error.message}`, spec.url, Date.now() - started, null, {
             errorCode: error.code || null, fetch: error.fetchDetails || fetchDetails || null,
@@ -1092,10 +1357,17 @@ async function handler(request, response) {
         if (user.monitors.length >= 100) throw new Error('每个账户最多创建 100 个监控任务');
         const priority = body.priority == null || body.priority === '' ? null : Number(body.priority);
         if (priority != null && (!Number.isInteger(priority) || priority < 1 || priority > 5)) throw new Error('ntfy 优先级必须在 1 到 5 之间');
-        const monitor = { ...spec, priority, webhookIds, pendingNotifications: [], id: randomUUID(), enabled: true, createdAt: new Date().toISOString(), baselined: false, snapshot: null, lastCheckAt: null, lastResult: '', lastError: '' };
+        const proxySettings = await prepareMonitorProxy(user, spec, body);
+        if (user.monitors.length >= 100) throw new Error('每个账户最多创建 100 个监控任务');
+        selectedWebhookIds(user, webhookIds);
+        const verification = spec.kind === 'unified' ? await ruleService.test(user, { ...spec, ...proxySettings }) : null;
+        if (user.monitors.length >= 100) throw new Error('每个账户最多创建 100 个监控任务');
+        selectedWebhookIds(user, webhookIds);
+        const monitor = { ...spec, ...proxySettings, ...(verification ? { last_test_result: verification, confidence: verification.confidence, status: 'active' } : {}), priority, webhookIds, pendingNotifications: [], id: randomUUID(), enabled: true, createdAt: new Date().toISOString(), baselined: false, snapshot: null, lastCheckAt: null, lastResult: '', lastError: '' };
         user.monitors.unshift(monitor);
         persist();
-        if (monitor.kind !== 'reminder') await checkMonitor(user, monitor);
+        if (monitor.kind !== 'reminder') await checkMonitor(user, monitor, { observed: verification?.snapshot });
+        scheduleMonitor(user, monitor);
         return sendJson(response, 201, { status: 'created', ...publicState(user) });
       }
       const match = pathname.match(/^\/api\/monitors\/([^/]+)(?:\/(check))?$/);
@@ -1110,14 +1382,27 @@ async function handler(request, response) {
           const body = await readJson(request);
           if (body.expectedRevision != null && body.expectedRevision !== (monitor.revision || 0)) return sendJson(response, 409, { error: '这个任务已在其他位置被修改。请重新打开任务，再确认本次调整。' });
           if (activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '任务正在检查或发送，请稍后再次保存；本次修改已保留。' });
+          const revision = monitor.revision || 0;
+          const candidate = body.rule ? validateMonitor(mergeRule(monitor, body.rule), { allowPastReminder: monitor.kind === 'reminder' && Date.parse(body.rule.remindAt || monitor.remindAt) === Date.parse(monitor.remindAt) }) : monitor;
+          if (body.webhookIds !== undefined) selectedWebhookIds(user, body.webhookIds);
+          const proxySettings = body.rule ? await prepareMonitorProxy(user, candidate, body.rule, monitor) : { sourceProxy: monitor.sourceProxy || '', sourceProxyTest: monitor.sourceProxyTest || null };
+          if (!user.monitors.includes(monitor)) return sendJson(response, 404, { error: '任务已删除，本次修改未应用' });
+          if ((monitor.revision || 0) !== revision) return sendJson(response, 409, { error: '任务在验证代理期间已修改，请重新打开后再保存', code: 'MONITOR_CHANGED' });
+          if (activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '代理已验证，任务正在检查或发送，请完成后再保存', code: 'MONITOR_BUSY' });
+          const nextVerification = candidate.kind === 'unified' && (
+            monitor.kind !== 'unified' || ruleSignature(candidate) !== ruleSignature(monitor) || candidate.fetch?.proxy === 'custom' && proxySettings.sourceProxy !== (monitor.sourceProxy || '') || body.enabled && !monitor.last_test_result?.passed
+          ) ? await ruleService.test(user, { ...candidate, ...proxySettings }) : null;
+          if (!user.monitors.includes(monitor)) return sendJson(response, 404, { error: '任务已删除，本次修改未应用' });
+          if ((monitor.revision || 0) !== revision || activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '任务在验证期间发生变化，请重新打开后保存', code: 'MONITOR_CHANGED' });
           const updated = structuredClone(monitor);
+          Object.assign(updated, proxySettings);
           let resetBaseline = false;
           let fetchChanged = false;
           if (body.rule) {
             const kind = body.rule.kind || monitor.kind;
-            if (kind !== monitor.kind && (kind !== 'generated' || monitor.kind === 'reminder')) throw new Error('本次修改需要保留任务类别；如需在监控和日历提醒之间切换，请另建任务');
+            if (kind !== monitor.kind && (!['generated', 'unified'].includes(kind) || monitor.kind === 'reminder')) throw new Error('本次修改需要保留任务类别；如需在监控和日历提醒之间切换，请另建任务');
             const unchangedReminderTime = monitor.kind === 'reminder' && Date.parse(body.rule.remindAt || monitor.remindAt) === Date.parse(monitor.remindAt);
-            const next = validateMonitor({ ...monitor, ...body.rule, kind }, { allowPastReminder: unchangedReminderTime });
+            const next = validateMonitor(mergeRule(monitor, { ...body.rule, kind }), { allowPastReminder: unchangedReminderTime });
             if (body.rule.priority !== undefined) {
               next.priority = body.rule.priority === '' || body.rule.priority == null ? null : Number(body.rule.priority);
               if (next.priority != null && (!Number.isInteger(next.priority) || next.priority < 1 || next.priority > 5)) throw new Error('ntfy 优先级必须在 1 到 5 之间');
@@ -1126,8 +1411,8 @@ async function handler(request, response) {
             if (monitor.kind === 'reminder' && (next.remindAt !== monitor.remindAt || next.repeatMinutes !== (monitor.repeatMinutes || 0))) {
               Object.assign(updated, { firedAt: null, completedAt: null, pendingNotifications: [], lastCheckAt: null, lastError: '', lastResult: '' });
             }
-            resetBaseline = monitor.kind !== 'reminder' && (kind !== monitor.kind || ['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan));
-            fetchChanged = JSON.stringify(validateFetchOptions(next.fetch)) !== JSON.stringify(validateFetchOptions(monitor.fetch));
+            resetBaseline = monitor.kind !== 'reminder' && (kind !== monitor.kind || ['url', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected'].some((key) => next[key] !== monitor[key]) || JSON.stringify(next.plan) !== JSON.stringify(monitor.plan) || kind === 'unified' && ruleSignature({ ...next, fetch: monitor.fetch }) !== ruleSignature(monitor));
+            fetchChanged = JSON.stringify(validateFetchOptions(next.fetch)) !== JSON.stringify(validateFetchOptions(monitor.fetch)) || proxySettings.sourceProxy !== (monitor.sourceProxy || '');
             if (fetchChanged || resetBaseline) Object.assign(updated, { sourceFailures: 0, sourceRetryAt: null, lastSourceError: '', lastFetch: null });
             if (kind !== monitor.kind) for (const key of ['keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'plan']) delete updated[key];
             Object.assign(updated, next);
@@ -1145,14 +1430,32 @@ async function handler(request, response) {
             updated.enabled = Boolean(body.enabled);
           }
           if (/^(没有接收渠道|接收渠道均已停用)/.test(updated.lastError || '')) updated.lastError = '';
+          if (updated.kind === 'unified') {
+            updated.status = updated.enabled ? 'active' : 'paused';
+            updated.last_test_result = nextVerification || monitor.last_test_result;
+            updated.confidence = nextVerification?.confidence ?? monitor.confidence;
+            if (resetBaseline && nextVerification) {
+              updated.snapshot = nextVerification.snapshot;
+              updated.baselined = true;
+              updated.lastCheckAt = nextVerification.checked_at;
+              updated.lastResult = nextVerification.summary;
+              updated.repair_suggestion = null;
+              updated.lastError = '';
+            }
+          }
+          updated.id = monitor.id;
+          updated.createdAt = monitor.createdAt;
           updated.revision = (monitor.revision || 0) + 1;
           for (const key of Object.keys(monitor)) if (!(key in updated)) delete monitor[key];
           Object.assign(monitor, updated);
           persist();
-          if ((resetBaseline || fetchChanged) && monitor.enabled) await checkMonitor(user, monitor);
+          if ((resetBaseline || fetchChanged) && monitor.enabled && !nextVerification) await checkMonitor(user, monitor);
+          scheduleMonitor(user, monitor);
           return sendJson(response, 200, publicState(user));
         }
         if (request.method === 'DELETE' && !match[2]) {
+          if (activeChecks.has(monitor.id)) return sendJson(response, 409, { error: '任务正在检查或发送，请等待完成后再删除。', code: 'MONITOR_BUSY' });
+          scheduler.cancel(monitor.id);
           user.monitors = user.monitors.filter((item) => item.id !== monitor.id);
           persist();
           return sendJson(response, 200, publicState(user));
@@ -1162,35 +1465,43 @@ async function handler(request, response) {
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: '不支持的请求方法' });
     const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-    if (!['index.html', 'app.js', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
+    if (!['index.html', 'app.js', 'rule-ui.js', 'picker.css', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
     const file = path.join(root, 'public', filename);
     response.writeHead(200, { 'content-type': contentTypes[path.extname(file)], 'content-security-policy': "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'" });
     fs.createReadStream(file).pipe(response);
   } catch (error) {
-    sendJson(response, 400, { error: error.message || '请求失败' });
+    sendJson(response, [400, 403, 404, 409, 502].includes(error.status) ? error.status : 400, { error: error.message || '请求失败', ...(error.code ? { code: error.code } : {}), ...(error.last_test_result ? { last_test_result: error.last_test_result } : {}), ...(error.attempts ? { attempts: error.attempts } : {}) });
   }
 }
 
 const server = http.createServer(handler);
 server.listen(port, host, () => console.log(`Webhook Radar: http://${host}:${port}`));
-const maxScheduledChecks = 16;
-setInterval(() => {
-  const now = Date.now();
-  for (const user of store.state.users) for (const monitor of user.monitors) {
-    if (activeChecks.size >= maxScheduledChecks) return;
-    const lastCheck = Date.parse(monitor.lastCheckAt);
-    const retryAt = Date.parse(monitor.sourceRetryAt);
-    const due = Number.isFinite(retryAt) ? now >= retryAt : !Number.isFinite(lastCheck) || now - lastCheck >= monitor.intervalMinutes * 60_000;
-    if (monitor.kind !== 'reminder' && monitor.enabled && due) checkMonitor(user, monitor);
+const scheduler = createScheduler({
+  concurrency: 16,
+  run: async ({ user, monitor }) => {
+    if (!user.monitors.includes(monitor) || !monitor.enabled || monitor.completedAt) return;
+    if (activeChecks.size >= 16 || activeChecks.has(monitor.id)) {
+      monitor.next_run_time = new Date(Date.now() + 100).toISOString();
+      scheduler.schedule(monitor.id, monitor.next_run_time, { user, monitor });
+      return;
+    }
+    await checkMonitor(user, monitor);
   }
-}, 20_000).unref();
-
-setInterval(() => {
-  const now = Date.now();
-  for (const user of store.state.users) for (const reminder of user.monitors) {
-    if (activeChecks.size >= maxScheduledChecks) return;
-    if (reminder.kind !== 'reminder' || !reminder.enabled || reminder.completedAt) continue;
-    const lastCheck = Date.parse(reminder.lastCheckAt);
-    if (Date.parse(reminder.remindAt) <= now && (!Number.isFinite(lastCheck) || now - lastCheck >= 60_000)) checkReminder(user, reminder);
+});
+function scheduleMonitor(user, monitor, restore = false) {
+  if (!monitor.enabled || monitor.completedAt || !user.monitors.includes(monitor)) {
+    monitor.next_run_time = null;
+    scheduler.cancel(monitor.id);
+    return;
   }
-}, 1000).unref();
+  const last = Date.parse(monitor.lastCheckAt);
+  let due = monitor.kind === 'reminder'
+    ? Math.max(Date.parse(monitor.remindAt), Number.isFinite(last) ? last + 60_000 : 0)
+    : Number.isFinite(Date.parse(monitor.sourceRetryAt)) ? Date.parse(monitor.sourceRetryAt)
+    : Number.isFinite(last) ? last + monitor.intervalMinutes * 60_000 : Date.now();
+  if (restore && Number.isFinite(Date.parse(monitor.next_run_time))) due = Math.min(due, Date.parse(monitor.next_run_time));
+  monitor.next_run_time = new Date(Math.max(Date.now(), due)).toISOString();
+  scheduler.schedule(monitor.id, monitor.next_run_time, { user, monitor });
+}
+for (const user of store.state.users) for (const monitor of user.monitors) scheduleMonitor(user, monitor, true);
+persist();
