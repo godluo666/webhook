@@ -70,7 +70,7 @@ let savedSidebarVisibility = 'visible';
 try { savedSidebarVisibility = localStorage.getItem('webhook-radar-sidebar-visibility') || 'visible'; } catch { /* keep navigation visible */ }
 setSidebarVisible(savedSidebarVisibility !== 'hidden');
 sidebarVisibility.addEventListener('click', () => setSidebarVisible(sidebarShell.classList.contains('sidebar-hidden'), true));
-const pageNames = { top: '概览', create: '智能创建', monitors: '任务与提醒', notifications: '快速发送', channels: '通知渠道', 'ai-settings': 'AI 设置', 'fetch-settings': '读取设置', activity: '活动与日志', account: '账户安全' };
+const pageNames = { top: '概览', create: '智能创建', monitors: '任务与提醒', notifications: '快速发送', channels: '通知渠道', 'ai-settings': 'AI 设置', 'fetch-settings': '读取设置', activity: '活动与日志', account: '账户安全', orders: '自动下单' };
 function syncNavigation(resetScroll = false) {
   const requested = (location.hash || '#top').slice(1);
   const view = requested === 'settings' ? 'ai-settings' : requested in pageNames ? requested : 'top';
@@ -372,6 +372,7 @@ function render(force = false, resetEditorId) {
   renderStats();
   renderSourceSettings();
   renderMonitors();
+  if (typeof renderOrders === 'function') renderOrders();
   if (activeTaskId && activeTaskId === resetEditorId) {
     const task = appState.monitors.find(item => item.id === activeTaskId);
     if (task) openTaskEditor(task); else closeTaskEditor();
@@ -1183,6 +1184,7 @@ function showAuth() {
   appState = { settings: { webhooks: [] }, monitors: [], events: [], logs: [], sentCount: 0 };
   for (const selector of ['#monitor-list', '#webhook-list', '#send-targets', '#log-list', '#activity-list']) { const node = $(selector); if (node) node.innerHTML = ''; }
   closeTaskEditor();
+  if (typeof resetOrderUI === 'function') resetOrderUI();
   for (const dialog of document.querySelectorAll('dialog[open]')) dialog.close();
   for (const inspection of document.querySelectorAll('.rule-dialog')) inspection.remove();
   setAuthMode('login');

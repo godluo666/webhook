@@ -23,6 +23,7 @@ import { normalizeAiPlan } from './lib/ai-rule-compat.js';
 import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/rule-policy.js';
 import { createScheduler } from './lib/scheduler.js';
 import { createElementPreview, selectedElement } from './lib/element-picker.js';
+import { createOrderService, validateOrderTask, publicOrderTask } from './lib/orders.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
@@ -76,6 +77,28 @@ function inspectMonitorService(user, monitor, plan) {
   return inspectRoutedService(monitor.url, plan, sourceOptions(user, monitor));
 }
 const ruleService = createRuleService({ fetchSource, sourceOptions, inspectService: inspectRoutedService });
+const orderService = createOrderService({
+  persist: () => store.persist(), withProxy: withSourceProxy, sourceOptions,
+  requestAI: async (user, messages, {signal} = {}) => {
+    if (!user.settings.aiKey || !user.settings.aiModel) throw new Error('请先填写 AI API Key 和模型名称');
+    const raw = await fetchText(aiEndpoint(user.settings.aiBaseUrl), {
+      method: 'POST', timeout: 45000, maxBytes: 100000, signal:AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(45000)]),
+      headers: { authorization: 'Bearer ' + user.settings.aiKey, 'content-type': 'application/json' },
+      body: JSON.stringify({ model: user.settings.aiModel, messages })
+    });
+    try { return JSON.parse(String(JSON.parse(raw).choices?.[0]?.message?.content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
+    catch { throw new Error('AI 未返回有效的下单代码，请重新生成'); }
+  },
+  notify: async (user, task) => {
+    const success = ['prepared','ordered','paid'].includes(task.status);
+    const detail = task.status === 'paid' ? '订单已提交并付款，请在网站核对账单。' : task.status === 'payment_failed' ? '订单已提交，付款未完成：' + task.error : task.status === 'ordered' ? '订单已提交，请在网站核对订单和支付情况。' : task.status === 'prepared' ? '已核对商品、数量和总价，停在提交前。' : task.status === 'uncertain' ? '订单或付款结果尚未确认，请核对网站订单记录；不会自动重试。' : task.error;
+    addEvent(user, success ? 'success' : 'error', '自动下单 · ' + task.label, detail);
+    addLog(user, 'order', success ? 'success' : 'error', task.label + ' · ' + detail, task.url, 0);
+    const monitor = user.monitors.find(m=>m.id===task.monitorId);
+    if (monitor) await deliver(user, { event:'order.result', title:'自动下单 · ' + task.label, message:detail }, monitor.webhookIds);
+  }
+});
+orderService.recover(store.state.users);
 function mergeRule(current, patch = {}) {
   const next = { ...current, ...patch };
   if (current?.kind === 'unified') {
@@ -480,6 +503,7 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
     const transitioned = monitor.kind === 'unified' ? evaluateRule(monitor, current, monitor.snapshot).triggered : monitor.kind === 'generated' ? transitionGenerated(monitor.plan, monitor.snapshot, current) : isTransition(monitor, monitor.snapshot, current);
     const conditionSatisfied = currentStateMatches(monitor, current);
     const triggered = transitioned || manual && conditionSatisfied === true && !hadPending;
+    if (transitioned && monitor.enabled) void orderService.trigger(user, monitor);
     if (triggered) {
       if (!monitor.webhookIds.length) {
         monitor.lastError = '没有接收渠道，请先为任务选择 Webhook';
@@ -996,6 +1020,39 @@ async function handler(request, response) {
         return sendJson(response, 200, { recoveryCode });
       }
       if (request.method === 'GET' && pathname === '/api/state') return sendJson(response, 200, publicState(user));
+      if (pathname === '/api/order-tasks') {
+        if (request.method === 'GET') return sendJson(response, 200, { tasks:user.orderTasks.map(publicOrderTask) });
+        if (request.method === 'POST') {
+          if (user.orderTasks.length >= 10) throw new Error('最多创建 10 个下单任务');
+          const task = validateOrderTask(await readJson(request));
+          if (task.monitorId && !user.monitors.some(m=>m.id===task.monitorId && m.kind!=='reminder')) throw new Error('绑定的监控任务不存在');
+          user.orderTasks.unshift(task); persist(); return sendJson(response, 201, {task:publicOrderTask(task)});
+        }
+      }
+      const orderMatch = pathname.match(/^\/api\/order-tasks\/([^/]+)(?:\/(generate|enable|pause|run))?$/);
+      if (orderMatch) {
+        const task = user.orderTasks.find(t=>t.id===orderMatch[1]);
+        if (!task) return sendJson(response, 404, {error:'下单任务不存在'});
+        const action = orderMatch[2], body = ['PUT','POST'].includes(request.method) ? await readJson(request) : {};
+        if (request.method === 'POST' && action === 'pause') return sendJson(response,200,{task:orderService.pause(user,task)});
+        if (orderService.isBusy(user, task)) return sendJson(response, 409, {error:'任务正在执行，请等待结束后修改'});
+        if (request.method === 'PUT' && !action) {
+          if (body.expectedRevision !== task.revision) return sendJson(response, 409, {error:'任务配置已变化，请刷新后再保存'});
+          if (task.result || task.submissionStartedAt) throw new Error('已有执行记录，请创建新的下单任务');
+          const next = validateOrderTask(body, task);
+          if (next.monitorId && !user.monitors.some(m=>m.id===next.monitorId && m.kind!=='reminder')) throw new Error('绑定的监控任务不存在');
+          Object.assign(task, next); persist(); return sendJson(response, 200, {task:publicOrderTask(task)});
+        }
+        if (request.method === 'DELETE' && !action) { user.orderTasks=user.orderTasks.filter(t=>t!==task);persist();return sendJson(response,200,{ok:true}); }
+        if (request.method === 'POST' && action === 'generate') {
+          if (task.result || task.submissionStartedAt) throw new Error('已有执行记录，请创建新的下单任务');
+          await orderService.generate(user,task); return sendJson(response,200,{task:publicOrderTask(task)});
+        }
+        if (request.method === 'POST' && action === 'enable') return sendJson(response,200,{task:orderService.approve(user,task,body.codeHash)});
+        if (request.method === 'POST' && action === 'run') return sendJson(response,200,{task:await orderService.execute(user,task,{manual:true})});
+        return sendJson(response,405,{error:'不支持的请求方法'});
+      }
+
       if (request.method === 'GET' && pathname === '/api/logs') return sendJson(response, 200, { logs: user.logs.slice(0, 300) });
       if (request.method === 'DELETE' && pathname === '/api/ai/key') {
         user.settings.aiKey = '';
@@ -1465,7 +1522,7 @@ async function handler(request, response) {
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: '不支持的请求方法' });
     const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-    if (!['index.html', 'app.js', 'rule-ui.js', 'choices.js', 'panels.js', 'minimal.css', 'picker.css', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
+    if (!['index.html', 'app.js', 'rule-ui.js', 'choices.js', 'panels.js', 'orders-ui.js', 'orders.css', 'minimal.css', 'picker.css', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
     const file = path.join(root, 'public', filename);
     response.writeHead(200, { 'content-type': contentTypes[path.extname(file)], 'content-security-policy': "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'" });
     fs.createReadStream(file).pipe(response);
