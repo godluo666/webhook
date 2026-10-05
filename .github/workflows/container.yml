@@ -57,6 +57,12 @@ jobs:
             -e UI_SMOKE_SCREENSHOT_DIR=/app/.data/order-smoke-screenshots \
             --mount type=bind,src="$PWD/.github/orders-ui-smoke.mjs",dst=/app/orders-ui-smoke.mjs,readonly \
             "$IMAGE" node /app/orders-ui-smoke.mjs
+      - name: Verify login redirects and restored sessions without purchases
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+          docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount type=bind,src="$PWD/.github/order-login-smoke.mjs",dst=/app/order-login-smoke.mjs,readonly \
+            "$IMAGE" node /app/order-login-smoke.mjs
       - name: Verify bundled Shadowsocks with real encrypted traffic
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"

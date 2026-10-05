@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createOrderAccountService,publicOrderAccount,savedOrderAccount,orderAccountFingerprint} from '../lib/order-account.js';
 const monitor={id:'monitor-a'},userFor=id=>({id,monitors:[monitor],orderAccounts:[]});
-function setup(timeoutMs=10000){let leased=0,closed=0,valid=false;const user=userFor('a');
-  const service=createOrderAccountService({persist:()=>{},timeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(_task,options)=>({close:async()=>closed++,productHtml:async()=>'<h1>Product A</h1>',remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}})});
+function setup(timeoutMs=10000,options={}){let leased=0,closed=0,valid=false,finishCalls=0,checkError=null;const openedTasks=[];const user=userFor('a');
+  const service=createOrderAccountService({persist:()=>{if(options.persistError?.())throw new Error('会话写入失败');},timeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(task,browserOptions)=>{openedTasks.push(task);if(browserOptions.loginCheck&&checkError)throw checkError;return {close:async()=>{closed++;await options.closeGate;},productHtml:async()=>'<h1>Product A</h1>',remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{finishCalls++;await options.finishGate;if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}};}});
   service.save(user,monitor,{loginUrl:'https://shop.example/login',username:'private-user',password:'private-password'});
-  return {service,user,get leased(){return leased},get closed(){return closed},login(){valid=true;}};
+  return {service,user,get leased(){return leased},get closed(){return closed},get finishCalls(){return finishCalls},openedTasks,setCheckError(error){checkError=error;},login(){valid=true;}};
 }
 test('提前登录跨请求保留浏览器及代理，完成后释放；未完成验证时保留窗口',async()=>{
   const f=setup(),opened=await f.service.start(f.user,monitor);assert.equal(f.leased,1);
@@ -36,4 +36,40 @@ test('商品点选读取保存的私有会话，未完成登录或跨网站时�
  const revision=f.user.orderAccounts[0].revision;const preview=await f.service.productPreview(f.user,monitor,{url:'https://shop.example/product'});
  assert.equal(preview.html,'<h1>Product A</h1>');assert.equal(preview.url,'https://shop.example/product');assert.equal(f.leased,0);assert.equal(f.closed,2);assert.equal(f.service.busy(f.user,monitor.id),false);assert.equal(f.user.orderAccounts[0].revision,revision);
  await assert.rejects(f.service.productPreview(f.user,monitor,{url:'https://other.example/product'}),/网站不符/);
+});
+
+const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+test('保存成功不被浏览器关闭阻塞；重复请求返回同一保存结果，且不重复写入账户',async()=>{
+ const close=deferred(),f=setup(10000,{closeGate:close.promise}),opened=await f.service.start(f.user,monitor);f.login();
+ const started=Date.now();try{
+  const result=await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});assert.equal(result.status,'saved');assert.ok(Date.now()-started<1000);assert.equal(f.leased,1);assert.equal(f.service.busy(f.user,monitor),false);
+  const fingerprint=orderAccountFingerprint(f.user.orderAccounts[0]);const retry=await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});assert.deepEqual(retry,result);assert.equal(f.finishCalls,1);assert.equal(fingerprint,orderAccountFingerprint(f.user.orderAccounts[0]));
+  await assert.rejects(f.service.finish(userFor('other'),monitor,{sessionId:opened.sessionId}),error=>error.status===404);
+  await f.service.logout(f.user,monitor);await assert.rejects(f.service.finish(f.user,monitor,{sessionId:opened.sessionId}),/替代/);
+ }finally{close.resolve();await new Promise(r=>setImmediate(r));}assert.equal(f.leased,0);
+});
+test('并发保存合并为一次验证，保存中拒绝清除、验证、点击和重新打开操作',async()=>{
+ const gate=deferred(),f=setup(10000,{finishGate:gate.promise}),opened=await f.service.start(f.user,monitor);f.login();
+ const first=f.service.finish(f.user,monitor,{sessionId:opened.sessionId}),second=f.service.finish(f.user,monitor,{sessionId:opened.sessionId});
+ try{
+  assert.equal(f.finishCalls,1);assert.equal(f.service.busy(f.user,monitor),true);
+  for(const method of ['check','logout','start','cancel','action'])await assert.rejects(f.service[method](f.user,monitor,{sessionId:opened.sessionId,type:'refresh'}),/正在/);
+ }finally{gate.resolve();}const results=await Promise.all([first,second]);assert.deepEqual(results[0],results[1]);assert.equal(f.finishCalls,1);assert.equal(f.leased,0);
+});
+test('网页暂时缺少登录证据保留私有会话，重试验证可恢复；只有明确退出才标记失效',async()=>{
+ const f=setup(),opened=await f.service.start(f.user,monitor);await assert.rejects(f.service.check(f.user,monitor),/保存或关闭/);f.login();await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});
+ const account=f.user.orderAccounts[0],fingerprint=orderAccountFingerprint(account),session=account.session;
+ f.setCheckError(Object.assign(new Error('网页尚未完成加载'),{code:'ORDER_LOGIN_UNVERIFIED'}));await assert.rejects(f.service.check(f.user,monitor),/尚未/);assert.equal(account.status,'unavailable');assert.equal(account.session,session);assert.equal(savedOrderAccount(f.user,{monitorId:monitor.id,url:'https://shop.example/product'}),account);
+ f.setCheckError(null);await f.service.check(f.user,monitor);assert.equal(account.status,'saved');assert.equal(account.error,'');assert.equal(orderAccountFingerprint(account),fingerprint);assert.equal(f.openedTasks.at(-1).url,'https://shop.example/account');
+ f.setCheckError(Object.assign(new Error('网站返回登录页面'),{code:'ORDER_LOGIN_REQUIRED'}));await assert.rejects(f.service.check(f.user,monitor),/登录页面/);assert.equal(account.status,'expired');assert.equal(account.session,session);assert.throws(()=>savedOrderAccount(f.user,{monitorId:monitor.id,url:'https://shop.example/product'}),/登录失效/);
+});
+test('登录窗口超时关闭后，迟到的保存结果不能覆盖当前账户',async()=>{
+ const gate=deferred(),f=setup(50,{finishGate:gate.promise}),opened=await f.service.start(f.user,monitor);f.login();
+ const result=f.service.finish(f.user,monitor,{sessionId:opened.sessionId});await new Promise(r=>setTimeout(r,100));gate.resolve();await assert.rejects(result,/已关闭/);assert.equal(f.user.orderAccounts[0].status,'logged_out');assert.equal(f.user.orderAccounts[0].session,null);assert.equal(f.leased,0);assert.equal(f.service.busy(f.user,monitor),false);
+});
+
+test('持久化失败保留原状态和登录窗口，存储恢复后仍可保存同一次登录',async()=>{
+ let fail=false;const f=setup(10000,{persistError:()=>fail}),opened=await f.service.start(f.user,monitor);f.login();fail=true;
+ const before=orderAccountFingerprint(f.user.orderAccounts[0]);await assert.rejects(f.service.finish(f.user,monitor,{sessionId:opened.sessionId}),/写入失败/);assert.equal(f.user.orderAccounts[0].status,'logged_out');assert.equal(orderAccountFingerprint(f.user.orderAccounts[0]),before);assert.equal(f.leased,1);
+ fail=false;assert.equal((await f.service.finish(f.user,monitor,{sessionId:opened.sessionId})).status,'saved');assert.equal(f.leased,0);
 });
