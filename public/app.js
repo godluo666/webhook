@@ -169,12 +169,18 @@ function renderStats() {
 function usesNetworkSource(monitor) {
   return monitor.kind !== 'reminder' && !(monitor.kind === 'generated' && monitor.plan?.sourceType === 'log');
 }
+function proxyProfileOptions(selected = '') {
+  return '<option value="">手动填写</option>' + (appState.settings.sourceProxies || []).map(item=>'<option value="'+escapeHtml(item.id)+'" '+(item.id===selected?'selected':'')+'>'+escapeHtml(item.name+' · '+item.endpoint)+'</option>').join('');
+}
+function readSourceProxyId(root) { return root.querySelector('.source-fetch-proxy')?.value === 'custom' ? root.querySelector('.source-proxy-id')?.value || '' : ''; }
 function readCreateSourceSettings() {
   const proxy = $('#create-proxy-mode').value, sourceProxy = $('#create-source-proxy').value.trim();
-  if (proxy === 'custom' && !sourceProxy) throw new Error('请填写此任务的代理地址，或选择账户默认／直接连接');
-  return { fetch: { mode: 'auto', proxy }, ...(proxy === 'custom' ? { sourceProxy } : {}) };
+  const sourceProxyId = $('#create-source-proxy-id').value;
+  if (proxy === 'custom' && !sourceProxy && !sourceProxyId) throw new Error('请填写此任务的代理地址，或选择账户默认／直接连接');
+  return { fetch: { mode: 'auto', proxy }, ...(proxy === 'custom' ? sourceProxyId ? {sourceProxyId} : { sourceProxy } : {}) };
 }
 $('#create-proxy-mode').addEventListener('change', () => $('#create-proxy-address').classList.toggle('hidden', $('#create-proxy-mode').value !== 'custom'));
+$('#create-source-proxy-id').addEventListener('change',()=>{ $('#create-source-proxy').value=''; $('#create-source-proxy').disabled=Boolean($('#create-source-proxy-id').value); });
 function sourceRouteLabel(monitor) {
   const proxy = monitor.fetch?.proxy || 'default';
   if (proxy === 'custom') return '独立代理 · ' + (monitor.sourceProxyEndpoint || '待配置') + (monitor.sourceProxyTest?.ip ? ' · 出口 IP ' + monitor.sourceProxyTest.ip : '');
@@ -209,13 +215,14 @@ function sourceFetchFields(monitor) {
   const method = service ? '<input type="hidden" class="source-fetch-mode" value="http"><p class="field-help editor-wide">通过下方选择的出口检测服务状态。</p>' : '<label>读取方式<select class="source-fetch-mode">'
     + [['auto', '自动'], ['browser', '浏览器'], ['http', '直接请求']].map(([value, name]) => '<option value="' + value + '" ' + (mode === value ? 'selected' : '') + '>' + name + '</option>').join('') + '</select></label>';
   return method + '<label>网络出口<select class="source-fetch-proxy"><option value="default" ' + (proxy === 'default' ? 'selected' : '') + '>账户设置' + (appState.settings.hasSourceProxy ? ' · 使用代理' : ' · 服务器出口') + '</option><option value="direct" ' + (proxy === 'direct' ? 'selected' : '') + '>直接连接</option><option value="custom" ' + (proxy === 'custom' ? 'selected' : '') + '>独立代理</option></select></label>'
-    + '<div class="source-custom-proxy editor-wide ' + (proxy === 'custom' ? '' : 'hidden') + '"><label>此任务的代理地址<input class="source-proxy-input" type="password" autocomplete="new-password" spellcheck="false" value="' + escapeHtml(monitor.sourceProxy || '') + '" placeholder="' + (monitor.hasSourceProxy ? '已保存独立代理；留空保持当前地址' : 'http://user:pass@host:port 或 ss://…') + '"></label>'
+    + '<div class="source-custom-proxy editor-wide ' + (proxy === 'custom' ? '' : 'hidden') + '"><label>选择已保存代理<select class="source-proxy-id">' + proxyProfileOptions(monitor.sourceProxyId) + '</select></label><label>此任务的代理地址<input class="source-proxy-input" '+(appState.settings.sourceProxies?.some(item=>item.id===monitor.sourceProxyId)?'disabled':'')+' type="password" autocomplete="new-password" spellcheck="false" value="' + escapeHtml(monitor.sourceProxy || '') + '" placeholder="' + (monitor.hasSourceProxy ? '已保存独立代理；留空保持当前地址' : 'http://user:pass@host:port 或 ss://…') + '"></label>'
     + '<div class="rule-proxy-actions"><button type="button" class="button button-outline" data-source-proxy-test>测试独立代理</button><span class="rule-proxy-result" role="status">' + escapeHtml(monitor.sourceProxyEndpoint ? monitor.sourceProxyEndpoint + (monitor.sourceProxyTest?.ip ? ' · ' + sourceConnectionSummary(monitor.sourceProxyTest) : '') + (monitor.sourceProxyTest?.testedAt ? ' · 验证于 ' + new Date(monitor.sourceProxyTest.testedAt).toLocaleString('zh-CN') : '') : '保存前会验证代理连通性；验证失败保留原设置。') + '</span></div></div>'
     + '<p class="field-help editor-wide">自动读取会在需要时尝试浏览器。独立代理只用于当前任务。</p>';
 }
 function readSourceProxy(root, monitor) {
   const custom = root.querySelector('.source-fetch-proxy')?.value === 'custom';
   const value = root.querySelector('.source-proxy-input')?.value.trim();
+  if (readSourceProxyId(root)) return undefined;
   if (custom && !value && !monitor.hasSourceProxy && !monitor.sourceProxy) throw new Error('请填入此任务的独立代理地址，或选择账户默认／直接连接');
   return custom ? value || monitor.sourceProxy || undefined : undefined;
 }
@@ -289,6 +296,7 @@ function openTaskEditor(monitor, focusSection) {
   else window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function closeTaskEditor() {
+  if(typeof closeRuleDialogs==='function')closeRuleDialogs();
   if (typeof resetOrderUI === 'function') resetOrderUI();
   const root = $('#task-workspace .notification-editor'), state = notificationEditors.get(root);
   if (state) { clearTimeout(state.timer); state.sequence++; }
@@ -529,7 +537,7 @@ function addAssistantMessage(role, content) {
 function resetAssistant(instruction = '', keepEditing = false) {
   if (!keepEditing) editingMonitor = null;
   if (!instruction && !keepEditing) {
-    $('#create-proxy-mode').value = 'default'; refreshChoices(); $('#create-source-proxy').value = '';
+    $('#create-proxy-mode').value = 'default'; $('#create-source-proxy-id').value=''; $('#create-source-proxy').disabled=false; refreshChoices(); $('#create-source-proxy').value = '';
     $('#create-proxy-address').classList.add('hidden');
   }
   syncRevisionMode();
@@ -562,10 +570,10 @@ async function askAssistant() {
     assistantConversation = assistantConversation.slice(-6);
     const previousDraft = previewMonitor ? collectPreviewRule() : null;
     const routing = previousDraft || readCreateSourceSettings();
-    const privateProxy = routing.sourceProxy;
+    const privateProxy = routing.sourceProxy; const sourceProxyId = routing.sourceProxyId;
     if (previousDraft) delete previousDraft.sourceProxy;
     const draftUrl = previewMonitor && previewMonitor.kind !== 'reminder' ? ($('#draft-url') || $('#rule-url'))?.value.trim() : '';
-    const result = await api('/api/parse', 'POST', { monitorId: editingMonitor?.id, expectedRevision: editingMonitor?.revision, instruction: assistantInstruction, draft: previousDraft, fetch: routing.fetch, sourceProxy: privateProxy, sourceUrl: draftUrl || $('#instruction-url').value.trim(), conversation: assistantConversation, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+    const result = await api('/api/parse', 'POST', { monitorId: editingMonitor?.id, expectedRevision: editingMonitor?.revision, instruction: assistantInstruction, draft: previousDraft, fetch: routing.fetch, sourceProxy: privateProxy, sourceProxyId, sourceUrl: draftUrl || $('#instruction-url').value.trim(), conversation: assistantConversation, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone });
     if (requestId !== assistantRequestId) return;
     if (result.sourceCheck) {
       $('#source-check-result').textContent = result.sourceCheck;
@@ -616,7 +624,7 @@ function readSavedRule(editor, monitor) {
     rule.message = editor.querySelector('.edit-message').value.trim();
     rule.repeatMinutes = repeatMinutesFrom(editor, 'edit');
   } else rule.intervalMinutes = readInterval(editor, '.edit-interval');
-  if (usesNetworkSource(monitor)) { rule.fetch = readSourceFetch(editor, monitor); const proxy = readSourceProxy(editor, monitor); if (proxy) rule.sourceProxy = proxy; }
+  if (usesNetworkSource(monitor)) { rule.fetch = readSourceFetch(editor, monitor); const proxy = readSourceProxy(editor, monitor); if (proxy) rule.sourceProxy = proxy; rule.sourceProxyId = readSourceProxyId(editor); }
   if (monitor.kind === 'unified') Object.assign(rule, readUnifiedRule(editor));
   if (monitor.kind === 'generated') { try { rule.plan = JSON.parse(editor.querySelector('.edit-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
   if (editor.querySelector('.edit-url')) rule.url = editor.querySelector('.edit-url').value.trim();
@@ -634,7 +642,7 @@ function readSavedRule(editor, monitor) {
 }
 
 function monitorConfig(monitor) {
-  const fields = ['schema_version', 'type', 'name', 'detection_method', 'target_element', 'extraction_rule', 'condition', 'interval', 'confidence', 'last_test_result', 'explanation', 'product', 'kind', 'url', 'label', 'description', 'intervalMinutes', 'severity', 'plan', 'fetch', 'notification', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'message', 'remindAt', 'repeatMinutes', 'priority', 'webhookIds', 'hasSourceProxy', 'sourceProxyEndpoint', 'sourceProxyTest'];
+  const fields = ['schema_version', 'type', 'name', 'detection_method', 'target_element', 'extraction_rule', 'condition', 'interval', 'confidence', 'last_test_result', 'explanation', 'product', 'kind', 'url', 'label', 'description', 'intervalMinutes', 'severity', 'plan', 'fetch', 'notification', 'keyword', 'mode', 'triggerMode', 'jsonPath', 'operator', 'expected', 'message', 'remindAt', 'repeatMinutes', 'priority', 'webhookIds', 'hasSourceProxy', 'sourceProxyEndpoint', 'sourceProxyTest', 'sourceProxyId'];
   return structuredClone(Object.fromEntries(fields.filter((key) => monitor[key] !== undefined).map((key) => [key, monitor[key]])));
 }
 function syncRevisionMode() {
@@ -1082,7 +1090,7 @@ function updatePriorityVisibility(container, targetsSelector) {
   if (targets && priority) priority.classList.toggle('hidden', !hasNtfyTarget(selectedIds(targets)));
 }
 function markPreviewChanged(event) {
-  if (!event.target.matches('[data-plan-key], [data-plan-json], .source-fetch-mode, .source-fetch-proxy, .source-proxy-input, [data-unified-key], .unified-json, .interval-unit, #rule-interval, #draft-url, #rule-url, #rule-keyword, #rule-mode, #rule-json-path, #rule-operator, #rule-expected')) return;
+  if (!event.target.matches('[data-plan-key], [data-plan-json], .source-fetch-mode, .source-fetch-proxy, .source-proxy-input, .source-proxy-id, [data-unified-key], .unified-json, .interval-unit, #rule-interval, #draft-url, #rule-url, #rule-keyword, #rule-mode, #rule-json-path, #rule-operator, #rule-expected')) return;
   const result = $('#preview-result');
   if (result && previewMonitor?.kind !== 'reminder') {
     result.className = 'preview-result';
@@ -1130,7 +1138,7 @@ function collectPreviewRule() {
     return rule;
   }
   rule.intervalMinutes = readInterval($('#preview'), '#rule-interval');
-  if (usesNetworkSource(rule)) { rule.fetch = readSourceFetch($('#preview'), rule); const proxy = readSourceProxy($('#preview'), rule); if (proxy) rule.sourceProxy = proxy; else delete rule.sourceProxy; }
+  if (usesNetworkSource(rule)) { rule.fetch = readSourceFetch($('#preview'), rule); const proxy = readSourceProxy($('#preview'), rule); if (proxy) rule.sourceProxy = proxy; else delete rule.sourceProxy; rule.sourceProxyId = readSourceProxyId($('#preview')); }
   if ($('#rule-url')) rule.url = ($('#draft-url') || $('#rule-url')).value.trim();
   if (rule.kind === 'unified') Object.assign(rule, readUnifiedRule($('#preview')));
   if (rule.kind === 'generated') { try { rule.plan = JSON.parse($('#rule-plan').value); } catch { throw new Error('监控逻辑不是有效 JSON'); } }
@@ -1197,11 +1205,11 @@ function showAuth() {
   resetAssistant();
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
-  for (const selector of ['#source-proxy', '#source-test-url', '#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code']) $(selector).value = '';
+  for (const selector of ['#source-proxy', '#source-proxy-name', '#source-test-url', '#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code']) $(selector).value = '';
   sourceSettingsEpoch += 1;
   releaseSourceAction(sourceAction);
   resetSourceResults();
-  $('#source-proxy-status').textContent = '';
+  $('#source-proxy-status').textContent = ''; $('#source-proxy-list').replaceChildren(); delete $('#source-proxy-list').dataset.markup; $('#create-source-proxy-id').innerHTML='<option value="">手动填写</option>'; $('#create-source-proxy').disabled=false;
   $('#source-test-mode').value = 'http'; refreshChoices();
   $('#ai-test-result').textContent = '';
   $('#settings-dirty').textContent = '';
@@ -1614,12 +1622,15 @@ document.addEventListener('click', (event) => {
 });
 
 async function init() {
+    let polling=null;window.addEventListener('pagehide',()=>polling?.abort());
     setInterval(async () => {
-      if ($('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy || pendingActions.size) return;
+      if (document.hidden || polling || $('.app-shell').classList.contains('auth-hidden') || sourceSettingsBusy || pendingActions.size) return;
+      polling=new AbortController();
       const epoch = sourceSettingsEpoch, userId = appState.user?.id, version = stateSyncVersion;
       const isCurrent = () => epoch === sourceSettingsEpoch && version === stateSyncVersion && !pendingActions.size && userId === appState.user?.id && !$('.app-shell').classList.contains('auth-hidden');
-      try { const state = await api('/api/state'); if (isCurrent()) { appState = state; render(); } }
+      try { const state = await api('/api/state','GET',undefined,{signal:AbortSignal.any([polling.signal,AbortSignal.timeout(20000)])}); if (isCurrent()) { appState = state; render(); } }
       catch (error) { if (isCurrent() && error.message === '请先登录') showAuth(); }
+      finally{polling=null;}
     }, 30000);
   try {
     const status = await api('/api/auth/status');
@@ -1661,17 +1672,25 @@ function sourceConnectionSummary(result = {}) {
 
 function renderSourceSettings(reset = false) {
   const { hasSourceProxy, sourceProxyEndpoint, sourceProxyTest } = appState.settings;
+  const profiles = appState.settings.sourceProxies || [];
+  const list = $('#source-proxy-list');
+  const markup = profiles.map(item=>'<div class="proxy-profile-row"><div><strong>'+escapeHtml(item.name)+'</strong><p class="field-help">'+escapeHtml(item.endpoint+(item.test?.ip?' · '+item.test.ip:''))+'</p></div><div class="proxy-profile-actions"><button type="button" class="button button-outline" data-proxy-use="'+escapeHtml(item.id)+'" '+(appState.settings.sourceProxyId===item.id?'disabled':'')+'>'+(appState.settings.sourceProxyId===item.id?'默认出口':'设为默认')+'</button><button type="button" class="button button-outline" data-proxy-test="'+escapeHtml(item.id)+'">测试</button><button type="button" class="button button-outline danger" data-proxy-delete="'+escapeHtml(item.id)+'">删除</button></div></div>').join('');
+  if (list.dataset.markup !== markup) { list.innerHTML=markup; list.dataset.markup=markup; }
+  const selected = $('#create-source-proxy-id').value;
+  const options = proxyProfileOptions(selected);
+  if ($('#create-source-proxy-id').innerHTML !== options) { $('#create-source-proxy-id').innerHTML=options; $('#create-source-proxy-id').value=profiles.some(item=>item.id===selected)?selected:''; }
+  $('#create-source-proxy').disabled=Boolean($('#create-source-proxy-id').value);
   const covered = appState.monitors.filter(monitor => usesNetworkSource(monitor) && (!monitor.fetch?.proxy || monitor.fetch.proxy === 'default')).length;
   const verified = sourceProxyTest?.ip ? ' · 验证时出口 IP：' + sourceProxyTest.ip : '';
   $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网络监控任务使用此出口' + verified : '当前使用服务器出口 · 先验证代理，再应用到监控';
   $('#source-proxy-clear').classList.toggle('hidden', !hasSourceProxy);
-  $('#source-proxy').placeholder = hasSourceProxy ? '已保存 · 留空可测试已有代理，输入新地址以替换' : 'ss://节点分享链接 或 http://主机:端口';
-  if (reset) { $('#source-proxy').value = ''; resetSourceResults(); }
+  $('#source-proxy').placeholder = hasSourceProxy ? '留空可测试默认代理，输入新地址可新增' : 'ss://节点分享链接 或 http://主机:端口';
+  if (reset) { $('#source-proxy').value = ''; $('#source-proxy-name').value = ''; resetSourceResults(); }
 }
 
 async function withSourceAction(button, loadingLabel, work) {
   if (sourceSettingsBusy) return;
-  const controls = ['#source-proxy', '#source-proxy-test', '#source-proxy-save', '#source-proxy-clear', '#source-target-test', '#source-test-url', '#source-test-mode'].map(selector => $(selector));
+  const controls = [...document.querySelectorAll('#source-proxy-list button'), ...['#source-proxy', '#source-proxy-name', '#source-proxy-add', '#source-proxy-test', '#source-proxy-save', '#source-proxy-clear', '#source-target-test', '#source-test-url', '#source-test-mode'].map(selector => $(selector))];
   const disabled = controls.map(control => control.disabled);
   const epoch = ++sourceSettingsEpoch;
   const label = button.textContent;
@@ -1712,10 +1731,10 @@ $('#source-settings-form').addEventListener('submit', (event) => {
     status.textContent = '正在验证代理连接，验证通过后应用到监控…';
     status.className = 'field-help';
     try {
-      const state = await api('/api/source-proxy', 'PUT', { proxyUrl, applyAll: true });
+      const state = await api('/api/source-proxy', 'PUT', { proxyUrl, name:$('#source-proxy-name').value.trim(), applyAll: true });
       if (!isCurrent()) return;
       appState = state;
-      $('#source-proxy').value = '';
+      $('#source-proxy').value = ''; $('#source-proxy-name').value = '';
       $('#source-proxy-result').textContent = '';
       render();
       status.textContent = '验证通过，已应用到账户默认出口 · ' + sourceConnectionSummary(state.settings.sourceProxyTest);
@@ -1736,6 +1755,23 @@ $('#source-settings-form').addEventListener('submit', (event) => {
       }
       throw error;
     }
+  });
+});
+$('#source-proxy-add').addEventListener('click',()=>{
+  const proxyUrl=$('#source-proxy').value.trim(); if(!proxyUrl){toast('请填写要新增的代理地址',true);return;}
+  const name=$('#source-proxy-name').value.trim();
+  withSourceAction($('#source-proxy-add'),'正在验证…',async isCurrent=>{
+    const state=await api('/api/source-proxies','POST',{name,proxyUrl}); if(!isCurrent())return;
+    appState=state; $('#source-proxy').value=''; $('#source-proxy-name').value=''; render(); toast('代理已保存，可在列表或监控中选择');
+  });
+});
+$('#source-proxy-list').addEventListener('click',event=>{
+  const button=event.target.closest('[data-proxy-use],[data-proxy-delete],[data-proxy-test]'); if(!button)return;
+  const id=button.dataset.proxyUse||button.dataset.proxyDelete||button.dataset.proxyTest;
+  withSourceAction(button,'正在处理…',async isCurrent=>{
+    if(button.dataset.proxyTest){const result=await api('/api/source-proxy/test','POST',{sourceProxyId:id});if(isCurrent()){ $('#source-connection-result').textContent='连接正常 · '+sourceConnectionSummary(result); $('#source-connection-result').className='field-help success';}return;}
+    const state=button.dataset.proxyUse ? await api('/api/source-proxy','PUT',{sourceProxyId:id}) : await api('/api/source-proxies/'+encodeURIComponent(id),'DELETE');
+    if(!isCurrent())return; appState=state; render(); toast(button.dataset.proxyUse?'已切换默认代理':'已删除列表条目，已有任务出口保留');
   });
 });
 $('#source-proxy-clear').addEventListener('click', () => {
@@ -1817,6 +1853,12 @@ document.addEventListener('change', (event) => {
   const root = event.target.closest('.monitor-route, .rule-editor');
   root?.querySelector('.source-custom-proxy')?.classList.toggle('hidden', event.target.value !== 'custom');
 });
+document.addEventListener('change',event=>{
+  if(!event.target.matches('.source-proxy-id'))return;
+  const panel=event.target.closest('.source-custom-proxy'), input=panel.querySelector('.source-proxy-input');
+  input.value=''; input.disabled=Boolean(event.target.value);
+  const status=panel.querySelector('.rule-proxy-result'); status.textContent='保存前会验证所选代理，原监控记录保留。';status.className='rule-proxy-result';
+});
 document.addEventListener('input', (event) => {
   if (!event.target.matches('.source-proxy-input')) return;
   const status = event.target.closest('.source-custom-proxy').querySelector('.rule-proxy-result');
@@ -1831,13 +1873,14 @@ document.addEventListener('click', (event) => {
   const monitorId = root?.dataset.id || editingMonitor?.id;
   const monitor = appState.monitors.find((item) => item.id === monitorId);
   const proxyUrl = input.value.trim() || (root?.classList.contains('rule-editor') ? previewMonitor?.sourceProxy : '');
-  if (!proxyUrl && !monitor?.hasSourceProxy) { status.textContent = '请先填入独立代理地址'; status.className = 'rule-proxy-result error'; input.focus(); return; }
+  const sourceProxyId = panel.querySelector('.source-proxy-id')?.value;
+  if (!proxyUrl && !sourceProxyId && !monitor?.hasSourceProxy) { status.textContent = '请先填入独立代理地址'; status.className = 'rule-proxy-result error'; input.focus(); return; }
   withButton(button, async () => {
     const epoch = workspaceEpoch;
     input.disabled = true;
     status.textContent = '正在验证连接与出口 IP…'; status.className = 'rule-proxy-result';
     try {
-      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl: proxyUrl || undefined, monitorId: proxyUrl ? undefined : monitorId });
+      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl: proxyUrl || undefined, sourceProxyId, monitorId: proxyUrl || sourceProxyId ? undefined : monitorId });
       if (!panel.isConnected) return;
       status.textContent = '连接成功 · ' + sourceConnectionSummary(result);
       status.className = 'rule-proxy-result success';
@@ -1847,3 +1890,5 @@ document.addEventListener('click', (event) => {
     } finally { if (epoch === workspaceEpoch && input.isConnected) input.disabled = false; }
   });
 });
+
+function releaseElementPreview(id){if(id)void fetch('/api/element-preview',{method:'DELETE',keepalive:true,headers:{'content-type':'application/json'},body:JSON.stringify({previewId:id})}).catch(()=>{});}

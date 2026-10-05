@@ -89,16 +89,17 @@ document.addEventListener('input', event => {
     editor.dispatchEvent(new CustomEvent('rule-plan-updated', { bubbles: true }));
   } catch (failure) { error.textContent = '配置尚未完整：' + failure.message; }
 });
+function closeRuleDialogs(){document.querySelectorAll('.rule-dialog').forEach(section=>section.close?.());}
 function ruleDialog(title) {
   const view = document.querySelector('.app-shell').dataset.view;
   const host = document.querySelector(view === 'monitors' ? '#task-inspection' : view === 'activity' ? '#activity-inspection' : '#create-inspection');
   const returnFocus = document.activeElement;
-  host.replaceChildren(); host.classList.remove('hidden');
+  host.querySelectorAll('.rule-dialog').forEach(section=>section.close?.());host.replaceChildren(); host.classList.remove('hidden');
   const section = document.createElement('section');
   section.className = 'rule-dialog';
   section.setAttribute('aria-label', title);
   section.innerHTML = '<header><h3>' + escapeHtml(title) + '</h3><button type="button" class="mini-button" data-rule-close>完成</button></header><div class="rule-dialog-body"></div>';
-  section.close = () => { section.remove(); if (!host.children.length) host.classList.add('hidden'); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); };
+  section.close = () => { section.dispatchEvent(new Event('rule-dialog-close'));section.remove(); if (!host.children.length) host.classList.add('hidden'); if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true }); };
   section.addEventListener('click', event => { if (event.target.closest('[data-rule-close]')) section.close(); });
   host.append(section);
   section.scrollIntoView({ block: 'start', behavior: 'instant' });
@@ -112,7 +113,9 @@ async function openElementPicker(monitor, onSelected) {
   const count = body.querySelector('.picker-count'), list = body.querySelector('.picker-selection'), clear = body.querySelector('[data-picker-clear]');
   const scope = body.querySelector('.picker-scope');
   body.querySelector('.picker-browser').checked = monitor.detection_method === 'browser' || monitor.fetch?.mode === 'browser';
-  let preview, revision = 0;
+  let preview, revision = 0,request;
+  const release=()=>{revision++;request?.abort();request=null;if(preview)releaseElementPreview(preview.id);preview=null;selected.clear();frame.onload=null;frame.removeAttribute('srcdoc');};
+  dialog.addEventListener('rule-dialog-close',release,{once:true});
   const selected = new Map();
   const collectionForSelection = () => {
     const matches = [...selected.keys()].map(index => preview?.collections?.find(item => item.index === index));
@@ -142,11 +145,11 @@ async function openElementPicker(monitor, onSelected) {
     selected.delete(index); setScope('selected'); renderSelection();
   };
   const reload = async () => {
-    const version = ++revision;
+    release();const version=revision;request=new AbortController();
     selected.clear(); preview = null; setScope('selected'); renderSelection();
     frame.removeAttribute('srcdoc'); status.textContent = '正在读取页面…';
-    const loaded = await api('/api/element-preview', 'POST', { monitorId: monitor.id || undefined, url: monitor.url, rule: monitor, browser: body.querySelector('.picker-browser').checked });
-    if (!dialog.isConnected || revision !== version) return;
+    let loaded;try{loaded = await api('/api/element-preview', 'POST', { monitorId: monitor.id || undefined, url: monitor.url, rule: monitor, browser: body.querySelector('.picker-browser').checked },{signal:AbortSignal.any([request.signal,AbortSignal.timeout(60000)])});}catch(error){if(!dialog.isConnected||revision!==version)return;throw error;}
+    if (!dialog.isConnected || revision !== version){releaseElementPreview(loaded.id);return;}
     preview = loaded;
     if (monitor.label === '网页区域监控' && preview.title) monitor.label = preview.title;
     frame.onload = () => {
@@ -300,3 +303,6 @@ document.addEventListener('click', event => {
     apply({ ...current, ...data.monitor });
   });
 });
+
+window.addEventListener('pagehide',closeRuleDialogs);
+window.addEventListener('hashchange',closeRuleDialogs);

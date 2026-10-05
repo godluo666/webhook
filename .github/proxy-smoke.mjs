@@ -56,7 +56,7 @@ try {
   await readThrough('browser', 'other-user');
   assert.equal(headers.slice(before).some(item => item.path === '/' && item.cookie?.includes('sourceSession=ss-cookie')), false);
   assert.equal(headers.some(item => item.authorization || item['proxy-authorization']), false);
-  assert.equal((await fs.readdir(path.join(dataDir, 'proxy-tmp'))).length, 0);
+  assert.equal((await fs.readdir(path.join(process.env.MONITOR_TEMP_DIR || dataDir, 'proxy-tmp'))).length, 0);
   console.log('Real Shadowsocks exit-IP validation, HTTP/browser reads, cross-read cookies, account isolation, credential isolation and temporary cleanup passed.');
 } finally {
   const closed = new Promise(resolve => child.once('close', resolve));

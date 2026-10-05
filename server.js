@@ -1,3 +1,6 @@
+import { configureRuntimeTemp } from './lib/runtime-temp.js';
+import { findProxyProfile, selectedProxyUrl, saveProxyProfile } from './lib/proxy-profiles.js';
+import { ExpiringMap } from './lib/expiring-map.js';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,20 +25,21 @@ import { createRuleService } from './lib/rule-service.js';
 import { normalizeAiPlan } from './lib/ai-rule-compat.js';
 import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/rule-policy.js';
 import { createScheduler } from './lib/scheduler.js';
-import { createElementPreview, selectedElements, selectedElement } from './lib/element-picker.js';
+import { createElementPreview, selectedElements, selectedElement, discardElementPreview } from './lib/element-picker.js';
 import { createOrderService, validateOrderTask, publicOrderTask } from './lib/orders.js';
 import { createOrderAccountService, publicOrderAccount, savedOrderAccount } from './lib/order-account.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(root, '.data');
+configureRuntimeTemp(dataDir);
 const logRoot = process.env.MONITOR_LOG_ROOT ? path.resolve(process.env.MONITOR_LOG_ROOT) : path.join(dataDir, 'monitor-logs');
 const emailCodes = createEmailCodeService({ apiKey: process.env.RESEND_API_KEY, from: process.env.MAIL_FROM, endpoint: process.env.RESEND_API_URL || undefined });
 const store = createStore(dataDir, emailCodes);
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '127.0.0.1';
 const activeChecks = new Set();
-const sourceCheckCache = new Map();
-const notificationPreviews = new Map();
+const sourceCheckCache = new ExpiringMap({ttlMs:30000,maxEntries:64});
+const notificationPreviews = new ExpiringMap({expiresAt:item=>item.expiresAt,maxEntries:200});
 const readSource = createSourceFetcher({ browserFetch: createBrowserSource({ dataDir }), browserEnabled: process.env.MONITOR_BROWSER_ENABLED !== '0' });
 const withSourceProxy = createShadowsocksBridge({ dataDir });
 const probeProxy = createProxyTester({ withProxy: withSourceProxy, ...(process.env.MONITOR_PROXY_TEST_URL ? { urls: [process.env.MONITOR_PROXY_TEST_URL] } : {}) });
@@ -96,6 +100,7 @@ const orderService = createOrderService({
     const success = ['prepared','ordered','paid','awaiting_payment'].includes(task.status);
     let detail = task.status === 'awaiting_payment' ? task.result?.paymentPending?.message || '订单已提交，等待付款。' : task.status === 'paid' ? '订单已提交并付款，请在网站核对账单。' : task.status === 'payment_failed' ? '订单已提交，付款未完成：' + task.error : task.status === 'ordered' ? '订单已提交，请在网站核对订单和支付情况。' : task.status === 'prepared' ? '已核对商品、数量和总价，停在提交前。' : task.status === 'uncertain' ? '订单或付款结果尚未确认，请核对网站订单记录；不会自动重试。' : task.error;
     if(task.result?.url)detail+='\n订单 / 付款页面：'+task.result.url;
+    if(task.result?.paymentPending?.cashierUrl)detail+='\n付款收银台：'+task.result.paymentPending.cashierUrl;
     addEvent(user, success ? 'success' : 'error', '自动下单 · ' + task.label, detail);
     addLog(user, 'order', success ? 'success' : 'error', task.label + ' · ' + detail, task.url, 0);
     const monitor = user.monitors.find(m=>m.id===task.monitorId);
@@ -119,16 +124,16 @@ function supportsMonitorProxy(monitor) {
 
 async function prepareMonitorProxy(user, spec, input = {}, saved = null, forceTest = false) {
   const raw = input.sourceProxy;
-  const hasNewProxy = raw != null && String(raw).trim() !== '';
-  const proxy = raw === null ? '' : hasNewProxy ? validateSourceProxy(raw) : saved?.sourceProxy || '';
+  const hasNewProxy = Boolean(input.sourceProxyId) || raw != null && String(raw).trim() !== '';
+  const proxy = selectedProxyUrl(user,input,saved);
   if (!supportsMonitorProxy(spec) && (spec.fetch?.proxy === 'custom' || hasNewProxy)) throw new Error('独立代理用于网络监控；本地日志与日历提醒不产生网络读取');
   if (spec.fetch?.proxy === 'custom' && !proxy) throw Object.assign(new Error('请为此任务填写独立代理，或选择账户默认代理 / 直接连接'), { code: 'SOURCE_PROXY_MISSING' });
   let verified = proxy && saved?.sourceProxy === proxy ? saved.sourceProxyTest || null : null;
-  if (proxy && (hasNewProxy || spec.fetch?.proxy === 'custom' && (forceTest || !verified || saved?.fetch?.proxy !== 'custom'))) {
+  if (proxy && (hasNewProxy && (proxy !== saved?.sourceProxy || !verified) || spec.fetch?.proxy === 'custom' && (forceTest || !verified || saved?.fetch?.proxy !== 'custom'))) {
     const report = await testProxy(user, proxy);
     verified = { ip: report.ip, testedAt: report.testedAt, durationMs: report.durationMs };
   }
-  return { sourceProxy: proxy, sourceProxyTest: verified };
+  return { sourceProxy: proxy, sourceProxyTest: verified, sourceProxyId: input.sourceProxyId || (hasNewProxy || raw === null || input.sourceProxyId === '' ? null : saved?.sourceProxyId || null) };
 }
 if ((process.env.HTTP_PROXY || process.env.HTTPS_PROXY) && typeof http.setGlobalProxyFromEnv === 'function') {
   http.setGlobalProxyFromEnv({ ...process.env, NO_PROXY: [process.env.NO_PROXY, 'localhost', '127.0.0.1', '::1'].filter(Boolean).join(',') });
@@ -965,6 +970,7 @@ setInterval(() => {
   }
 }, 15 * 60_000).unref();
 
+async function untilResponseClosed(response,work){const controller=new AbortController(),closed=()=>{if(!response.writableFinished)controller.abort();};response.once('close',closed);try{return await work(controller.signal);}finally{response.removeListener('close',closed);}}
 async function handler(request, response) {
   try {
     const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
@@ -1031,7 +1037,8 @@ async function handler(request, response) {
         const monitor=user.monitors.find(m=>m.id===productChoiceMatch[1]&&m.kind!=='reminder');if(!monitor)return sendJson(response,404,{error:'监控不存在'});
         const body=await readJson(request);
         if(productChoiceMatch[2]==='preview'){
-          const source=await orderAccountService.productPreview(user,monitor,body);
+          const source=await untilResponseClosed(response,signal=>orderAccountService.productPreview(user,monitor,body,{signal}));
+          if(response.destroyed)return;
           return sendJson(response,200,createElementPreview(user.id,source.url,source.html,'browser'));
         }
         const selected=selectedElement(user.id,body.previewId,body.index);
@@ -1047,7 +1054,9 @@ async function handler(request, response) {
         if(request.method==='GET'&&!action)return sendJson(response,200,{account:publicOrderAccount(user.orderAccounts.find(a=>a.monitorId===monitor.id))});
         if(request.method==='PUT'&&!action)return sendJson(response,200,{account:orderAccountService.save(user,monitor,body)});
         if(request.method==='POST'&&action){
-          if(['start','action'].includes(action))return sendJson(response,200,await orderAccountService[action](user,monitor,body));
+          if(action==='start'){const opened=await untilResponseClosed(response,signal=>orderAccountService.start(user,monitor,body,{signal}));if(response.destroyed)return;return sendJson(response,200,opened);}
+          if(action==='check'){const account=await untilResponseClosed(response,signal=>orderAccountService.check(user,monitor,{signal}));if(response.destroyed)return;return sendJson(response,200,{account});}
+          if(action==='action')return sendJson(response,200,await orderAccountService.action(user,monitor,body));
           return sendJson(response,200,{account:await orderAccountService[action](user,monitor,body)});
         }
         return sendJson(response,405,{error:'不支持的请求方法'});
@@ -1142,7 +1151,7 @@ async function handler(request, response) {
       }
       if (['PUT', 'DELETE'].includes(request.method) && pathname === '/api/source-proxy') {
         const body = request.method === 'PUT' ? await readJson(request) : {};
-        const proxy = request.method === 'DELETE' ? '' : validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
+        const proxy = request.method === 'DELETE' ? '' : body.sourceProxyId ? findProxyProfile(user,body.sourceProxyId).url : validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
         if (request.method === 'PUT' && !proxy) throw new Error('请填写代理地址，或使用清除按钮移除已保存代理');
         const version = user.settings.sourceProxyVersion || 0;
         let verified = null;
@@ -1151,6 +1160,8 @@ async function handler(request, response) {
           catch (error) { return sendJson(response, error.status || 400, { error: error.message, code: error.code || 'PROXY_TEST_FAILED' }); }
           if ((user.settings.sourceProxyVersion || 0) !== version) return sendJson(response, 409, { error: '代理配置已在验证期间更改，请重新验证后应用', code: 'PROXY_CONFIG_CHANGED' });
         }
+        const profile = proxy ? saveProxyProfile(user.settings, proxy, body.name || user.settings.sourceProxies?.find(item=>item.url===proxy)?.name, verified ? {ip:verified.ip,testedAt:verified.testedAt,durationMs:verified.durationMs} : null) : null;
+        user.settings.sourceProxyId = profile?.id || null;
         user.settings.sourceProxy = proxy;
         user.settings.sourceProxyTest = verified ? { ip: verified.ip, testedAt: verified.testedAt, durationMs: verified.durationMs } : null;
         user.settings.sourceProxyVersion = version + 1;
@@ -1164,12 +1175,30 @@ async function handler(request, response) {
         persist();
         return sendJson(response, 200, publicState(user));
       }
+      if (request.method === 'POST' && pathname === '/api/source-proxies') {
+        const body = await readJson(request), proxy = validateSourceProxy(body.proxyUrl);
+        if (!proxy) throw new Error('请填写代理地址');
+        const version = user.settings.sourceProxyVersion || 0;
+        const verified = await testProxy(user,proxy);
+        if ((user.settings.sourceProxyVersion || 0) !== version) return sendJson(response,409,{error:'代理列表已更改，请重新保存',code:'PROXY_CONFIG_CHANGED'});
+        saveProxyProfile(user.settings,proxy,body.name,{ip:verified.ip,testedAt:verified.testedAt,durationMs:verified.durationMs});
+        user.settings.sourceProxyVersion = version + 1; persist();
+        return sendJson(response,201,publicState(user));
+      }
+      const proxyProfileMatch = pathname.match(/^\/api\/source-proxies\/([^/]+)$/);
+      if (request.method === 'DELETE' && proxyProfileMatch) {
+        const profile = findProxyProfile(user,proxyProfileMatch[1]);
+        user.settings.sourceProxies = user.settings.sourceProxies.filter(item=>item!==profile);
+        if (user.settings.sourceProxyId === profile.id) user.settings.sourceProxyId = null;
+        user.settings.sourceProxyVersion = (user.settings.sourceProxyVersion || 0) + 1; persist();
+        return sendJson(response,200,publicState(user));
+      }
       if (request.method === 'POST' && pathname === '/api/source-proxy/test') {
         const body = await readJson(request);
         const monitor = body.monitorId ? user.monitors.find(item => item.id === body.monitorId) : null;
         if (body.monitorId && !monitor) return sendJson(response, 404, { error: '任务不存在' });
         const candidateProxy = String(body.proxyUrl || '').trim();
-        const proxyUrl = validateSourceProxy(candidateProxy || (monitor ? monitor.sourceProxy : user.settings.sourceProxy));
+        const proxyUrl = validateSourceProxy(body.sourceProxyId ? findProxyProfile(user,body.sourceProxyId).url : candidateProxy || (monitor ? monitor.sourceProxy : user.settings.sourceProxy));
         if (!proxyUrl) throw Object.assign(new Error(monitor ? '此任务尚未保存独立代理，请先填写代理地址' : '请先填写或保存代理地址'), { code: 'SOURCE_PROXY_MISSING' });
         if (!String(body.targetUrl || '').trim()) {
           try { return sendJson(response, 200, await testProxy(user, proxyUrl)); }
@@ -1217,20 +1246,22 @@ async function handler(request, response) {
         const saved = body.monitorId ? user.monitors.find(m => m.id === body.monitorId) : null;
         if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
         const input = mergeRule(saved || {}, body.rule || {});
-        input.sourceProxy = body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || '';
+        input.sourceProxy = selectedProxyUrl(user,body.rule,saved);
         const goal = inferGoal(body.instruction || '', input, body.type);
         if (body.condition) goal.condition = body.condition;
         const analysis = await ruleService.analyze(user, urlOf(body.url || input.url, '监控地址'), input, { browser: body.browser === true });
         const built = await ruleService.build(user, { ...goal, name: input.label, interval: resolveInterval(goal.type, body.instruction || '', input, body.interval ?? (body.intervalMinutes != null ? body.intervalMinutes * 60 : undefined)) }, analysis, input);
         return sendJson(response, 200, { status: 'ready', monitor: built.rule, analysis: built.analysis, attempts: built.attempts });
       }
+      if(request.method==='DELETE'&&pathname==='/api/element-preview'){const body=await readJson(request);discardElementPreview(user.id,body.previewId);return sendJson(response,200,{released:true});}
       if (request.method === 'POST' && pathname === '/api/element-preview') {
         const body = await readJson(request);
         const saved = body.monitorId ? user.monitors.find(m => m.id === body.monitorId) : null;
         if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
-        const input = { ...saved, ...body.rule, sourceProxy: body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || '' };
+        const input = { ...saved, ...body.rule, sourceProxy: selectedProxyUrl(user,body.rule,saved) };
         const url = urlOf(body.url || input.url, '监控地址');
-        const source = await fetchSource(url, { ...sourceOptions(user, input), ...(body.browser ? { mode: 'browser' } : {}) });
+        const source = await untilResponseClosed(response,signal=>fetchSource(url, { ...sourceOptions(user, input), ...(body.browser ? { mode: 'browser' } : {}),signal }));
+        if(response.destroyed)return;
         return sendJson(response, 200, { ...createElementPreview(user.id, url, source.body, source.metadata.method, input), fetch: { method: source.metadata.method, route: source.metadata.route } });
       }
       if (request.method === 'POST' && pathname === '/api/select-element') {
@@ -1249,11 +1280,11 @@ async function handler(request, response) {
           detection_method: selected.method === 'browser' ? 'browser' : 'dom', target_element: collection ? { label: '各型号库存区域' } : selections.length > 1 ? { label: '所选 ' + selections.length + ' 个网页区域' } : selected.target,
           extraction_rule: collection || (selections.length > 1 ? { kind: 'elements', elements: selections.map((element, index) => ({ target: { ...element.target, label: element.target.label === '用户选择的网页区域' ? '网页区域 ' + (index + 1) : element.target.label }, ...(element.attribute ? { attribute: element.attribute } : {}) })) } : { kind: type === 'product_stock' ? 'stock' : type === 'price_change' ? 'number' : 'text', ...(selected.attribute ? { attribute: selected.attribute } : {}) }),
           condition: body.condition || (input.type === type ? input.condition : inferred.condition),
-          interval: input.interval ?? (type === 'product_stock' ? 30 : 300), sourceProxy: body.rule?.sourceProxy ? validateSourceProxy(body.rule.sourceProxy) : saved?.sourceProxy || ''
+          interval: input.interval ?? (type === 'product_stock' ? 30 : 300), sourceProxy: selectedProxyUrl(user,body.rule,saved)
         };
         const spec = validateMonitor(draft);
         const report = await ruleService.test(user, { ...spec, sourceProxy: draft.sourceProxy });
-        return sendJson(response, 200, { status: 'ready', monitor: { ...spec, confidence: report.confidence, last_test_result: report } });
+        return sendJson(response, 200, { status: 'ready', monitor: { ...spec, sourceProxyId: body.rule?.sourceProxyId ?? saved?.sourceProxyId ?? null, confidence: report.confidence, last_test_result: report } });
       }
       const repairMatch = pathname.match(/^\/api\/monitors\/([^/]+)\/(repair|logs)$/);
       if (repairMatch) {
@@ -1292,14 +1323,15 @@ async function handler(request, response) {
         const redact = value => {
           const secrets = [parsingUser.settings.aiKey, user.settings.aiKey].filter(Boolean).flatMap(key => [key, encodeURIComponent(key), JSON.stringify(key).slice(1, -1)]);
           let safe = [...new Set(secrets)].sort((a, b) => b.length - a.length).reduce((text, secret) => text.replaceAll(secret, '[已隐藏的 API Key]'), String(value));
-          for (const proxy of [parsingUser.settings.sourceProxy, savedMonitor?.sourceProxy, body.sourceProxy, body.draft?.sourceProxy].filter(Boolean)) safe = redactProxy(safe, proxy);
+          for (const proxy of [parsingUser.settings.sourceProxy, ...(parsingUser.settings.sourceProxies || []).map(item=>item.url), savedMonitor?.sourceProxy, body.sourceProxy, body.draft?.sourceProxy].filter(Boolean)) safe = redactProxy(safe, proxy);
           return safe;
         };
         const trace = { editingMonitorId: savedMonitor?.id || null };
         const safeTrace = () => redactData(trace, redact);
         try {
           const privateProxy = body.sourceProxy !== undefined ? body.sourceProxy : body.draft?.sourceProxy;
-          const selectedProxy = privateProxy === null ? '' : privateProxy ? validateSourceProxy(privateProxy) : savedMonitor?.sourceProxy || '';
+          const selectedId = body.sourceProxyId ?? body.draft?.sourceProxyId;
+          const selectedProxy = selectedProxyUrl(user,{sourceProxy:privateProxy,sourceProxyId:selectedId},savedMonitor);
           const draft = body.draft ? { ...body.draft, sourceProxy: selectedProxy } : savedMonitor ? { ...savedMonitor, sourceProxy: selectedProxy } : body.fetch ? { fetch: validateFetchOptions(body.fetch), sourceProxy: selectedProxy } : null;
           const source = savedMonitor ? instructionUrl(String(body.instruction || '')) || body.sourceUrl || draft?.url : body.sourceUrl;
           const parsed = await parseInstruction(parsingUser, body.instruction, source, trace, body.conversation, body.timeZone, draft);
@@ -1311,6 +1343,7 @@ async function handler(request, response) {
           }
           if (parsed.monitor) {
             if (parsed.monitor.kind !== 'unified') parsed.monitor.monitor_rule = legacyRuleView(parsed.monitor);
+            parsed.monitor.sourceProxyId = selectedId || (privateProxy ? null : savedMonitor?.sourceProxyId || null);
             parsed.monitor.hasSourceProxy = Boolean(draft?.sourceProxy);
             parsed.monitor.sourceProxyEndpoint = proxyEndpoint(draft?.sourceProxy);
             parsed.monitor.sourceProxyTest = draft?.sourceProxy && draft.sourceProxy === savedMonitor?.sourceProxy ? savedMonitor.sourceProxyTest || null : null;
@@ -1346,7 +1379,7 @@ async function handler(request, response) {
         if (body.monitorId && !saved) return sendJson(response, 404, { error: '任务不存在' });
         const input = saved ? { ...saved, ...body.rule, kind: body.rule?.kind || saved.kind } : body.rule;
         const spec = { ...validateMonitor(input, { allowMissingSource: true, allowPastReminder: Boolean(saved) }), priority: input.priority,
-          sourceProxy: input.sourceProxy === null ? '' : input.sourceProxy ? validateSourceProxy(input.sourceProxy) : saved?.sourceProxy || '',
+          sourceProxy: selectedProxyUrl(user,input,saved),
           webhookIds: input.webhookIds, id: saved?.id };
         const previous = notificationPreviews.get(body.previousPreviewId);
         const observed = previous?.userId === user.id && previous.expiresAt > Date.now() && previous.sourceSignature === previewSourceSignature(spec)

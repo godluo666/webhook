@@ -67,6 +67,7 @@ node server.js
 | `HTTP_PROXY` / `HTTPS_PROXY` | Node.js 24.14+ 会自动使用代理，并跳过本地地址；较旧版本请通过运行环境配置网络 |
 | `MONITOR_BROWSER_EXECUTABLE` | 直接运行 Node 时指定 Chrome / Chromium 可执行文件，Docker 已内置 |
 | `MONITOR_BROWSER_ENABLED=0` | 关闭浏览器读取，默认启用 |
+| `MONITOR_TEMP_DIR` | 可选私有临时目录；新版 Docker 的浏览器和代理临时文件使用 /tmp，Compose 挂载有容量上限的 tmpfs |
 | `MONITOR_SS_EXECUTABLE` | 直接运行 Node 时指定 shadowsocks-rust 的 `sslocal` 可执行文件，需支持 HTTP 本地代理；Docker 已内置，无需额外配置 |
 | `MONITOR_PROXY_TEST_URL` | 可选的代理出网检测地址，应返回 JSON `{ "ip": "出口IP" }`、纯 IP 或 Cloudflare trace；不配置时使用内置检测服务及备用服务 |
 | `MONITOR_BROWSER_HEADLESS=1` | Linux 上使用无界面浏览器，默认在 Xvfb 中运行 |
@@ -77,3 +78,5 @@ node server.js
 邮箱验证码通过 [Resend 邮件 API](https://resend.com/docs/send-with-nodejs) 发送，不需要自建邮局。先在 Resend 验证发件域名，设置 `RESEND_API_KEY` 和 `MAIL_FROM`，例如 `Webhook Radar <notify@example.com>`。两项均配置后，新账户注册必须填写邮箱、接收 6 位验证码并在 10 分钟内验证；已登录用户绑定或更换邮箱也需要当前密码和发往新邮箱的验证码。验证码每 60 秒最多重发一次，每个邮箱每小时最多 5 次，输入错误达到 5 次后失效。服务重启后未使用的验证码失效。
 
 未配置邮件服务时，用户仍可用用户名和密码注册，但不能绑定未经验证的邮箱；页面会明确显示邮件服务尚未启用。注册后会显示一次恢复码，请妥善保存。忘记密码时，用用户名和恢复码设置新密码；恢复成功后恢复码会换新。已登录用户可以修改密码或凭当前密码重新生成恢复码。
+
+多代理选择、自动下单与付款、资源释放和负载诊断的配置及升级说明见 [功能与升级说明](docs/order-proxy-resources.md)。

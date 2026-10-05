@@ -52,7 +52,7 @@ try {
   try { await read(base + '/auth', { userId: 'smoke-account', proxyUrl }); } catch { /* origin authentication can fail navigation */ }
   assert.ok(originAuthAttempts > 0);
   assert.ok(originAuth.every((header) => !header), 'Origin received proxy credentials');
-  const files = await fs.readdir(path.join(dataDir, 'browser-tmp'));
+  const files = await fs.readdir(path.join(process.env.MONITOR_TEMP_DIR || dataDir, 'browser-tmp'));
   assert.equal(files.some((name) => name.startsWith('source-')), false);
   console.log('Browser JavaScript/JSON, proxy-only authentication, cookie isolation and profile cleanup passed.');
 } finally {

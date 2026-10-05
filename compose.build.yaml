@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     init: true
     read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m,mode=1777
     cap_drop:
       - ALL
     security_opt:

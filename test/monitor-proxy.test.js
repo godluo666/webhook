@@ -326,3 +326,31 @@ test('创建前选择的独立代理贯穿AI页面分析、候选验证与保存
   assert.equal(b.requests.length, before + 1); assert.equal(a.requests.length, count);
   privateFree(f.controls.aiRequests, [a, b]); privateFree(await f.request('alice', '/api/state'), [a, b]);
 });
+
+
+test('保存多个命名代理、默认选择和监控独立选择，删除快捷条目保留原出口且账户隔离', async t => {
+  const f=await fixture(t),a=await f.makeProxy('library-a'),b=await f.makeProxy('library-b');
+  const one=await f.request('alice','/api/source-proxy','PUT',{proxyUrl:a.url,name:'香港'});
+  const first=one.settings.sourceProxies[0];assert.equal(first.name,'香港');assert.equal(one.settings.sourceProxyId,first.id);
+  const two=await f.request('alice','/api/source-proxies','POST',{proxyUrl:b.url,name:'美国'},201);
+  const second=two.settings.sourceProxies.find(item=>item.name==='美国');assert.equal(two.settings.sourceProxyEndpoint,a.endpoint);
+  assert.equal(two.settings.sourceProxies.length,2);privateFree(two,[a,b]);
+  const duplicate=await f.request('alice','/api/source-proxies','POST',{proxyUrl:b.url,name:'美国'},201);assert.equal(duplicate.settings.sourceProxies.length,2);
+  await f.request('bob','/api/source-proxy','PUT',{sourceProxyId:second.id},404);
+  await f.request('bob','/api/source-proxy/test','POST',{sourceProxyId:second.id},404);
+  await f.request('bob','/api/source-proxies/'+second.id,'DELETE',undefined,404);
+  const custom=(await f.request('alice','/api/monitors','POST',{...f.rule,fetch:{mode:'http',proxy:'custom'},sourceProxyId:second.id},201)).monitors[0];
+  assert.equal(custom.sourceProxyId,second.id);assert.equal(custom.sourceProxyEndpoint,b.endpoint);
+  const beforeRename=b.requests.length;await f.request('alice','/api/monitors/'+custom.id,'PATCH',{rule:{label:'仅改名字',sourceProxyId:second.id}});assert.equal(b.requests.length,beforeRename,'Unchanged verified proxy must not create redundant network tests');
+  const ac=a.requests.length,bc=b.requests.length;
+  await f.request('alice','/api/monitors/'+custom.id+'/check','POST');assert.equal(a.requests.length,ac);assert.equal(b.requests.length,bc+1);
+  const switched=await f.request('alice','/api/source-proxy','PUT',{sourceProxyId:second.id});assert.equal(switched.settings.sourceProxyEndpoint,b.endpoint);
+  const parsed=await f.request('alice','/api/parse','POST',{instruction:'Change the label',monitorId:custom.id,sourceProxyId:first.id});
+  assert.equal(parsed.monitor.sourceProxyId,first.id);assert.equal(parsed.monitor.sourceProxyEndpoint,a.endpoint);privateFree(parsed,[a,b]);privateFree(f.controls.aiRequests,[a,b]);
+  await f.request('alice','/api/source-proxies/'+second.id,'DELETE');
+  const state=await f.request('alice','/api/state');assert.equal(state.settings.sourceProxies.length,1);assert.equal(state.settings.sourceProxyEndpoint,b.endpoint);
+  const count=b.requests.length;await f.request('alice','/api/monitors/'+custom.id+'/check','POST');assert.equal(b.requests.length,count+1);
+  await f.request('alice','/api/monitors','POST',{...f.rule,fetch:{mode:'http',proxy:'custom'},sourceProxyId:second.id},404);
+  assert.equal((await f.request('bob','/api/state')).settings.sourceProxies.length,0);
+  privateFree(await f.request('alice','/api/state'),[a,b]);
+});

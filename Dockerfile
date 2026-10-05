@@ -25,13 +25,13 @@ COPY --chown=node:node server.js ./
 COPY --chown=node:node lib ./lib
 COPY --chown=node:node public ./public
 
-# Keep browser writes inside the existing volume, including on read-only stacks.
-RUN mkdir -p /app/.data/browser-tmp && chown -R node:node /app/.data \
-    && rm -rf /tmp && ln -s /app/.data/browser-tmp /tmp
-
-ENV TMPDIR=/app/.data/browser-tmp \
-    XDG_CACHE_HOME=/app/.data/browser-tmp/cache \
-    XDG_CONFIG_HOME=/app/.data/browser-tmp/config
+# Durable accounts/orders stay in .data; transient Chromium/proxy writes use /tmp.
+# compose mounts /tmp as bounded tmpfs; plain docker also works with writable /tmp.
+RUN mkdir -p /app/.data && chown node:node /app/.data
+ENV TMPDIR=/tmp \
+    MONITOR_TEMP_DIR=/tmp/webhook-radar \
+    XDG_CACHE_HOME=/tmp/webhook-radar/cache \
+    XDG_CONFIG_HOME=/tmp/webhook-radar/config
 
 USER node
 EXPOSE 3000

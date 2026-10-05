@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test"
+    "test": "node --test",
+    "diagnostics": "node lib/diagnostics.js"
   },
   "engines": {
     "node": ">=20.18.1"

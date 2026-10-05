@@ -25,9 +25,9 @@ test('下单配置拒绝无限预算、无效数量、带凭据的 URL；付款�
   assert.equal(task.enabled,false);assert.equal(JSON.stringify(publicOrderTask(task)).includes('private-site-secret'),false);
   assert.deepEqual(validateOrderTask({...input,url:'https://another-shop.example/a'},task).credentials,{});
 });
-function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false}={}){
-  const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0,loginError=null;
-  const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
+function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false,paymentStructure=false,assistanceCode=null}={}){
+  const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0,loginError=null,missingPayment=paymentStructure;
+  const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));if(JSON.parse(messages[1].content).phase==='payment')return {summary:'从原账单真实 DOM 恢复付款定位',code:assistanceCode||'function(order,browser){return browser.pay({});}'};return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
     openBrowser:async(current,options)=>{if(loginError)throw loginError;const session={trace:[],receipt:null,snapshot:async()=>({text:'Product A USD 10',elements:[{id:'actual-random-selector'}]}),close:async()=>{},methods:{goto:async()=>true,submit:async()=>{
       if(current.dryRun||current.executionMode==='prepare'){session.trace.push({action:'核对'});session.receipt={status:'prepared',review:{product:current.product,quantity:1,total:10,currency:'USD'}};return session.receipt;}
       await options.onBeforeSubmit({product:current.product,quantity:1,total:10,currency:'USD'});commits++;session.trace.push({action:'提交'});
@@ -35,6 +35,7 @@ function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paym
       if(fake&&!pay)return {status:'ordered'};
       session.receipt={status:'ordered',review:{product:current.product,quantity:1,total:10,currency:'USD'},confirmation:'Order #42'};return session.receipt;
     },pay:async()=>{
+      if(missingPayment){missingPayment=false;throw new Error('Missing payment field: original-invoice-pay');}
       if(insufficientBalance){session.receipt={...session.receipt,status:'awaiting_payment',invoiceId:'42',url:'https://shop.example/invoice?id=42',paymentPending:{reason:'insufficient_balance',message:'余额不足，已保留待付款订单',balance:0,total:10,currency:'USD'}};return session.receipt;}
       if(paymentFailure)throw new Error('invoice price changed');
       assert.ok(task.submissionStartedAt, 'Submission ledger must be durable before payment');
@@ -123,4 +124,29 @@ test('登录暂时无法验证不删除会话或调用 AI 修复，恢复后继�
  f.setLoginError(Object.assign(new Error('暂时无法确认登录'),{code:'ORDER_LOGIN_UNVERIFIED'}));await assert.rejects(f.service.generate(f.user,f.task),/无法确认/);assert.equal(account.status,'unavailable');assert.equal(account.session,original);assert.equal(f.generated,0);assert.equal(f.commits,0);
  f.setLoginError(null);await f.service.generate(f.user,f.task);assert.equal(account.status,'saved');assert.equal(account.error,'');assert.equal(f.generated,1);assert.equal(account.revision,1);
  f.service.approve(f.user,f.task,orderProgramHash(f.task));f.setLoginError(Object.assign(new Error('网站已返回登录页面'),{code:'ORDER_LOGIN_REQUIRED'}));await f.service.execute(f.user,f.task);assert.equal(account.status,'expired');assert.equal(account.session,original);assert.equal(f.generated,1);assert.equal(f.commits,0);
+});
+
+
+test('订单创建后的 DOM 变化由 AI 在同一浏览器协助原账单付款，永不创建第二单',async()=>{
+ const f=fixture({pay:true,paymentStructure:true});await f.service.generate(f.user,f.task);f.service.approve(f.user,f.task,orderProgramHash(f.task));
+ await f.service.execute(f.user,f.task);assert.equal(f.task.status,'paid');assert.equal(f.commits,1);assert.equal(f.payments,1);assert.equal(f.generated,2);assert.equal(f.task.paymentAssistance.length,1);
+ await f.service.trigger(f.user,f.user.monitors[0]);assert.equal(f.commits,1);assert.equal(f.payments,1);
+});
+
+test('付款 AI 辅助不能提交订单或访问商品操作，付款结果不明时不调用 AI 再付款',async()=>{
+ const f=fixture({pay:true,paymentStructure:true,assistanceCode:'function(order,browser){return browser.submit();}'});await f.service.generate(f.user,f.task);f.service.approve(f.user,f.task,orderProgramHash(f.task));await f.service.execute(f.user,f.task);
+ assert.equal(f.task.status,'payment_failed');assert.equal(f.commits,1);assert.equal(f.payments,0);assert.equal(f.generated,2);
+ const g=fixture({pay:true,paymentUnknown:true});await g.service.generate(g.user,g.task);g.service.approve(g.user,g.task,orderProgramHash(g.task));await g.service.execute(g.user,g.task);
+ assert.equal(g.task.status,'uncertain');assert.equal(g.generated,1);assert.equal(g.commits,1);assert.equal(g.payments,1);
+});
+
+
+test('连续两次试跑发现会话购物车数量累加，AI 修正后才允许启用且试跑不提交',async()=>{
+ const f=fixture();let cart=0,generated=0;
+ const nextProgram={checkout:program.checkout,summary:'调整已有购物车',code:'function(order,browser){browser.fill("#quantity",String(order.quantity));return browser.submit();}'};
+ const service=createOrderService({persist:()=>{},requestAI:async(_user,messages)=>{generated++;if(generated===2)assert.match(messages.at(-1).content,/连续试跑/);return nextProgram;},openBrowser:async current=>{
+  const session={trace:[],snapshot:async()=>({url:current.url,elements:[]}),close:async()=>{},methods:{fill:async()=>{cart=generated===1?cart+1:1;},submit:async()=>{session.receipt={status:'prepared',review:{product:'Switch',quantity:cart,total:cart*10,currency:'USD'}};return session.receipt;}}};return session;
+ }});
+ await service.generate(f.user,f.task);assert.equal(generated,2);assert.equal(f.task.trial.preflightPasses,2);assert.equal(f.task.trial.review.quantity,1);assert.equal(f.task.trial.review.total,10);assert.equal(f.task.enabled,false);assert.equal(f.task.submissionStartedAt,undefined);
+ service.approve(f.user,f.task,orderProgramHash(f.task));assert.equal(f.task.enabled,true);
 });

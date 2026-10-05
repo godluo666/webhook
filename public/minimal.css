@@ -178,3 +178,10 @@ select.choice-source { display: none !important; }
 .picker-scope [aria-pressed="true"] { background: #f1efff; color: #5144b4; }
 .picker-scope.hidden { display: none; }
 .element-frame { max-width: 100%; }
+
+.proxy-profile-list { margin: 8px 0 24px; }
+.proxy-profile-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-bottom: 1px solid var(--border); min-width: 0; }
+.proxy-profile-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+.proxy-profile-row p { margin: 6px 0 0; }
+.proxy-profile-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+@media (max-width: 600px) { .proxy-profile-row { align-items: flex-start; flex-direction: column; } .proxy-profile-actions { width: 100%; } }

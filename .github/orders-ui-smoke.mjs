@@ -11,23 +11,39 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const root=process.cwd(), dataDir=await fs.mkdtemp(path.join(tmpdir(),'radar-orders-ui-'));
 const nonce=randomBytes(4).toString('hex'), id=key=>key+'-'+nonce;
 let available=false,total=9.5,createdOrders=0,paymentRequests=0,paidOrders=0,invoiceExtra=0,invoiceCurrency="USD",loginRequests=0,affiliateVisits=0,affiliateOrders=0,expired=false,layoutChanged=false,affWorking=true,requireOtp=true,sessionSequence=0,validSession='logged-in';
-const aiRequests=[],messages=[],errors=[],orderRequestTimes=[];let productReads=0,overwriteAffOnSubmit=false,accountBalance=100,hideBalance=false,productCurrency='USD',foreignGateway=false;const invoices=new Map();
+const aiRequests=[],messages=[],errors=[],orderRequestTimes=[];let productReads=0,overwriteAffOnSubmit=false,accountBalance=100,hideBalance=false,productCurrency='USD',foreignGateway=false;const invoices=new Map();let actualGateway=false,gatewayRadio=false,paymentConfirmation='Paid',gatewayLabel='Alipay',paymentLayoutChanged=false,externalCashier=false,replayRedirect=false,replayedPayments=0,gatewayFee=false,swapMethodOnPay=false,cashierReads=0;let cashierBase;
 const password='private-site-password-'+nonce, username='buyer@example.test';
 let sourceBase;
 const checkout={submitSelector:'#'+id('submit'),productSelector:'#'+id('product'),quantitySelector:'#'+id('quantity'),totalSelector:'#'+id('total'),currencySelector:'#'+id('currency'),confirmationSelector:'#'+id('confirmation')};
 const code='function(order,browser){browser.goto(order.url);browser.fill("'+checkout.quantitySelector+'",String(order.quantity));browser.select("#'+id('billing')+'","monthly");browser.check("#'+id('terms')+'");return browser.submit();}';
 const paidCode=code.replace('return browser.submit();', 'const result=browser.submit();if(result.status==="prepared")return result;if(browser.exists("#'+id('invoice-link')+'"))browser.invoice("#'+id('invoice-link')+'");const elements=browser.snapshot().elements;function locate(name){const field=elements.find(el=>el.id&&el.id.startsWith(name+"-"));if(!field)throw new Error("Missing payment field: "+name);return "#"+field.id;}return browser.pay({paySelector:locate("pay"),invoiceSelector:locate("invoice"),totalSelector:locate("invoice-total"),currencySelector:locate("invoice-currency"),balanceSelector:elements.some(el=>el.id==="'+id('balance')+'")?locate("balance"):null,balanceCurrencySelector:elements.some(el=>el.id==="'+id('balance-currency')+'")?locate("balance-currency"):null,confirmationSelector:"#"+"paid-"+elements.find(el=>el.id&&el.id.startsWith("invoice-")).id.split("-").at(-1)});');
+const gatewayMarkup=invoice=>{
+ const key=id(invoice?'invoice-choice':'checkout-choice'),name=id('opaque-route'),label=invoice?'支付宝':gatewayLabel;
+ return gatewayRadio?'<fieldset><legend>付款方式</legend><label><input type="radio" name="'+name+'" value="route_003" checked>Credit Card</label><label for="'+key+'">'+label+'</label><input type="radio" id="'+key+'" name="'+name+'" value="route_017" '+(invoice&&gatewayFee?'onchange="document.getElementById(&#39;'+id('invoice-total')+'&#39;).textContent=&#39;USD 10.50&#39;"':'')+'></fieldset>':'<label>付款方式 / Payment option<select id="'+key+'" name="'+name+'"><option value="route_003">Credit Card</option><option value="route_017">'+label+'</option><option value="route_025">Account Balance</option></select></label>';
+};
+const cashier=http.createServer((_req,res)=>{cashierReads++;res.end('Scan QR to pay');});
 const mock=http.createServer(async(req,res)=>{
  try {
   const url=new URL(req.url,'http://localhost');const authenticated=(req.headers.cookie||'').split(';').some(v=>v.trim()==='shop_session='+validSession);let raw='';for await(const part of req)raw+=part;
   if(url.pathname==='/v1/chat/completions'){
-    aiRequests.push(JSON.parse(raw));assert.ok(raw.includes(id('product')),'Generation must observe the real DOM, including random selectors');
+    aiRequests.push(JSON.parse(raw));
     const evidence=JSON.parse(JSON.parse(raw).messages.at(-1).content);
+    if(evidence.phase!=='payment')assert.ok(raw.includes(id('product')),'Generation must observe actual random DOM selectors');
+    if(evidence.phase==='payment'){
+      const currentButton=evidence.page.elements.find(el=>el.tag==='button'&&el.id===id('gateway-submit'));
+      assert.ok(currentButton,'Payment assistance must see the original invoice DOM');
+      const assist=paidCode.slice(paidCode.indexOf('const elements=browser.snapshot()')).replace('paySelector:locate("pay")','paymentMethod:{selector:locate("invoice-choice"),value:"route_017"},paySelector:'+JSON.stringify('#'+currentButton.id));
+      res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({summary:'基于原订单账单修复付款定位',code:'function(order,browser){'+assist})}}]}));return;
+    }
     const configPage=evidence.order.url.endsWith('/config');
     if(configPage && evidence.feedback) assert.ok(evidence.feedback.page?.elements.some(el=>el.id===id('total')+(layoutChanged?'-changed':'')),'Repair must receive the real next-page DOM');
     const generatedCheckout=configPage&&!evidence.feedback?{...checkout,totalSelector:'#unknown-next-page-total-'+nonce}:{...checkout,totalSelector:'#'+id('total')+(layoutChanged?'-changed':'')};
     if(evidence.order.instruction==='hold-to-cancel')await pause(5000);
-    const selectedCode=evidence.order.executionMode==='pay'?paidCode:code;
+    let selectedCode=evidence.order.executionMode==='pay'?paidCode:code;
+    if(actualGateway&&evidence.order.executionMode==='pay'){
+      const value=evidence.order.paymentMethod?.kind==='balance'?'route_025':/paypal/i.test(evidence.order.paymentMethod?.name)?'missing_paypal':'route_017';
+      selectedCode=selectedCode.replace('const result=browser.submit();','browser.choosePayment({selector:'+JSON.stringify('#'+id('checkout-choice'))+',value:'+JSON.stringify(value)+'});const result=browser.submit();').replace('paySelector:locate("pay")','paymentMethod:{selector:locate("invoice-choice"),value:'+JSON.stringify(value)+'},paySelector:locate("pay")');
+    }
     const generatedCode=configPage?selectedCode.replace('browser.fill(', 'if(browser.exists("#'+id('cart')+'"))browser.cart("#'+id('cart')+'");browser.fill('):selectedCode;
     res.setHeader('content-type','application/json');res.end(JSON.stringify({choices:[{message:{content:JSON.stringify({summary:'登录网站，选择月付商品，核对数量、币种与总价，只提交一次。',code:generatedCode,checkout:generatedCheckout,affiliate:evidence.order.affiliateUrl?{queryKey:'aff',cookieName:'partner_credit'}:null})}}]}));return;
   }
@@ -39,15 +55,20 @@ const mock=http.createServer(async(req,res)=>{
   if(url.pathname==='/verify-login'&&req.method==='POST'){assert.equal(new URLSearchParams(raw).get('otp'),'123456');expired=false;res.writeHead(302,{'set-cookie':'shop_session='+validSession+'; HttpOnly; Path=/','location':'/product'});res.end();return;}
   if(url.pathname==='/hook'){messages.push(JSON.parse(raw));res.end('ok');return;}
   if(url.pathname==='/pay'){
-    paymentRequests++;assert.equal(req.method,'POST');assert.ok(authenticated,'Stored session must track rotating login cookies');const invoiceId=new URLSearchParams(raw).get('invoiceid');assert.equal(invoiceId,String(createdOrders));assert.ok(accountBalance>=invoices.get(invoiceId).total,'Insufficient balance must not reach merchant payment endpoint');
+    paymentRequests++;assert.equal(req.method,'POST');assert.ok(authenticated,'Stored session must track rotating login cookies');const invoiceId=new URLSearchParams(raw).get('invoiceid');assert.equal(invoiceId,String(createdOrders));assert.ok(actualGateway||accountBalance>=invoices.get(invoiceId).total,'Insufficient balance must not reach payment endpoint');
+    if(actualGateway)assert.equal(new URLSearchParams(raw).get(id('opaque-route')),'route_017','Actual opaque payment field must carry the selected Alipay value');
+    if(externalCashier){res.writeHead(303,{location:'/handoff?id='+invoiceId});res.end();return;}
+    if(replayRedirect){res.writeHead(307,{location:'/pay-again'});res.end();return;}
     paidOrders++;invoices.get(invoiceId).paid=true;res.writeHead(303,{location:'/invoice?id='+invoiceId});res.end();return;
   }
+  if(url.pathname==='/handoff'){res.writeHead(303,{location:cashierBase+'/cashier?ticket=invoice-'+url.searchParams.get('id')});res.end();return;}
+  if(url.pathname==='/pay-again'){replayedPayments++;res.end('wrong replay');return;}
   if(url.pathname==='/complete'){const invoiceId=url.searchParams.get('id');assert.ok(invoices.has(invoiceId));res.setHeader('content-type','text/html; charset=utf-8');res.end('<h1 id="'+id('confirmation')+'">Order #'+invoiceId+' created, unpaid</h1><a id="'+id('invoice-link')+'" href="/invoice?id='+invoiceId+'">View invoice</a>');return;}
   if(url.pathname==='/invoice'){
     const invoiceId=url.searchParams.get('id'),invoice=invoices.get(invoiceId);if(!invoice){res.writeHead(404);res.end();return;}
     res.setHeader('content-type','text/html; charset=utf-8');
-    if(invoice.paid){res.end('<h1 id="'+id('paid')+'">Invoice #'+invoiceId+' Paid</h1>');return;}
-    res.end('<h1 id="'+id('confirmation')+'">Order #'+invoiceId+' created, unpaid</h1><form method="post" action="/pay"><input type="hidden" id="'+id('invoice')+'" name="invoiceid" value="'+invoiceId+'"><p id="'+id('invoice-total')+'">'+invoice.currency+' '+invoice.total.toFixed(2)+'</p><p id="'+id('invoice-currency')+'">'+invoice.currency+'</p>'+(hideBalance?'':'<p id="'+id('balance')+'">Account balance: '+invoice.currency+' '+accountBalance.toFixed(2)+'</p><span id="'+id('balance-currency')+'">'+invoice.currency+'</span>')+(foreignGateway?'<select name="paymentmethod"><option value="card">Credit Card</option></select>':'')+'<button id="'+id('pay')+'">Pay now with account balance</button></form>');return;
+    if(invoice.paid){res.end('<h1 id="'+id('paid')+'">Invoice #'+invoiceId+' '+paymentConfirmation+'</h1>');return;}
+    res.end('<h1 id="'+id('confirmation')+'">Order #'+invoiceId+' created, unpaid</h1><form method="post" action="/pay"><input type="hidden" id="'+id('invoice')+'" name="invoiceid" value="'+invoiceId+'"><p id="'+id('invoice-total')+'">'+invoice.currency+' '+invoice.total.toFixed(2)+'</p><p id="'+id('invoice-currency')+'">'+invoice.currency+'</p>'+(hideBalance?'':'<p id="'+id('balance')+'">Account balance: '+invoice.currency+' '+accountBalance.toFixed(2)+'</p><span id="'+id('balance-currency')+'">'+invoice.currency+'</span>')+(foreignGateway?'<select name="paymentmethod"><option value="card">Credit Card</option></select>':actualGateway?gatewayMarkup(true):'')+'<button '+(swapMethodOnPay?'onclick="document.getElementById(&#39;'+id('invoice-choice')+'&#39;).value=&#39;route_003&#39;" ':'')+'id="'+id(paymentLayoutChanged?'gateway-submit':'pay')+'">'+(actualGateway?'Continue to payment':'Pay now with account balance')+'</button></form>');return;
   }
   if(url.pathname==='/login'&&req.method==='POST'){
     loginRequests++;const values=new URLSearchParams(raw);assert.equal(values.get('username'),username);assert.equal(values.get('password'),password);
@@ -64,19 +85,19 @@ const mock=http.createServer(async(req,res)=>{
   }
   if(url.pathname==='/configure-cart'&&req.method==='POST'){
     assert.match(req.headers.cookie||'',/shop_session=logged-in/);
-    res.setHeader('content-type','text/html; charset=utf-8');res.end('<form action="/create-order" method="post"><h2 id="'+id('product')+'">Product A</h2><input id="'+id('quantity')+'" name="quantity" value="1"><select id="'+id('billing')+'" name="billing"><option value="monthly">Monthly</option></select><p id="'+id('total')+(layoutChanged?'-changed':'')+'">'+productCurrency+' '+total.toFixed(2)+'</p><p id="'+id('currency')+'">'+productCurrency+'</p><input id="'+id('terms')+'" type="checkbox" name="terms"><button '+(overwriteAffOnSubmit?'onclick="document.cookie=&#39;partner_credit=wrong; Path=/&#39;" ':'')+'id="'+id('submit')+'">Submit Order</button></form>');return;
+    res.setHeader('content-type','text/html; charset=utf-8');res.end('<form action="/create-order" method="post"><h2 id="'+id('product')+'">Product A</h2><input id="'+id('quantity')+'" name="quantity" value="1"><select id="'+id('billing')+'" name="billing"><option value="monthly">Monthly</option></select><p id="'+id('total')+(layoutChanged?'-changed':'')+'">'+productCurrency+' '+total.toFixed(2)+'</p><p id="'+id('currency')+'">'+productCurrency+'</p>'+(actualGateway?gatewayMarkup(false):'')+'<input id="'+id('terms')+'" type="checkbox" name="terms"><button '+(overwriteAffOnSubmit?'onclick="document.cookie=&#39;partner_credit=wrong; Path=/&#39;" ':'')+'id="'+id('submit')+'">Submit Order</button></form>');return;
   }
   if(url.pathname==='/product'){productReads++;
     const logged=!expired&&authenticated;if(logged){validSession='logged-in-'+(++sessionSequence);res.setHeader('set-cookie','shop_session='+validSession+'; HttpOnly; Path=/');}
     res.setHeader('content-type','text/html; charset=utf-8');
-    res.end('<html><head><title>Fixture cloud product</title></head><body><h1>Product A</h1><p>'+(available?'available':'sold out')+'</p>'+(logged?'<div style="display:none"><a href="/logout?token='+sessionSequence+'">Log out</a></div><form action="/change-password" method="post"><input type="password" name="current_password"><button>Change password</button></form>':'<form action="/login" method="post"><input id="'+id('username')+'" name="username"><input id="'+id('password')+'" name="password" type="password"><button id="'+id('login')+'">Log in</button></form>')+'<form action="/create-order" method="post"><h2 id="'+id('product')+'">Product A</h2><label>Quantity<input id="'+id('quantity')+'" name="quantity" value="1"></label><label>Billing<select id="'+id('billing')+'" name="billing"><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label><p id="'+id('total')+(layoutChanged?'-changed':'')+'">'+productCurrency+' '+total.toFixed(2)+'</p><p id="'+id('currency')+'">'+productCurrency+'</p><input id="'+id('terms')+'" type="checkbox" name="terms" value="accepted"><button '+(overwriteAffOnSubmit?'onclick="document.cookie=&#39;partner_credit=wrong; Path=/&#39;" ':'')+'id="'+id('submit')+'">Submit Order</button></form></body></html>');return;
+    res.end('<html><head><title>Fixture cloud product</title></head><body><h1>Product A</h1><p>'+(available?'available':'sold out')+'</p>'+(logged?'<div style="display:none"><a href="/logout?token='+sessionSequence+'">Log out</a></div><form action="/change-password" method="post"><input type="password" name="current_password"><button>Change password</button></form>':'<form action="/login" method="post"><input id="'+id('username')+'" name="username"><input id="'+id('password')+'" name="password" type="password"><button id="'+id('login')+'">Log in</button></form>')+'<form action="/create-order" method="post"><h2 id="'+id('product')+'">Product A</h2><label>Quantity<input id="'+id('quantity')+'" name="quantity" value="1"></label><label>Billing<select id="'+id('billing')+'" name="billing"><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select></label><p id="'+id('total')+(layoutChanged?'-changed':'')+'">'+productCurrency+' '+total.toFixed(2)+'</p><p id="'+id('currency')+'">'+productCurrency+'</p>'+(actualGateway?gatewayMarkup(false):'')+'<input id="'+id('terms')+'" type="checkbox" name="terms" value="accepted"><button '+(overwriteAffOnSubmit?'onclick="document.cookie=&#39;partner_credit=wrong; Path=/&#39;" ':'')+'id="'+id('submit')+'">Submit Order</button></form></body></html>');return;
   }
   res.writeHead(404);res.end();
  }catch(error){errors.push(error.message);res.writeHead(500);res.end(error.message);}
 });
 let browser,child,page;
 try{
-  sourceBase='http://127.0.0.1:'+await listen(mock);const reserve=http.createServer(),port=await listen(reserve);await new Promise(r=>reserve.close(r));const base='http://127.0.0.1:'+port;
+  sourceBase='http://127.0.0.1:'+await listen(mock);cashierBase='http://127.0.0.1:'+await listen(cashier);const reserve=http.createServer(),port=await listen(reserve);await new Promise(r=>reserve.close(r));const base='http://127.0.0.1:'+port;
   const executable=process.env.MONITOR_BROWSER_EXECUTABLE||(process.platform==='win32'?'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe':'/usr/bin/chromium');
   child=spawn(process.execPath,['server.js'],{cwd:root,windowsHide:true,stdio:'ignore',env:{...process.env,DATA_DIR:dataDir,HOST:'127.0.0.1',PORT:String(port),MONITOR_BROWSER_EXECUTABLE:executable,RESEND_API_KEY:'',MAIL_FROM:'',SIGNUP_CODE:''}});
   for(let i=0;i<100;i++){try{if((await fetch(base+'/api/auth/status')).ok)break;}catch{}await pause(50);}
@@ -118,7 +139,15 @@ try{
   const run=async()=>{await page.locator('[data-order-editor-action="run"]').click();await page.locator('[data-order-editor-action="new"]').waitFor({timeout:90000});};
   await fillForm('Product A 自动下单',20,'submit',sourceBase+'/aff?aff=partner-42');await page.locator('#order-product').fill('');
   assert.equal(await page.locator('#order-currency').count(),0);assert.equal(await page.locator('#order-product').getAttribute('required'),null);
-  const ordersBeforePick=createdOrders;await page.locator('[data-order-product-pick]').click();await page.frameLocator('#order-product-window iframe').locator('h2').click();await page.locator('[data-order-product-confirm]').click();
+  const ordersBeforePick=createdOrders;
+  const previewResponse=page.waitForResponse(response=>response.url().endsWith('/order-product/preview')&&response.request().method()==='POST');
+  await page.locator('[data-order-product-pick]').click();const previewId=(await (await previewResponse).json()).id;await page.frameLocator('#order-product-window iframe').locator('h2').click();
+  const discarded=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/element-preview'&&response.request().method()==='DELETE');await page.locator('[data-order-product-confirm]').click();assert.ok((await discarded).ok());
+  assert.equal((await context.request.post(base+'/api/monitors/'+monitor.id+'/order-product/select',{data:{previewId,index:0,url:sourceBase+'/product'}})).status(),404,'Confirmed previews are no longer retained');
+  const canceledResponse=page.waitForResponse(response=>response.url().endsWith('/order-product/preview')&&response.request().method()==='POST');await page.locator('[data-order-product-pick]').click();const canceledId=(await (await canceledResponse).json()).id;
+  const canceledDiscard=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/element-preview'&&response.request().method()==='DELETE');await page.locator('[data-order-product-close]').click();assert.ok((await canceledDiscard).ok());assert.equal(await page.locator('#order-product-window iframe').count(),0);
+  assert.equal((await context.request.post(base+'/api/monitors/'+monitor.id+'/order-product/select',{data:{previewId:canceledId,index:0,url:sourceBase+'/product'}})).status(),404,'Canceled previews are released');
+
   await page.waitForFunction(()=>document.querySelector('#order-product-selection')?.textContent.includes('已点选'));assert.equal(createdOrders,ordersBeforePick);assert.equal(paymentRequests,0);
   await generate();
   assert.equal(createdOrders,0);assert.equal(paymentRequests,0);assert.equal(loginRequests,1,'Generation reuses saved session');current=await state();let task=current.orderTasks[0];assert.equal(task.monitorId,monitor.id);assert.equal(task.product,'');assert.equal(task.currency,'');assert.equal(task.verifiedProduct,'Product A');assert.equal(task.verifiedCurrency,'USD');assert.ok(task.productSelection);assert.equal(task.trial.affiliate.status,'verified');assert.equal(task.trial.affiliate.name,'partner_credit');
@@ -159,11 +188,36 @@ try{
   await page.screenshot({path:path.join(output,'desktop-balance-pending.png'),fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.screenshot({path:path.join(output,'mobile-balance-pending.png'),fullPage:true});
   await newConfig();await fillForm('禁止改用银行卡付款',20,'pay');await generate();await enable();foreignGateway=true;await run();current=await state();assert.equal(current.orderTasks[0].status,'awaiting_payment');assert.equal(createdOrders,7);assert.equal(paymentRequests,paymentsBeforePending);foreignGateway=false;
   await newConfig();await fillForm('自动识别 EUR 并用余额支付',20,'pay');await page.locator('#order-product').fill('');productCurrency='EUR';invoiceCurrency='EUR';await generate();current=await state();assert.equal(current.orderTasks[0].verifiedCurrency,'EUR');await enable();await run();current=await state();assert.equal(current.orderTasks[0].status,'paid',JSON.stringify(current.orderTasks[0].result));assert.equal(current.orderTasks[0].result.payment.currency,'EUR');assert.equal(createdOrders,8);assert.equal(paymentRequests,paymentsBeforePending+1);productCurrency='USD';invoiceCurrency='USD';
+
+  actualGateway=true;
+  await newConfig();await fillForm('中英文付款方式预选',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();
+  const beforeGatewayGeneration=aiRequests.length;await generate();current=await state();task=current.orderTasks[0];assert.equal(task.verifiedPaymentMethod.label,'Alipay');assert.equal(task.verifiedPaymentMethod.value,'route_017');assert.equal(createdOrders,8);assert.equal(paymentRequests,paymentsBeforePending+1);
+  assert.equal(await page.locator('#order-addon select').count(),0,'App payment choices never add a dropdown');assert.ok(await page.locator('[data-order-payment-name="Alipay"]').isVisible());
+  await page.locator('#order-payment-name').fill('PayPal');await page.locator('[data-order-editor-action="enable"]').click();await pause(150);assert.equal((await state()).orderTasks[0].enabled,false);await page.locator('#order-payment-name').fill('支付宝');await enable();await run();current=await state();task=current.orderTasks[0];
+  assert.equal(task.status,'paid',JSON.stringify(task.result));assert.equal(task.result.payment.paymentMethod.label,'支付宝');assert.equal(createdOrders,9);assert.equal(paymentRequests,paymentsBeforePending+2);assert.equal(aiRequests.length,beforeGatewayGeneration+1,'Normal trigger never calls AI again');
+  await page.screenshot({path:path.join(output,'mobile-payment-choice.png'),fullPage:true});
+  await newConfig();await fillForm('不支持的方式启用前发现',20,'pay');await page.locator('[data-order-payment-name="PayPal"]').click();await page.locator('[data-order-editor-action="generate"]').click();
+  await page.waitForFunction(()=>document.querySelector('[data-order-editor-action="generate"]')?.disabled===false,{timeout:30000});current=await state();assert.equal(current.orderTasks[0].status,'failed');assert.equal(current.orderTasks[0].enabled,false);assert.equal(createdOrders,9);assert.equal(paymentRequests,paymentsBeforePending+2);
+  await page.locator('[data-order-payment-name="Alipay"]').click();await generate();await enable();paymentLayoutChanged=true;const beforePaymentAssist=aiRequests.length;await run();current=await state();task=current.orderTasks[0];
+  assert.equal(task.status,'paid',JSON.stringify(task.result));assert.equal(task.paymentAssistance.length,1);assert.equal(aiRequests.length,beforePaymentAssist+1);assert.equal(createdOrders,10);assert.equal(paymentRequests,paymentsBeforePending+3);paymentLayoutChanged=false;
+  await newConfig();await fillForm('收银台待扫码',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();await generate();await enable();externalCashier=true;await run();current=await state();task=current.orderTasks[0];
+  assert.equal(task.status,'awaiting_payment',JSON.stringify(task.result));assert.equal(task.result.paymentPending.reason,'external_payment');assert.ok(task.result.paymentPending.cashierUrl.startsWith(cashierBase+'/cashier'));assert.equal(cashierReads,0,'Server never performs payment actions at the external cashier');assert.ok(await page.locator('#order-addon a[href="'+task.result.paymentPending.cashierUrl+'"]').isVisible());assert.equal(createdOrders,11);assert.equal(paymentRequests,paymentsBeforePending+4);externalCashier=false;
+  await newConfig();await fillForm('付款请求选择被替换',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();await generate();await enable();swapMethodOnPay=true;const beforeTamper=aiRequests.length;await run();current=await state();task=current.orderTasks[0];
+  assert.equal(task.status,'uncertain',JSON.stringify(task.result));assert.match(task.error,/付款方式/);assert.equal(aiRequests.length,beforeTamper);assert.equal(createdOrders,12);assert.equal(paymentRequests,paymentsBeforePending+4);swapMethodOnPay=false;
+
+  gatewayRadio=true;
+  await newConfig();await fillForm('实际 radio 标签核对',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();await generate();current=await state();assert.equal(current.orderTasks[0].verifiedPaymentMethod.control,'radio');await enable();await run();current=await state();assert.equal(current.orderTasks[0].status,'paid',JSON.stringify(current.orderTasks[0].result));assert.equal(createdOrders,13);assert.equal(paymentRequests,paymentsBeforePending+5);
+  await newConfig();await fillForm('失败提示不能当支付成功',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();await generate();await enable();paymentConfirmation='Payment unsuccessful';const beforeBadConfirmation=aiRequests.length;await run();current=await state();assert.equal(current.orderTasks[0].status,'uncertain',JSON.stringify(current.orderTasks[0].result));assert.match(current.orderTasks[0].error,/未确认付款成功/);assert.equal(aiRequests.length,beforeBadConfirmation);assert.equal(createdOrders,14);assert.equal(paymentRequests,paymentsBeforePending+6);paymentConfirmation='Paid';
+
+  await newConfig();await fillForm('付款跳转不能重发 POST',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();await generate();await enable();replayRedirect=true;const beforeReplay=aiRequests.length;await run();current=await state();assert.equal(current.orderTasks[0].status,'uncertain',JSON.stringify(current.orderTasks[0].result));assert.match(current.orderTasks[0].error,/重发/);assert.equal(replayedPayments,0);assert.equal(aiRequests.length,beforeReplay);assert.equal(createdOrders,15);assert.equal(paymentRequests,paymentsBeforePending+7);replayRedirect=false;
+
+  await newConfig();await fillForm('付款选项不能偷偷变更金额',20,'pay');await page.locator('[data-order-payment-name="支付宝"]').click();await generate();await enable();gatewayFee=true;const beforeFee=aiRequests.length;await run();current=await state();assert.equal(current.orderTasks[0].status,'payment_failed',JSON.stringify(current.orderTasks[0].result));assert.match(current.orderTasks[0].error,/金额发生变化/);assert.equal(aiRequests.length,beforeFee);assert.equal(createdOrders,16);assert.equal(paymentRequests,paymentsBeforePending+7);gatewayFee=false;
+  console.log('PASS preselected Alipay/支付宝 with opaque fields, unsupported method blocked during trial, same-order AI payment assistance, external cashier handoff and actual POST method binding');
   console.log('PASS blank product/currency, private manual product selection, hidden logout login proof, currency change guard, insufficient/unknown balance and reachable pending invoice without payment or repeat orders');
 
   }
   assert.deepEqual(errors,[]);console.log('PASS integrated monitor ordering, private interactive prelogin with 2FA and restart, real AFF Cookie on order request, AI-generated DOM repair before submission, actual scoped payment, budget/invoice/AFF/login protections, cancellation, tenant isolation, mobile layout');
 }catch(error){if(page)console.error('Order smoke UI state:',await page.locator('#order-status,#order-account-status,#toast').allTextContents());throw error;}finally{
   await browser?.close();if(child){child.kill();await new Promise(r=>child.exitCode!==null?r():child.once('exit',r));}
-  mock.closeAllConnections?.();await new Promise(r=>mock.close(r));const resolved=path.resolve(dataDir);assert.ok(resolved.startsWith(path.resolve(tmpdir())+path.sep)&&path.basename(resolved).startsWith('radar-orders-ui-'));await fs.rm(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:100});
+  mock.closeAllConnections?.();cashier.closeAllConnections?.();await Promise.all([new Promise(r=>mock.close(r)),new Promise(r=>cashier.close(r))]);const resolved=path.resolve(dataDir);assert.ok(resolved.startsWith(path.resolve(tmpdir())+path.sep)&&path.basename(resolved).startsWith('radar-orders-ui-'));await fs.rm(resolved,{recursive:true,force:true,maxRetries:5,retryDelay:100});
 }

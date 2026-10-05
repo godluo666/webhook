@@ -51,3 +51,11 @@ test('限流遵守 Retry-After，短暂故障最多重试一次', async () => {
   const rateLimited = createSourceFetcher({ fetchImpl: async () => new Response('rate limited', { status: 429, headers: { 'retry-after': '120' } }) });
   await assert.rejects(rateLimited('https://example.com'), (e) => e.code === 'SOURCE_RATE_LIMITED' && e.fetchDetails.retryAfterMs === 120000 && e.fetchDetails.attempts.length === 1);
 });
+
+
+test('取消只读来源请求立即结束且不继续重试或启动浏览器',async()=>{
+ const controller=new AbortController();let reads=0,browserReads=0;
+ const read=createSourceFetcher({fetchImpl:async(_url,{signal})=>{reads++;return new Promise((_resolve,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}));},browserFetch:async()=>{browserReads++;return {body:'unused'};}});
+ const pending=read('https://example.com/preview',{userId:'reader',signal:controller.signal});controller.abort();await assert.rejects(pending,error=>error.name==='AbortError');assert.equal(reads,1);assert.equal(browserReads,0);
+ await assert.rejects(read('https://example.com/preview',{signal:controller.signal}));assert.equal(reads,1);
+});
