@@ -17,7 +17,7 @@ import { createEmailCodeService } from './lib/email.js';
 import { createSourceFetcher, validateFetchOptions } from './lib/source-fetch.js';
 import { createSharedSourceReader } from './lib/shared-source.js';
 import { createBrowserSource } from './lib/browser-source.js';
-import { validateSourceProxy, proxyEndpoint, redactProxy } from './lib/source-proxy.js';
+import { validateSourceProxy, sourceProxyFromInput, proxyEndpoint, redactProxy } from './lib/source-proxy.js';
 import { createShadowsocksBridge } from './lib/shadowsocks.js';
 import { createProxyTester } from './lib/proxy-connectivity.js';
 import { validateMonitorRule, evaluateRule, describeRule, displayValue, ruleSignature, legacyRuleView } from './lib/monitor-rule.js';
@@ -1165,7 +1165,7 @@ async function handler(request, response) {
       }
       if (['PUT', 'DELETE'].includes(request.method) && pathname === '/api/source-proxy') {
         const body = request.method === 'PUT' ? await readJson(request) : {};
-        const proxy = request.method === 'DELETE' ? '' : body.sourceProxyId ? findProxyProfile(user,body.sourceProxyId).url : validateSourceProxy(body.proxyUrl || user.settings.sourceProxy);
+        const proxy = request.method === 'DELETE' ? '' : body.sourceProxyId ? findProxyProfile(user,body.sourceProxyId).url : sourceProxyFromInput(body,user.settings.sourceProxy);
         if (request.method === 'PUT' && !proxy) throw new Error('请填写代理地址，或使用清除按钮移除已保存代理');
         const version = user.settings.sourceProxyVersion || 0;
         let verified = null;
@@ -1190,7 +1190,7 @@ async function handler(request, response) {
         return sendJson(response, 200, publicState(user));
       }
       if (request.method === 'POST' && pathname === '/api/source-proxies') {
-        const body = await readJson(request), proxy = validateSourceProxy(body.proxyUrl);
+        const body = await readJson(request), proxy = sourceProxyFromInput(body);
         if (!proxy) throw new Error('请填写代理地址');
         const version = user.settings.sourceProxyVersion || 0;
         const verified = await testProxy(user,proxy);
@@ -1211,8 +1211,7 @@ async function handler(request, response) {
         const body = await readJson(request);
         const monitor = body.monitorId ? user.monitors.find(item => item.id === body.monitorId) : null;
         if (body.monitorId && !monitor) return sendJson(response, 404, { error: '任务不存在' });
-        const candidateProxy = String(body.proxyUrl || '').trim();
-        const proxyUrl = validateSourceProxy(body.sourceProxyId ? findProxyProfile(user,body.sourceProxyId).url : candidateProxy || (monitor ? monitor.sourceProxy : user.settings.sourceProxy));
+        const proxyUrl = body.sourceProxyId ? findProxyProfile(user,body.sourceProxyId).url : sourceProxyFromInput(body,monitor ? monitor.sourceProxy : user.settings.sourceProxy);
         if (!proxyUrl) throw Object.assign(new Error(monitor ? '此任务尚未保存独立代理，请先填写代理地址' : '请先填写或保存代理地址'), { code: 'SOURCE_PROXY_MISSING' });
         if (!String(body.targetUrl || '').trim()) {
           try { return sendJson(response, 200, await testProxy(user, proxyUrl)); }

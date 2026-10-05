@@ -117,12 +117,23 @@
 <section id="fetch-settings" class="workspace-section source-settings">
   <div class="card-title-row"><div><div class="eyebrow">SOURCE ACCESS</div><h2>读取设置</h2></div></div>
   <p class="section-subtitle">为当前账户选择监控网络出口。真实浏览器也跳盾时，可换用能够正常访问目标网站的代理。</p>
-  <form id="source-settings-form" class="stacked-form">
+  <form id="source-settings-form" class="stacked-form" novalidate>
     <section class="source-settings-section"><h3>监控代理</h3><p class="field-help">HTTP 请求与浏览器使用同一个代理。仅影响网页和接口监控，不改变 AI、Webhook 或邮件的连接。</p>
     <p class="field-help">节点密码不会回显。带插件的 SS 节点请使用现有客户端的 HTTP 代理端口。</p><p id="source-proxy-status" class="source-proxy-status" aria-live="polite"></p>
-    <div id="source-proxy-list" class="proxy-profile-list" aria-label="已保存代理"></div><label class="field-label" for="source-proxy-name">代理名称</label><input id="source-proxy-name" type="text" maxlength="60" placeholder="例如：香港、美国、住宅出口"><label class="field-label" for="source-proxy">代理地址或 SS 节点</label><input id="source-proxy" type="password" autocomplete="new-password" placeholder="粘贴 ss:// 节点或 http://主机:端口">
-    <p class="field-help">支持 HTTP / HTTPS 代理与 Shadowsocks 分享链接，Docker 已内置 SS 客户端。测试代理无需填写网站；可保存多条代理并随时选择。默认出口用于继承账户设置的监控；每条监控也可以单独选择已保存代理。删除列表条目会保留已配置任务的出口。</p>
-    <div class="settings-actions source-proxy-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">恢复直接连接</button><button id="source-proxy-test" type="button" class="button button-outline">测试代理</button><button id="source-proxy-add" type="button" class="button button-outline">保存代理</button><button id="source-proxy-save" type="submit" class="button button-primary">保存并设为默认</button></div>
+    <p class="field-label">已保存代理</p>
+    <div id="source-proxy-list" class="proxy-profile-list" aria-label="已保存代理"></div>
+    <h3>添加代理</h3>
+    <label class="field-label" for="source-proxy-type">添加方式</label><select id="source-proxy-type"><option value="shadowsocks">Shadowsocks · 填写参数</option><option value="url">粘贴链接 / HTTP 代理</option></select>
+    <div id="source-ss-fields" class="source-ss-fields">
+      <label class="field-label" for="source-ss-method">加密方式</label><select id="source-ss-method" data-native-select><option value="aes-256-gcm">aes-256-gcm</option><option value="aes-128-gcm">aes-128-gcm</option><option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option><option value="2022-blake3-aes-128-gcm">2022-blake3-aes-128-gcm</option><option value="2022-blake3-aes-256-gcm">2022-blake3-aes-256-gcm</option><option value="2022-blake3-chacha20-poly1305">2022-blake3-chacha20-poly1305</option><option value="aes-128-cfb">aes-128-cfb</option><option value="aes-192-cfb">aes-192-cfb</option><option value="aes-256-cfb">aes-256-cfb</option><option value="aes-128-ctr">aes-128-ctr</option><option value="aes-192-ctr">aes-192-ctr</option><option value="aes-256-ctr">aes-256-ctr</option><option value="rc4-md5">rc4-md5</option><option value="chacha20-ietf">chacha20-ietf</option></select>
+      <div class="source-ss-address"><div><label class="field-label" for="source-ss-server">服务器 IP / 域名</label><input id="source-ss-server" type="text" autocomplete="off" spellcheck="false" maxlength="253" placeholder="例如：203.0.113.10"></div><div><label class="field-label" for="source-ss-port">端口</label><input id="source-ss-port" type="number" inputmode="numeric" min="1" max="65535" step="1" placeholder="例如：8388"></div></div>
+      <label class="field-label" for="source-ss-password">密码 / 密钥</label><input id="source-ss-password" type="password" autocomplete="new-password" spellcheck="false" maxlength="1000" aria-describedby="source-ss-help" placeholder="填写服务器提供的密码">
+      <p id="source-ss-help" class="field-help">填写原始密码即可，程序自动生成连接配置。加密方式须与服务器一致。</p>
+    </div>
+    <div id="source-proxy-url-fields" class="hidden"><label class="field-label" for="source-proxy">代理地址或 SS 分享链接</label><input id="source-proxy" type="password" autocomplete="new-password" spellcheck="false" placeholder="粘贴 ss:// 节点或 http://主机:端口"></div>
+    <label class="field-label" for="source-proxy-name">代理名称（可选）</label><input id="source-proxy-name" type="text" maxlength="60" placeholder="留空时使用服务器地址">
+    <p class="field-help">参数填好后可直接测试或保存，无需手动拼接链接。保存时会先验证连接；可保存多条代理，在列表或监控中选择。</p>
+    <div class="settings-actions source-proxy-actions"><button id="source-proxy-clear" type="button" class="button button-outline danger hidden">恢复直接连接</button><button id="source-proxy-test" type="button" class="button button-outline">测试代理</button><button id="source-proxy-add" type="button" class="button button-primary">添加代理</button><button id="source-proxy-save" type="submit" class="button button-outline">添加并设为默认</button></div>
     <p id="source-connection-result" class="field-help" role="status"></p>
     </section>
   </form>

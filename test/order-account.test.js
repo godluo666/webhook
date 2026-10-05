@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {createOrderAccountService,publicOrderAccount,savedOrderAccount,orderAccountFingerprint} from '../lib/order-account.js';
 const monitor={id:'monitor-a'},userFor=id=>({id,monitors:[monitor],orderAccounts:[]});
 function setup(timeoutMs=10000,options={}){let leased=0,closed=0,valid=false,finishCalls=0,checkError=null;const openedTasks=[];const user=userFor('a');
-  const service=createOrderAccountService({persist:()=>{if(options.persistError?.())throw new Error('会话写入失败');},timeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(task,browserOptions)=>{openedTasks.push(task);if(browserOptions.loginCheck&&checkError)throw checkError;return {close:async()=>{closed++;await options.closeGate;},productHtml:async()=>'<h1>Product A</h1>',remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{finishCalls++;await options.finishGate;if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}};}});
+  const service=createOrderAccountService({persist:()=>{if(options.persistError?.())throw new Error('会话写入失败');},timeoutMs,saveTimeoutMs:options.saveTimeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(task,browserOptions)=>{openedTasks.push(task);if(browserOptions.loginCheck&&checkError)throw checkError;return {close:async()=>{closed++;await options.closeGate;},productHtml:async()=>'<h1>Product A</h1>',remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{finishCalls++;await options.finishGate;if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}};}});
   service.save(user,monitor,{loginUrl:'https://shop.example/login',username:'private-user',password:'private-password'});
   return {service,user,get leased(){return leased},get closed(){return closed},get finishCalls(){return finishCalls},openedTasks,setCheckError(error){checkError=error;},login(){valid=true;}};
 }
@@ -64,12 +64,24 @@ test('网页暂时缺少登录证据保留私有会话，重试验证可恢复�
  f.setCheckError(Object.assign(new Error('网站返回登录页面'),{code:'ORDER_LOGIN_REQUIRED'}));await assert.rejects(f.service.check(f.user,monitor),/登录页面/);assert.equal(account.status,'expired');assert.equal(account.session,session);assert.throws(()=>savedOrderAccount(f.user,{monitorId:monitor.id,url:'https://shop.example/product'}),/登录失效/);
 });
 test('登录窗口超时关闭后，迟到的保存结果不能覆盖当前账户',async()=>{
- const gate=deferred(),f=setup(50,{finishGate:gate.promise}),opened=await f.service.start(f.user,monitor);f.login();
- const result=f.service.finish(f.user,monitor,{sessionId:opened.sessionId});await new Promise(r=>setTimeout(r,100));gate.resolve();await assert.rejects(result,/已关闭/);assert.equal(f.user.orderAccounts[0].status,'logged_out');assert.equal(f.user.orderAccounts[0].session,null);assert.equal(f.leased,0);assert.equal(f.service.busy(f.user,monitor),false);
+ const gate=deferred(),f=setup(50,{finishGate:gate.promise,saveTimeoutMs:50}),opened=await f.service.start(f.user,monitor);f.login();
+ const result=f.service.finish(f.user,monitor,{sessionId:opened.sessionId}),failed=assert.rejects(result,/保存登录会话超时/);await new Promise(r=>setTimeout(r,100));gate.resolve();await failed;assert.equal(f.user.orderAccounts[0].status,'logged_out');assert.equal(f.user.orderAccounts[0].session,null);assert.equal(f.leased,0);assert.equal(f.service.busy(f.user,monitor),false);
 });
 
 test('持久化失败保留原状态和登录窗口，存储恢复后仍可保存同一次登录',async()=>{
  let fail=false;const f=setup(10000,{persistError:()=>fail}),opened=await f.service.start(f.user,monitor);f.login();fail=true;
  const before=orderAccountFingerprint(f.user.orderAccounts[0]);await assert.rejects(f.service.finish(f.user,monitor,{sessionId:opened.sessionId}),/写入失败/);assert.equal(f.user.orderAccounts[0].status,'logged_out');assert.equal(orderAccountFingerprint(f.user.orderAccounts[0]),before);assert.equal(f.leased,1);
  fail=false;assert.equal((await f.service.finish(f.user,monitor,{sessionId:opened.sessionId})).status,'saved');assert.equal(f.leased,0);
+});
+
+
+test('保存有独立时间预算，跨过登录空闲期限仍能完成且只写入一次',async()=>{
+ const gate=deferred(),f=setup(50,{finishGate:gate.promise,saveTimeoutMs:500}),opened=await f.service.start(f.user,monitor);f.login();
+ const result=f.service.finish(f.user,monitor,{sessionId:opened.sessionId});await new Promise(r=>setTimeout(r,100));assert.equal(f.leased,1);gate.resolve();
+ assert.equal((await result).status,'saved');assert.equal(f.finishCalls,1);assert.equal(f.leased,0);
+});
+test('登录操作延长空闲期限，长期无人操作仍关闭窗口',async()=>{
+ const f=setup(150),opened=await f.service.start(f.user,monitor);await new Promise(r=>setTimeout(r,80));
+ await f.service.action(f.user,monitor,{sessionId:opened.sessionId,type:'refresh'});await new Promise(r=>setTimeout(r,80));
+ assert.equal(f.leased,1);await f.service.cancel(f.user,monitor,{sessionId:opened.sessionId});assert.equal(f.leased,0);
 });

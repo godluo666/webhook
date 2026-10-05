@@ -263,6 +263,14 @@ test('refused, unauthenticated, invalid-IP and unavailable-SS imports preserve t
     assert.equal(unavailable.body.code, 'SOURCE_PROXY_UNAVAILABLE');
     assert.equal(fixture.probeCalls.length, beforeSS);
     assertPrivate(unavailable, ssPassword);
+    for (const [endpoint, method] of [['/api/source-proxies','POST'],['/api/source-proxy','PUT'],['/api/source-proxy/test','POST']]) {
+      const generated=await app.request(alice,endpoint,method,{shadowsocks:{server:'127.0.0.1',port:8388,method:'aes-256-gcm',password:ssPassword}});
+      assert.equal(generated.body.code,'SOURCE_PROXY_UNAVAILABLE','Structured SS input must reach the SS bridge');
+      assertPrivate(generated,ssPassword);await assertUnchanged();
+      const rejected=await app.request(alice,endpoint,method,{proxyUrl:proxy.url,shadowsocks:{server:'127.0.0.1',port:0,method:'aes-256-gcm',password:ssPassword}});
+      assert.equal(rejected.status,400);assert.match(rejected.body.error,/端口/);assertPrivate(rejected,ssPassword);await assertUnchanged();
+    }
+    assert.equal(fixture.probeCalls.length,beforeSS,'Invalid or unavailable SS candidates must never probe the saved HTTP proxy');
     assertPrivate(await assertUnchanged(), proxy.password, unauthenticated.password, ssPassword);
     const cleared = await app.ok(alice, '/api/source-proxy', 'DELETE');
     assert.equal(cleared.settings.hasSourceProxy, false, 'Clear must not require a successful probe');

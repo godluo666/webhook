@@ -5,7 +5,7 @@ import { parseOrderTotal } from '../lib/order-browser.js';
 import { createOrderService, validateOrderTask, validateOrderProgram, orderProgramHash, publicOrderTask } from '../lib/orders.js';
 
 const input = {label:'购买产品 A',url:'https://shop.example/product/a',product:'Product A',quantity:1,maxTotal:15,currency:'USD',executionMode:'submit',monitorId:'monitor-a'};
-const program = {summary:'根据实际 DOM 选择产品 A 并核对订单',code:'function(order,browser){browser.goto(order.url);return browser.submit();}',checkout:{submitSelector:'#finish',productSelector:'#name',quantitySelector:'#quantity',totalSelector:'#total',currencySelector:'#currency',confirmationSelector:'#order-number'}};
+const program = {workflow:{version:1,prepareCode:'function(order,browser){browser.goto(order.url);return {ready:true};}',paymentCode:'function(){return {checks:{}};}'},summary:'根据实际 DOM 选择产品 A 并核对订单',code:'function(order,browser){browser.goto(order.url);return browser.submit();}',checkout:{submitSelector:'#finish',productSelector:'#name',quantitySelector:'#quantity',totalSelector:'#total',currencySelector:'#currency',confirmationSelector:'#order-number'}};
 
 test('AI JavaScript 在隔离解释器中动态分支和操作，不能访问 Node、网络和文件',async()=>{
   const calls=[];
@@ -27,7 +27,7 @@ test('下单配置拒绝无限预算、无效数量、带凭据的 URL；付款�
 });
 function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false,paymentStructure=false,assistanceCode=null}={}){
   const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0,loginError=null,missingPayment=paymentStructure;
-  const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));if(JSON.parse(messages[1].content).phase==='payment')return {summary:'从原账单真实 DOM 恢复付款定位',code:assistanceCode||'function(order,browser){return browser.pay({});}'};return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
+  const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));if(JSON.parse(messages[1].content).phase==='payment')return {summary:'从原账单真实 DOM 恢复付款定位',paymentCode:assistanceCode||'function(){return {checks:{}};}'};return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
     openBrowser:async(current,options)=>{if(loginError)throw loginError;const session={trace:[],receipt:null,snapshot:async()=>({text:'Product A USD 10',elements:[{id:'actual-random-selector'}]}),close:async()=>{},methods:{goto:async()=>true,submit:async()=>{
       if(current.dryRun||current.executionMode==='prepare'){session.trace.push({action:'核对'});session.receipt={status:'prepared',review:{product:current.product,quantity:1,total:10,currency:'USD'}};return session.receipt;}
       await options.onBeforeSubmit({product:current.product,quantity:1,total:10,currency:'USD'});commits++;session.trace.push({action:'提交'});
@@ -92,7 +92,7 @@ test('缺少提前登录、账户变更和 AFF 变更不能沿用原下单授权
 test('下单前页面变化由 AI 修复并试跑，提交后的结构错误不重试',async()=>{
   for(const afterSubmit of[false,true]){
     const task=validateOrderTask(input),user={id:'a',orderTasks:[task],monitors:[{id:'monitor-a',kind:'webpage'}],orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}]};let generated=0,commits=0,failOnce=true;
-    const service=createOrderService({persist:()=>{},requestAI:async()=>{generated++;return {...program,code:'function(order,browser){return browser.submit();}'};},openBrowser:async(current,options)=>{const session={receipt:null,trace:[],close:async()=>{},snapshot:async()=>({text:'actual changed DOM',elements:[{id:'new-submit'}]}),methods:{submit:async()=>{
+    const service=createOrderService({persist:()=>{},requestAI:async()=>{generated++;return {...program,workflow:{version:1,prepareCode:'function(){return {ready:true};}'}};},openBrowser:async(current,options)=>{const session={receipt:null,trace:[],close:async()=>{},snapshot:async()=>({text:'actual changed DOM',elements:[{id:'new-submit'}]}),methods:{submit:async()=>{
       if(current.dryRun){session.receipt={status:'prepared'};return session.receipt;}
       if(afterSubmit){await options.onBeforeSubmit({total:10});commits++;throw new Error('网页元素不存在：#receipt');}
       if(failOnce){failOnce=false;throw new Error('网页元素不存在：#old-submit');}
@@ -143,7 +143,7 @@ test('付款 AI 辅助不能提交订单或访问商品操作，付款结果不�
 
 test('连续两次试跑发现会话购物车数量累加，AI 修正后才允许启用且试跑不提交',async()=>{
  const f=fixture();let cart=0,generated=0;
- const nextProgram={checkout:program.checkout,summary:'调整已有购物车',code:'function(order,browser){browser.fill("#quantity",String(order.quantity));return browser.submit();}'};
+ const nextProgram={workflow:{version:1,prepareCode:'function(order,browser){browser.fill("#quantity",String(order.quantity));return {ready:true};}'},checkout:program.checkout,summary:'调整已有购物车',code:'function(order,browser){browser.fill("#quantity",String(order.quantity));return browser.submit();}'};
  const service=createOrderService({persist:()=>{},requestAI:async(_user,messages)=>{generated++;if(generated===2)assert.match(messages.at(-1).content,/连续试跑/);return nextProgram;},openBrowser:async current=>{
   const session={trace:[],snapshot:async()=>({url:current.url,elements:[]}),close:async()=>{},methods:{fill:async()=>{cart=generated===1?cart+1:1;},submit:async()=>{session.receipt={status:'prepared',review:{product:'Switch',quantity:cart,total:cart*10,currency:'USD'}};return session.receipt;}}};return session;
  }});

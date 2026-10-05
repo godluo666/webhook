@@ -85,6 +85,7 @@ try {
   const page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(base + '/#fetch-settings');
+  await choose(page.locator('#source-proxy-type'),'url');
   await page.locator('#source-proxy-name').fill('香港出口');await page.locator('#source-proxy').fill(proxyA.url);await page.locator('#source-proxy-add').click();
   await page.locator('.proxy-profile-row').filter({hasText:'香港出口'}).waitFor();
   await page.locator('#source-proxy-name').fill('美国出口');await page.locator('#source-proxy').fill(proxyB.url);await page.locator('#source-proxy-add').click();
@@ -296,6 +297,12 @@ try {
   await page.reload();
   await page.locator('.monitor-item').nth(9).waitFor();
   const cardGeometry = () => page.locator('.monitor-item').evaluateAll(nodes => nodes.map(node => { const r = node.getBoundingClientRect(); return { id: node.dataset.monitorId, x: r.x, y: r.y + window.scrollY, width: r.width, height: r.height }; }));
+  // Chromium scroll offsets can differ by a fraction of a CSS pixel.
+  // Preserve card identity and compare geometry to 0.01px instead of raw floats.
+  const assertStableCards=(current,expected,message)=>{
+    assert.deepEqual(current.map(card=>card.id),expected.map(card=>card.id),message);
+    for(let i=0;i<current.length;i++)for(const field of['x','y','width','height'])assert.ok(Math.abs(current[i][field]-expected[i][field])<0.01,message+' ('+field+')');
+  };
   const desktopCards = await cardGeometry();
   assert.equal(desktopCards[0].x, desktopCards[1].x, 'Tasks share a centered column');
   assert.ok(desktopCards[1].y - desktopCards[0].y - desktopCards[0].height >= 24, 'Tasks have clear space between them');
@@ -306,12 +313,12 @@ try {
   await page.locator('[data-action="toggle"][data-id="' + stockId + '"]').click();
   await (await toggleSaved).finished();
   await page.waitForFunction(id => document.querySelector('[data-action="toggle"][data-id="' + id + '"]')?.textContent === '继续', stockId);
-  assert.deepEqual(await cardGeometry(), desktopCards, 'Pausing does not move or resize task cards');
+  assertStableCards(await cardGeometry(), desktopCards, 'Pausing does not move or resize task cards');
   const checked = page.waitForResponse(r => r.request().method() === 'POST' && r.url().endsWith('/api/monitors/' + stockId + '/check'));
   await page.locator('[data-action="check"][data-id="' + stockId + '"]').click();
   await (await checked).finished();
   await page.waitForFunction(() => !document.querySelector('[data-action="check"]:disabled'));
-  assert.deepEqual(await cardGeometry(), desktopCards, 'Checking does not move or resize task cards');
+  assertStableCards(await cardGeometry(), desktopCards, 'Checking does not move or resize task cards');
   await page.locator('[data-action="edit"][data-id="' + multi.id + '"]').click();
   await page.locator('.task-records .check-record').first().waitFor();
   const sectionKeys = await taskEditor.locator('[data-rule-section]').evaluateAll(nodes => nodes.map(n => n.dataset.ruleSection));

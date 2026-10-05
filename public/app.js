@@ -1225,6 +1225,7 @@ function showAuth() {
   $('#preview').classList.add('hidden');
   $('#preview').innerHTML = '';
   for (const selector of ['#source-proxy', '#source-proxy-name', '#source-test-url', '#ai-key', '#instruction', '#instruction-url', '#send-title', '#send-message', '#auth-recovery-code', '#auth-email-code', '#account-email-code']) $(selector).value = '';
+  $('#source-proxy-type').value='shadowsocks'; $('#source-ss-method').value='aes-256-gcm'; resetSourceProxyFields();
   sourceSettingsEpoch += 1;
   releaseSourceAction(sourceAction);
   resetSourceResults();
@@ -1700,11 +1701,40 @@ function sourceConnectionSummary(result = {}) {
   return '出口 IP：' + (result.ip || '未返回') + (Number.isFinite(result.durationMs) ? ' · ' + result.durationMs + ' ms' : '');
 }
 
+function updateSourceProxyFields() {
+  const ss = $('#source-proxy-type').value === 'shadowsocks';
+  $('#source-ss-fields').classList.toggle('hidden', !ss);
+  $('#source-proxy-url-fields').classList.toggle('hidden', ss);
+  const modern = $('#source-ss-method').value.startsWith('2022-');
+  $('#source-ss-help').textContent = modern ? '填写服务器提供的 Base64 密钥，程序自动生成连接配置。加密方式须与服务器一致。' : '填写原始密码即可，程序自动生成连接配置。加密方式须与服务器一致。';
+  $('#source-ss-password').placeholder = modern ? '填写服务器提供的 Base64 密钥' : '填写服务器提供的密码';
+}
+function resetSourceProxyFields() {
+  for (const selector of ['#source-proxy', '#source-proxy-name', '#source-ss-server', '#source-ss-port', '#source-ss-password']) $(selector).value = '';
+  $('#source-ss-method').value='aes-256-gcm';
+  updateSourceProxyFields();
+}
+function readSourceProxyInput(status, requireCandidate = false) {
+  const fail = (message, selector) => { status.textContent = message; status.className = 'field-help error'; $(selector).focus(); return null; };
+  if ($('#source-proxy-type').value === 'url') {
+    const proxyUrl = $('#source-proxy').value.trim();
+    if (!proxyUrl && (requireCandidate || !appState.settings.hasSourceProxy)) return fail('请填写代理地址或 SS 分享链接。', '#source-proxy');
+    return {proxyUrl};
+  }
+  const shadowsocks = {server:$('#source-ss-server').value.trim(),port:$('#source-ss-port').value.trim(),method:$('#source-ss-method').value,password:$('#source-ss-password').value};
+  const started = shadowsocks.server || shadowsocks.port || shadowsocks.password || shadowsocks.method !== 'aes-256-gcm';
+  if (!started && !requireCandidate && appState.settings.hasSourceProxy) return {proxyUrl:''};
+  if (!shadowsocks.server) return fail('请填写 Shadowsocks 服务器 IP 或域名。', '#source-ss-server');
+  if (!/^\d+$/.test(shadowsocks.port) || Number(shadowsocks.port) < 1 || Number(shadowsocks.port) > 65535) return fail('请填写 1–65535 范围内的服务器端口。', '#source-ss-port');
+  if (!shadowsocks.password) return fail('请填写服务器提供的密码或密钥。', '#source-ss-password');
+  return {shadowsocks};
+}
+
 function renderSourceSettings(reset = false) {
   const { hasSourceProxy, sourceProxyEndpoint, sourceProxyTest } = appState.settings;
   const profiles = appState.settings.sourceProxies || [];
   const list = $('#source-proxy-list');
-  const markup = profiles.map(item=>'<div class="proxy-profile-row"><div><strong>'+escapeHtml(item.name)+'</strong><p class="field-help">'+escapeHtml(item.endpoint+(item.test?.ip?' · '+item.test.ip:''))+'</p></div><div class="proxy-profile-actions"><button type="button" class="button button-outline" data-proxy-use="'+escapeHtml(item.id)+'" '+(appState.settings.sourceProxyId===item.id?'disabled':'')+'>'+(appState.settings.sourceProxyId===item.id?'默认出口':'设为默认')+'</button><button type="button" class="button button-outline" data-proxy-test="'+escapeHtml(item.id)+'">测试</button><button type="button" class="button button-outline danger" data-proxy-delete="'+escapeHtml(item.id)+'">删除</button></div></div>').join('');
+  const markup = profiles.map(item=>'<div class="proxy-profile-row"><div><strong>'+escapeHtml(item.name)+'</strong><p class="field-help">'+escapeHtml(item.endpoint+(item.test?.ip?' · '+item.test.ip:''))+'</p></div><div class="proxy-profile-actions"><button type="button" class="button button-outline" data-proxy-use="'+escapeHtml(item.id)+'" '+(appState.settings.sourceProxyId===item.id?'disabled':'')+'>'+(appState.settings.sourceProxyId===item.id?'默认出口':'设为默认')+'</button><button type="button" class="button button-outline" data-proxy-test="'+escapeHtml(item.id)+'">测试</button><button type="button" class="button button-outline danger" data-proxy-delete="'+escapeHtml(item.id)+'">删除</button></div></div>').join('') || '<p class="field-help">尚未添加代理，可在下方连续添加。</p>';
   if (list.dataset.markup !== markup) { list.innerHTML=markup; list.dataset.markup=markup; }
   const selected = $('#create-source-proxy-id').value;
   const options = proxyProfileOptions(selected);
@@ -1715,12 +1745,12 @@ function renderSourceSettings(reset = false) {
   $('#source-proxy-status').textContent = hasSourceProxy ? '已启用 · ' + sourceProxyEndpoint + ' · ' + covered + ' 个网络监控任务使用此出口' + verified : '当前使用服务器出口 · 先验证代理，再应用到监控';
   $('#source-proxy-clear').classList.toggle('hidden', !hasSourceProxy);
   $('#source-proxy').placeholder = hasSourceProxy ? '留空可测试默认代理，输入新地址可新增' : 'ss://节点分享链接 或 http://主机:端口';
-  if (reset) { $('#source-proxy').value = ''; $('#source-proxy-name').value = ''; resetSourceResults(); }
+  if (reset) { $('#source-proxy-type').value='shadowsocks'; $('#source-ss-method').value='aes-256-gcm'; resetSourceProxyFields(); resetSourceResults(); }
 }
 
 async function withSourceAction(button, loadingLabel, work) {
   if (sourceSettingsBusy) return;
-  const controls = [...document.querySelectorAll('#source-proxy-list button'), ...['#source-proxy', '#source-proxy-name', '#source-proxy-add', '#source-proxy-test', '#source-proxy-save', '#source-proxy-clear', '#source-target-test', '#source-test-url', '#source-test-mode'].map(selector => $(selector))];
+  const controls = [...document.querySelectorAll('#source-proxy-list button'), ...['#source-proxy-type', '#source-ss-method', '#source-ss-server', '#source-ss-port', '#source-ss-password', '#source-proxy', '#source-proxy-name', '#source-proxy-add', '#source-proxy-test', '#source-proxy-save', '#source-proxy-clear', '#source-target-test', '#source-test-url', '#source-test-mode'].map(selector => $(selector))];
   const disabled = controls.map(control => control.disabled);
   const epoch = ++sourceSettingsEpoch;
   const label = button.textContent;
@@ -1737,15 +1767,12 @@ async function withSourceAction(button, loadingLabel, work) {
   }
 }
 
-function hasProxyToTest(status) {
-  if ($('#source-proxy').value.trim() || appState.settings.hasSourceProxy) return true;
-  status.textContent = '请先粘贴 HTTP / HTTPS 代理地址或 SS 节点。';
-  status.className = 'field-help error';
-  $('#source-proxy').focus();
-  return false;
+for (const selector of ['#source-proxy', '#source-proxy-type', '#source-ss-method', '#source-ss-server', '#source-ss-port', '#source-ss-password']) {
+  $(selector).addEventListener('input', resetSourceResults);
 }
-
-$('#source-proxy').addEventListener('input', resetSourceResults);
+$('#source-proxy-type').addEventListener('change', updateSourceProxyFields);
+$('#source-ss-method').addEventListener('change', updateSourceProxyFields);
+updateSourceProxyFields();
 for (const selector of ['#source-test-url', '#source-test-mode']) {
   $(selector).addEventListener('input', () => {
     $('#source-proxy-result').textContent = '';
@@ -1755,16 +1782,16 @@ for (const selector of ['#source-test-url', '#source-test-mode']) {
 $('#source-settings-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const status = $('#source-connection-result');
-  if (!hasProxyToTest(status)) return;
-  const proxyUrl = $('#source-proxy').value.trim();
+  const proxyInput = readSourceProxyInput(status);
+  if (!proxyInput) return;
   withSourceAction($('#source-proxy-save'), '正在验证…', async (isCurrent) => {
     status.textContent = '正在验证代理连接，验证通过后应用到监控…';
     status.className = 'field-help';
     try {
-      const state = await api('/api/source-proxy', 'PUT', { proxyUrl, name:$('#source-proxy-name').value.trim(), applyAll: true });
+      const state = await api('/api/source-proxy', 'PUT', { ...proxyInput, name:$('#source-proxy-name').value.trim(), applyAll: true });
       if (!isCurrent()) return;
       appState = state;
-      $('#source-proxy').value = ''; $('#source-proxy-name').value = '';
+      resetSourceProxyFields();
       $('#source-proxy-result').textContent = '';
       render();
       status.textContent = '验证通过，已应用到账户默认出口 · ' + sourceConnectionSummary(state.settings.sourceProxyTest);
@@ -1788,11 +1815,16 @@ $('#source-settings-form').addEventListener('submit', (event) => {
   });
 });
 $('#source-proxy-add').addEventListener('click',()=>{
-  const proxyUrl=$('#source-proxy').value.trim(); if(!proxyUrl){toast('请填写要新增的代理地址',true);return;}
+  const status=$('#source-connection-result'),proxyInput=readSourceProxyInput(status,true); if(!proxyInput)return;
   const name=$('#source-proxy-name').value.trim();
   withSourceAction($('#source-proxy-add'),'正在验证…',async isCurrent=>{
-    const state=await api('/api/source-proxies','POST',{name,proxyUrl}); if(!isCurrent())return;
-    appState=state; $('#source-proxy').value=''; $('#source-proxy-name').value=''; render(); toast('代理已保存，可在列表或监控中选择');
+    status.textContent='正在生成配置并验证连接…';status.className='field-help';
+    try {
+      const state=await api('/api/source-proxies','POST',{name,...proxyInput}); if(!isCurrent())return;
+      appState=state; resetSourceProxyFields(); render();
+      status.textContent='验证通过，代理已保存，可在列表中查看出口 IP。';status.className='field-help success';
+      toast('代理已保存，可在列表或监控中选择');
+    } catch(error) { if(isCurrent()){status.textContent='代理验证未通过，请核对参数后重试。\n'+error.message;status.className='field-help error';}throw error; }
   });
 });
 $('#source-proxy-list').addEventListener('click',event=>{
@@ -1809,7 +1841,7 @@ $('#source-proxy-clear').addEventListener('click', () => {
     const state = await api('/api/source-proxy', 'DELETE');
     if (!isCurrent()) return;
     appState = state;
-    $('#source-proxy').value = '';
+    resetSourceProxyFields();
     resetSourceResults();
     render();
     toast('已恢复服务器出口');
@@ -1822,15 +1854,15 @@ $('#ai-test-log').addEventListener('click', () => {
 });
 $('#source-proxy-test').addEventListener('click', () => {
   const status = $('#source-connection-result');
-  if (!hasProxyToTest(status)) return;
-  const proxyUrl = $('#source-proxy').value.trim();
+  const proxyInput = readSourceProxyInput(status);
+  if (!proxyInput) return;
   withSourceAction($('#source-proxy-test'), '正在测试…', async (isCurrent) => {
     status.textContent = '正在测试代理连接，无需填写目标网站…';
     status.className = 'field-help';
     try {
-      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl });
+      const result = await api('/api/source-proxy/test', 'POST', proxyInput);
       if (!isCurrent()) return;
-      status.textContent = '代理连接正常 · ' + sourceConnectionSummary(result) + (proxyUrl ? '。\n仅完成测试；点击“验证并应用”启用此代理。' : '。\n本次仅测试，不更改代理配置。');
+      status.textContent = '代理连接正常 · ' + sourceConnectionSummary(result) + (proxyInput.shadowsocks || proxyInput.proxyUrl ? '。\n点击“添加代理”保存到列表，也可选择“添加并设为默认”。' : '。\n本次仅测试，不更改代理配置。');
       status.className = 'field-help success';
     } catch (error) {
       if (!isCurrent()) return;
@@ -1859,14 +1891,14 @@ $('#source-target-form').addEventListener('submit', (event) => {
     $('#source-test-url').focus();
     return;
   }
-  if (!hasProxyToTest(status)) return;
-  const proxyUrl = $('#source-proxy').value.trim();
+  const proxyInput = readSourceProxyInput(status);
+  if (!proxyInput) return;
   const mode = $('#source-test-mode').value;
   withSourceAction($('#source-target-test'), '正在读取…', async (isCurrent) => {
     status.textContent = '正在读取目标网站…';
     status.className = 'field-help';
     try {
-      const result = await api('/api/source-proxy/test', 'POST', { proxyUrl, targetUrl, mode });
+      const result = await api('/api/source-proxy/test', 'POST', { ...proxyInput, targetUrl, mode });
       if (!isCurrent()) return;
       status.textContent = '目标读取成功 · HTTP ' + result.status + ' · ' + result.durationMs + ' ms · ' + (result.method === 'browser' ? '浏览器' : '直接请求');
       status.className = 'field-help success';

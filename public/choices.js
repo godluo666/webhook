@@ -1,7 +1,7 @@
 ﻿/* Keep all available values visible, while retaining each field's existing value contract. */
 const choiceControls = new WeakMap();
 function refreshChoices(root = document) {
-  for (const select of root.querySelectorAll('select')) {
+  for (const select of root.querySelectorAll('select:not([data-native-select])')) {
     let group = choiceControls.get(select);
     if (!group) {
       group = document.createElement('div');

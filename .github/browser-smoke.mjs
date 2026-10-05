@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+const { chromium } = await import('playwright-core');
 const { createBrowserSource } = await import(pathToFileURL(path.join(process.cwd(), 'lib/browser-source.js')));
 const dataRoot = process.env.DATA_DIR || path.join(process.cwd(), 'release', 'browser-smoke-data');
 await fs.mkdir(dataRoot, { recursive: true });
@@ -43,6 +44,14 @@ try {
   const json = await read(base + '/json', { userId: 'smoke-account', expectsJson: true });
   assert.equal(JSON.parse(json.body).stock, 3);
   assert.match(JSON.parse(json.body).cookie, /session=source-cookie/);
+  let interrupted=false,recoveryLaunches=0;
+  const recovering=createBrowserSource({dataDir,launchContext:async(profile,options)=>{
+    recoveryLaunches++;const context=await chromium.launchPersistentContext(profile,options),addCookies=context.addCookies.bind(context);
+    context.addCookies=async cookies=>{if(!interrupted){interrupted=true;await context.close();}return addCookies(cookies);};return context;
+  }});
+  const recovered=await recovering(base+'/json',{userId:'smoke-account',expectsJson:true});
+  assert.equal(recoveryLaunches,2);assert.match(JSON.parse(recovered.body).cookie,/session=source-cookie/);
+  console.log('PASS unexpected browser closure during cookie restore recovers once and retains scoped cookies');
   const other = await read(base + '/json', { userId: 'another-account', expectsJson: true });
   assert.equal(JSON.parse(other.body).cookie, '');
   const proxyUrl = 'http://proxy-user:proxy-secret@127.0.0.1:' + proxyPort;

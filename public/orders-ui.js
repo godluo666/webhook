@@ -105,7 +105,7 @@ document.addEventListener('click',async event=>{
           $('#order-account-status').textContent='正在打开登录页面…';data=await api(path+'/start','POST',undefined,{signal:AbortSignal.any([operation.controller.signal,AbortSignal.timeout(45000)])});
         }else{
           const input={sessionId:orderLoginSession?.sessionId};
-          try{data=await api(path+'/'+action,'POST',input,{signal:AbortSignal.any([operation.controller.signal,AbortSignal.timeout(30000)])});}
+          try{data=await api(path+'/'+action,'POST',input,{signal:AbortSignal.any([operation.controller.signal,AbortSignal.timeout(action==='finish'?75000:30000)])});}
           catch(error){
             if(action!=='finish'||!active()||!['RADAR_CONNECTION_FAILED','RADAR_INVALID_RESPONSE'].includes(error.code))throw error;
             $('#order-account-status').textContent='正在确认保存结果…';

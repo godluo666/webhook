@@ -185,3 +185,9 @@ select.choice-source { display: none !important; }
 .proxy-profile-row p { margin: 6px 0 0; }
 .proxy-profile-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
 @media (max-width: 600px) { .proxy-profile-row { align-items: flex-start; flex-direction: column; } .proxy-profile-actions { width: 100%; } }
+
+.source-ss-fields, #source-proxy-url-fields { margin-top: 20px; }
+.source-ss-address { margin-top: 16px; display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 20px; }
+.source-ss-address > div { min-width: 0; }
+#source-ss-method { font-size: 13px; min-width: 0; }
+@media (max-width: 480px) { .source-ss-address { grid-template-columns: minmax(0, 1fr); gap: 0; } }
