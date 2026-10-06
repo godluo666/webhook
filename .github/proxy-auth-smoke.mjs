@@ -107,7 +107,7 @@ try{
   await exercise('authenticated HTTP CONNECT',work=>work(proxyUrl));assert.ok(proxyChallenges>0&&acceptedConnects>0);
   const beforeBadOrders=orders,beforeBadPayments=payments,beforeChallenges=proxyChallenges;
   await assert.rejects(createOrderBrowser({url:base+'/clientarea.php',executionMode:'pay',dryRun:true},{launch,proxyUrl:proxyUrl.replace('proxy-secret','incorrect-password')}),error=>error.code==='PROXY_AUTH_FAILED'&&!error.message.includes('incorrect-password'));
-  assert.ok(proxyChallenges-beforeChallenges<=8,'Rejected proxy authentication is bounded');assert.equal(orders,beforeBadOrders);assert.equal(payments,beforeBadPayments);
+  assert.ok(proxyChallenges-beforeChallenges<=8,'Rejected proxy authentication is bounded; challenges='+String(proxyChallenges-beforeChallenges));assert.equal(orders,beforeBadOrders);assert.equal(payments,beforeBadPayments);
   await assert.rejects(createOrderBrowser({url:base+'/site-auth',executionMode:'pay',dryRun:true},{launch}),error=>error.code==='SITE_HTTP_AUTH_REQUIRED');
   console.log('PASS incorrect proxy credentials and origin HTTP authentication have distinct, redacted failures without orders or payments');
   const reservation=http.createServer(),ssPort=await listen(reservation);await new Promise(resolve=>reservation.close(resolve));
