@@ -56,8 +56,16 @@
 - `lib/order-browser.js`：实际 DOM 与请求核对、一次请求许可、账单关联、跳转和付款结果。
 - `lib/orders.js`：两次试跑、配置指纹、监控触发、持久化交易记录和有限结构修复。
 - `lib/order-account.js` / `lib/browser-operation.js`：登录窗口闲置计时、保存期限、有界操作与取消。
+- `lib/browser-proxy-auth.js`：区分代理与网站 HTTP 认证，代理凭据只回答 Proxy 挑战。
 - `test/order-workflow.test.js` / `test/orders.test.js`：权限边界、流程顺序、原订单辅助和重复请求保护。
 - `.github/orders-ui-smoke.mjs` / `.github/order-login-smoke.mjs`：真实 Chromium 与本地模拟商家联调，包括延迟提交、令牌轮换、页面变化、付款跳转、余额不足和请求被篡改。
 - `.github/resource-smoke.mjs`：浏览器、代理租约、预览与临时目录释放。
+- `.github/proxy-auth-smoke.mjs`：真实 HTTPS CONNECT 与 SS 隧道中的会话保存、两次付款模式试跑、延迟提交、单次付款、认证错误分类与凭据隔离。
 
 维护时先修改对应网站差异契约或宿主核对逻辑，再运行对应单元测试与真实浏览器用例。CI 在只读 Linux 镜像中运行相同回归；本地联调不购买真实商品。测试通过能够验证程序行为，真实商家的库存、验证码、限流和网络仍可能导致首次下单失败。
+
+## HTTPS 代理与付款拦截
+
+认证与付款响应拦截必须使用同一个 CDP 会话、一次合并的 `Fetch.enable`：代理认证覆盖 Request 阶段，交易跳转核对覆盖 Response 阶段。单独启用仅 Response 的 Fetch 拦截会覆盖代理认证，即使 SS 节点有效、网页登录成功，也会在试跑访问 HTTPS 页面时出现 `net::ERR_INVALID_AUTH_CREDENTIALS`。
+
+禁止将代理密码交给网站 HTTP 认证，禁止通过关闭代理认证或全局忽略证书解决导航失败。`PROXY_AUTH_FAILED` 与 `SITE_HTTP_AUTH_REQUIRED` 分别显示原因，停止试跑和 AI 重新生成，保留原网页登录会话。HTTPS 测试仅为本地公开测试证书的 SPKI 添加信任，生产证书验证不变。

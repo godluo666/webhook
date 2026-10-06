@@ -75,7 +75,7 @@ jobs:
           docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
             --mount type=bind,src="$PWD/.github/resource-smoke.mjs",dst=/app/resource-smoke.mjs,readonly \
             "$IMAGE" node /app/resource-smoke.mjs
-      - name: Verify bundled Shadowsocks with real encrypted traffic
+      - name: Verify encrypted Shadowsocks traffic and authenticated HTTPS ordering
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
           docker pull ghcr.io/shadowsocks/ssserver-rust:v1.25.0
@@ -85,8 +85,9 @@ jobs:
           chmod 755 "$RUNNER_TEMP/ssserver-test"
           docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
             --mount type=bind,src="$PWD/.github/proxy-smoke.mjs",dst=/app/proxy-smoke.mjs,readonly \
+            --mount type=bind,src="$PWD/.github/proxy-auth-smoke.mjs",dst=/app/proxy-auth-smoke.mjs,readonly \
             --mount type=bind,src="$RUNNER_TEMP/ssserver-test",dst=/app/ssserver-test,readonly \
-            "$IMAGE" node /app/proxy-smoke.mjs
+            "$IMAGE" sh -c 'node /app/proxy-smoke.mjs && node /app/proxy-auth-smoke.mjs'
       - name: Verify read-only Linux load diagnostics and tmpfs
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"

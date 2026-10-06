@@ -25,10 +25,10 @@ test('下单配置拒绝无限预算、无效数量、带凭据的 URL；付款�
   assert.equal(task.enabled,false);assert.equal(JSON.stringify(publicOrderTask(task)).includes('private-site-secret'),false);
   assert.deepEqual(validateOrderTask({...input,url:'https://another-shop.example/a'},task).credentials,{});
 });
-function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false,paymentStructure=false,assistanceCode=null}={}){
-  const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0,loginError=null,missingPayment=paymentStructure;
+function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false,paymentStructure=false,assistanceCode=null,trialAuthError=null}={}){
+  const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0,loginError=null,missingPayment=paymentStructure,opened=0;
   const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));if(JSON.parse(messages[1].content).phase==='payment')return {summary:'从原账单真实 DOM 恢复付款定位',paymentCode:assistanceCode||'function(){return {checks:{}};}'};return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
-    openBrowser:async(current,options)=>{if(loginError)throw loginError;const session={trace:[],receipt:null,snapshot:async()=>({text:'Product A USD 10',elements:[{id:'actual-random-selector'}]}),close:async()=>{},methods:{goto:async()=>true,submit:async()=>{
+    openBrowser:async(current,options)=>{if(loginError)throw loginError;if(trialAuthError&&++opened===2)throw trialAuthError;const session={trace:[],receipt:null,snapshot:async()=>({text:'Product A USD 10',elements:[{id:'actual-random-selector'}]}),close:async()=>{},methods:{goto:async()=>true,submit:async()=>{
       if(current.dryRun||current.executionMode==='prepare'){session.trace.push({action:'核对'});session.receipt={status:'prepared',review:{product:current.product,quantity:1,total:10,currency:'USD'}};return session.receipt;}
       await options.onBeforeSubmit({product:current.product,quantity:1,total:10,currency:'USD'});commits++;session.trace.push({action:'提交'});
       if(uncertain)throw new Error('receipt timed out');
@@ -149,4 +149,14 @@ test('连续两次试跑发现会话购物车数量累加，AI 修正后才允�
  }});
  await service.generate(f.user,f.task);assert.equal(generated,2);assert.equal(f.task.trial.preflightPasses,2);assert.equal(f.task.trial.review.quantity,1);assert.equal(f.task.trial.review.total,10);assert.equal(f.task.enabled,false);assert.equal(f.task.submissionStartedAt,undefined);
  service.approve(f.user,f.task,orderProgramHash(f.task));assert.equal(f.task.enabled,true);
+});
+
+test('代理认证或网站 HTTP 认证失败停止试跑，不重新生成 AI 代码或删除网页登录会话',async()=>{
+ for(const code of ['PROXY_AUTH_FAILED','SITE_HTTP_AUTH_REQUIRED']){
+  const f=fixture({pay:true,trialAuthError:Object.assign(new Error('认证未完成'),{code})}),account=f.user.orderAccounts[0],saved=account.session;
+  await assert.rejects(f.service.generate(f.user,f.task),error=>error.code===code);
+  assert.equal(f.generated,1);assert.equal(f.commits,0);assert.equal(f.payments,0);assert.equal(account.status,'saved');assert.equal(account.session,saved);assert.equal(f.task.status,'failed');assert.equal(f.task.approvedHash,null);
+  const execution=fixture({pay:true});await execution.service.generate(execution.user,execution.task);execution.service.approve(execution.user,execution.task,orderProgramHash(execution.task));const original=execution.user.orderAccounts[0].session;execution.setLoginError(Object.assign(new Error('认证未完成'),{code}));await execution.service.execute(execution.user,execution.task);
+  assert.equal(execution.generated,1);assert.equal(execution.commits,0);assert.equal(execution.payments,0);assert.equal(execution.user.orderAccounts[0].status,'saved');assert.equal(execution.user.orderAccounts[0].session,original);
+ }
 });
