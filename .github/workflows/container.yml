@@ -47,6 +47,7 @@ jobs:
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
           docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+            -e UI_SMOKE_SCREENSHOT_DIR=/app/.data/shadowsocks-smoke-screenshots \
             --mount type=bind,src="$PWD/.github/shadowsocks-ui-smoke.mjs",dst=/app/shadowsocks-ui-smoke.mjs,readonly \
             "$IMAGE" node /app/shadowsocks-ui-smoke.mjs
       - name: Verify validated monitor creation and repair in the read-only image
