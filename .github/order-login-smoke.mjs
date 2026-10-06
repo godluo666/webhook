@@ -5,6 +5,7 @@ import {pathToFileURL} from 'node:url';
 const {chromium}=await import('playwright-core');
 const {createOrderBrowser}=await import(pathToFileURL(path.join(process.cwd(),'lib/order-browser.js')));
 const {createOrderAccountService}=await import(pathToFileURL(path.join(process.cwd(),'lib/order-account.js')));
+const {createOrderService,validateOrderTask}=await import(pathToFileURL(path.join(process.cwd(),'lib/orders.js')));
 const executable=process.env.MONITOR_BROWSER_EXECUTABLE||(process.platform==='win32'?'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe':'/usr/bin/chromium');
 process.env.MONITOR_BROWSER_EXECUTABLE=executable;
 let token=0,loginPageVisits=0;const requests=[];
@@ -12,6 +13,10 @@ const server=http.createServer((req,res)=>{
  const url=new URL(req.url,'http://localhost');requests.push({path:url.pathname,method:req.method});res.setHeader('content-type','text/html; charset=utf-8');
  const logged=(req.headers.cookie||'').includes('session=valid');
  const login='<form action="/dologin.php" method="post"><label>Email<input name="email"></label><label>Password<input type="password" name="password"></label><button>Log in</button></form>';
+ if(url.pathname==='/product'){
+  res.end((logged?'<a href="/logout">Log out</a>':'')+'<form method="post" action="/cart.php?a=complete"><h1 id="product">Product A</h1><input name="quantity" id="quantity" value="1"><p id="total">USD 10.00</p><span id="currency">USD</span><button id="submit">Submit Order</button><button type="button" id="unverified" onclick="fetch(&#39;/pay&#39;,{method:&#39;POST&#39;,body:&#39;invoiceid=unapproved&#39;}).catch(()=>{})">Continue</button></form>'+(url.searchParams.has('delayed')?'<div id="ready" hidden>Ready</div><script>setTimeout(()=>fetch("/pay",{method:"POST",body:"invoiceid=background"}).catch(()=>{}),500);setTimeout(()=>document.getElementById("ready").hidden=false,750);</script>':''));return;
+ }
+ if(url.pathname==='/unsafe-cart'){res.end('<form action="/cart.php?a=complete" method="post"><button id="cart">Continue</button></form>');return;}
  if(url.pathname==='/memory-login'){res.end('<style>button{position:absolute;left:20px;top:120px;width:100px;height:40px}</style><form action="/login"><input name="email"><input type="password"><button>Log in</button></form><script>document.querySelector("form").addEventListener("submit",event=>{event.preventDefault();document.body.innerHTML='+JSON.stringify('<a href="/logout">Log out</a>')+';})</script>');return;}
  if(url.pathname==='/login'){loginPageVisits++;res.end(login);return;}
  if(url.pathname==='/slow-login'){
@@ -72,16 +77,38 @@ try{
  assert.match((await accounts.productPreview(user,monitor,{url:backgroundUrl})).html,/data-order-account-marker/);
  assert.equal(requests.filter(r=>r.method==='POST').length,backgroundPosts,'Account checks and private previews also block background POST');
  console.log('PASS account verification and private preview use the same read-only protection');
+ for(const returnTarget of ['/cart.php?a=complete','/pay?invoice=private']){
+  const url=base+'/account?returnto='+returnTarget;
+  browser=await createOrderBrowser({url},{loginOnly:true,storageState:saved.state});
+  const returned=await browser.remote.finish();assert.equal(returned.check.url,url);await browser.close();browser=null;
+ }
+ console.log('PASS nested checkout and payment return URLs do not block login saving');
  const missingUrl=backgroundUrl+'&missing=1';
  await assert.rejects(createOrderBrowser({url:missingUrl},{storageState:saved.state,loginCheck:{...saved.check,url:missingUrl},accountReadOnly:true,loginVerificationTimeoutMs:300}),error=>error.code==='ORDER_LOGIN_UNVERIFIED'&&/后台写入请求/.test(error.message)&&!/付款/.test(error.message));
  console.log('PASS blocked background requests cannot substitute for authentication evidence');
+ const checkout={submitSelector:'#submit',productSelector:'#product',quantitySelector:'#quantity',totalSelector:'#total',currencySelector:'#currency',confirmationSelector:'#confirmation'};
  for(const target of ['/pay','/cart.php?a=complete']){
   const url=base+'/account?background='+encodeURIComponent(target);
-  await assert.rejects(createOrderBrowser({url},{storageState:saved.state,loginCheck:{...saved.check,url},accountReadOnly:true,loginVerificationTimeoutMs:2000}),/未授权的提交或付款/);
-  await assert.rejects(async()=>{
-   let loginBrowser;try{loginBrowser=await createOrderBrowser({url},{storageState:saved.state,loginOnly:true,loginVerificationTimeoutMs:2000});await loginBrowser.verifyLogin();}finally{await loginBrowser?.close();}
-  },/未授权的提交或付款/);
+  browser=await createOrderBrowser({url},{storageState:saved.state,loginOnly:true,loginVerificationTimeoutMs:2000});
+  const financialSaved=await browser.remote.finish();assert.equal(financialSaved.check.url,url);
+  assert.ok(browser.trace.some(item=>item.action==='拦截后台请求'));assert.ok(!JSON.stringify(browser.trace).includes('private-login-token'));await browser.close();browser=null;
+  const financialMonitor={id:'financial-background',kind:'webpage',url:base+'/product'},financialUser={id:'financial-user',monitors:[financialMonitor],orderAccounts:[{monitorId:financialMonitor.id,loginUrl:url,revision:1,status:'saved',session:financialSaved}],orderTasks:[],settings:{}};
+  assert.equal((await accounts.check(financialUser,financialMonitor)).status,'saved');
+  assert.match((await accounts.productPreview(financialUser,financialMonitor,{url:base+'/product'})).html,/<h1 id="product">Product A<\/h1>/);
+  let generated=0;
+  const service=createOrderService({persist:()=>{},requestAI:async()=>{generated++;return {summary:'准备实际商品并核对订单',workflow:{version:1,prepareCode:'function(order,browser){browser.goto(order.url);browser.fill("#quantity",String(order.quantity));if(browser.exists("#ready"))browser.wait("#ready");return {ready:true};}',paymentCode:'function(){return {checks:{paySelector:"#pay",invoiceSelector:"#invoice-id",totalSelector:"#invoice-total",currencySelector:"#invoice-currency",confirmationSelector:"#paid"}};}'},checkout};}});
+  const task=validateOrderTask({monitorId:financialMonitor.id,url:base+'/product?delayed=1',product:'Product A',quantity:1,maxTotal:10,currency:'USD',executionMode:'pay'});financialUser.orderTasks.push(task);
+  await service.generate(financialUser,task);assert.equal(task.status,'ready');assert.equal(task.trial.preflightPasses,2);assert.equal(generated,1,'Account background requests must not force repeated AI generation');assert.ok(task.trial.trace.some(item=>item.action==='拦截后台请求'&&item.detail.includes('试跑')),'Delayed background requests after login verification must stay harmless and blocked');
+  await assert.rejects(createOrderBrowser({url:url+'&missing=1'},{storageState:saved.state,loginCheck:{...financialSaved.check,url:url+'&missing=1'},accountReadOnly:true,loginVerificationTimeoutMs:300}),error=>error.code==='ORDER_LOGIN_UNVERIFIED');
+  const direct=base+target+(target.includes('?')?'&':'?')+'token=diagnostic-secret';
+  await assert.rejects(createOrderBrowser({url:direct},{storageState:saved.state,loginOnly:true}),error=>error.code==='ORDER_REQUEST_BLOCKED'&&/GET /.test(error.message)&&!error.message.includes('diagnostic-secret'));
  }
- assert.equal(requests.filter(r=>r.method==='POST').length,backgroundPosts,'Financial requests remain blocked during account verification');
- console.log('PASS order submission and payment endpoints stay blocked during account verification');
+ assert.equal(requests.filter(r=>r.method==='POST').length,backgroundPosts,'Financial background requests never reach the merchant during save, restore, preview or two trials');
+ console.log('PASS financial background requests, including delayed timers after account verification, stay blocked without poisoning login saving, account checks, preview or two real SOP trials');
+ browser=await createOrderBrowser({url:base+'/product',dryRun:true,executionMode:'pay'},{storageState:saved.state});
+ await assert.rejects(browser.methods.click('#unverified'),error=>error.code==='ORDER_REQUEST_BLOCKED'&&/POST \/pay/.test(error.message));await browser.close();browser=null;
+ browser=await createOrderBrowser({url:base+'/unsafe-cart'},{storageState:saved.state});
+ await assert.rejects(browser.methods.cart('#cart'),error=>error.code==='ORDER_REQUEST_BLOCKED');await browser.close();browser=null;
+ assert.equal(requests.filter(r=>r.method==='POST').length,backgroundPosts);
+ console.log('PASS direct financial navigation, AI-triggered payment and a disguised checkout cart remain blocked');
 }finally{if(browser)await browser.close();await new Promise(r=>server.close(r));}

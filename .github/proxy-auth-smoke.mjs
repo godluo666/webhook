@@ -32,7 +32,7 @@ const target=https.createServer({key,cert},async(req,res)=>{
   const url=new URL(req.url,'https://local.invalid');
   if(url.pathname==='/health'){res.end('<h1>HTTPS-READY</h1>');return;}
   if(url.pathname==='/site-auth'){originChallenges++;res.writeHead(401,{'www-authenticate':'Basic realm="website-only"'});res.end('HTTP authentication required');return;}
-  if(url.pathname==='/login'){res.writeHead(302,{'set-cookie':'merchant_session=private-login; Secure; HttpOnly; Path=/','location':'/clientarea.php'});res.end();return;}
+  if(url.pathname==='/login'){res.writeHead(302,{'set-cookie':'merchant_session=private-login; Secure; HttpOnly; Path=/','location':'/clientarea.php?background=1&returnto=/pay?invoice=fixture'});res.end();return;}
   if(!req.headers.cookie?.includes('merchant_session=private-login')){res.writeHead(401);res.end('<form action="/login"><input type="password"><button>Log in</button></form>');return;}
   const logged='<a href="/logout">Log out</a>';
   if(url.pathname==='/clientarea.php'){res.end('<h1>Account</h1>'+logged+(url.searchParams.has('background')?'<script>fetch("/pay",{method:"POST",body:"invoiceid=unauthorized"}).catch(()=>{})</script>':''));return;}
@@ -79,7 +79,8 @@ async function exercise(label,withProxy){
   });
   assert.equal(orders,beforeOrders);assert.equal(payments,beforePayments);
   await withProxy(async route=>{
-    let browser;try{await assert.rejects(async()=>{const url=base+'/clientarea.php?background=1';browser=await createOrderBrowser({url,executionMode:'pay',dryRun:true},{proxyUrl:route,launch,storageState:saved.state,loginCheck:{...saved.check,url},accountReadOnly:true});},/未授权的提交或付款/);}finally{await browser?.close();}
+    const url=base+'/clientarea.php?background=1';const browser=await createOrderBrowser({url,executionMode:'pay',dryRun:true},{proxyUrl:route,launch,storageState:saved.state,loginCheck:{...saved.check,url},accountReadOnly:true});
+    try{assert.equal((await browser.verifyLogin()).url,url);assert.ok(browser.trace.some(item=>item.action==='拦截后台请求'));}finally{await browser.close();}
   });
   assert.equal(unauthorizedWrites,0,'Proxy auth interception must retain the read-only financial request guard');
   await withProxy(async route=>{
