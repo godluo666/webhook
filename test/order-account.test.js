@@ -92,3 +92,33 @@ test('登录保存失败和成功分别保留脱敏日志，重复完成请求�
   const count=f.user.orderExecutionLogs.length;await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});assert.equal(f.user.orderExecutionLogs.length,count);assert.equal(f.finishCalls,2);
   assert.equal(f.user.orderExecutionLogs[0].status,'saved');const text=JSON.stringify(f.user.orderExecutionLogs);for(const secret of ['private-user','private-password','secret-session'])assert.ok(!text.includes(secret));
 });
+test('取消卡在代理启动前的登录立即释放用户锁，迟到的代理不能再启动浏览器',async()=>{
+ const gate=deferred(),controller=new AbortController(),user=userFor('cancel-start');let launches=0;
+ const service=createOrderAccountService({persist:()=>{},withProxy:async(_url,fn)=>{await gate.promise;return fn('');},openBrowser:async(_task,options)=>{options.signal.throwIfAborted();launches++;throw new Error('unexpected browser');}});
+ service.save(user,monitor,{loginUrl:'https://shop.example/login'});
+ const pending=service.start(user,monitor,{}, {signal:controller.signal});const settled=pending.then(()=>false,error=>error.name==='AbortError');await new Promise(r=>setImmediate(r));controller.abort();
+ try{assert.equal(await Promise.race([settled,new Promise(r=>setTimeout(()=>r(false),600))]),true);assert.equal(service.busy(user,monitor),false);}
+ finally{gate.resolve();await settled;}assert.equal(launches,0);
+});
+test('代理打开超时后释放用户锁并保留旧会话，迟到结果不能打开登录窗口',async()=>{
+ const gate=deferred(),user=userFor('timeout-start');let launches=0;
+ const service=createOrderAccountService({persist:()=>{},openTimeoutMs:25,withProxy:async(_url,fn)=>{await gate.promise;return fn('');},openBrowser:async(_task,options)=>{options.signal.throwIfAborted();launches++;throw new Error('unexpected browser');}});
+ service.save(user,monitor,{loginUrl:'https://shop.example/login'});const account=user.orderAccounts[0];account.status='saved';account.session={state:{cookies:[]},check:{url:'https://shop.example/account'}};const previous=account.session;
+ const pending=service.start(user,monitor),settled=pending.then(()=>null,error=>error);
+ try{const failure=await Promise.race([settled,new Promise(r=>setTimeout(()=>r(null),600))]);assert.equal(failure?.code,'ORDER_LOGIN_OPEN_TIMEOUT');assert.equal(service.busy(user,monitor),false);assert.equal(account.session,previous);assert.equal(account.status,'saved');}
+ finally{gate.resolve();await settled;}assert.equal(launches,0);
+});
+test('另一监控打开登录不能中断当前监控正在保存的会话',async()=>{
+ const gate=deferred(),f=setup(10000,{finishGate:gate.promise}),other={id:'monitor-b'};f.user.monitors.push(other);f.service.save(f.user,other,{loginUrl:'https://shop.example/login'});
+ const opened=await f.service.start(f.user,monitor);f.login();const saving=f.service.finish(f.user,monitor,{sessionId:opened.sessionId}),settled=saving.then(value=>value,error=>error);
+ let otherLogin;
+ try{await assert.rejects(async()=>{otherLogin=await f.service.start(f.user,other);},/正在/);assert.equal(f.service.busy(f.user,monitor),true);}
+ finally{gate.resolve();const result=await settled;if(otherLogin)await f.service.cancel(f.user,other,{sessionId:otherLogin.sessionId});assert.equal(result.status,'saved');}assert.equal(f.leased,0);
+});
+test('登录地址修改和清除持久化失败时恢复原会话、凭据与配置版本',async()=>{
+ let fail=false;const f=setup(10000,{persistError:()=>fail}),opened=await f.service.start(f.user,monitor);f.login();await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});
+ const account=f.user.orderAccounts[0],previous={...account};fail=true;
+ assert.throws(()=>f.service.save(f.user,monitor,{loginUrl:'https://other.example/login',username:'new-user',password:'new-password'}),/写入失败/);assert.deepEqual(account,previous);
+ await assert.rejects(f.service.logout(f.user,monitor),/写入失败/);assert.deepEqual(account,previous);fail=false;
+ const other={id:'new-monitor'};assert.equal(f.user.orderAccounts.length,1);fail=true;assert.throws(()=>f.service.save(f.user,other,{loginUrl:'https://shop.example/login'}),/写入失败/);assert.equal(f.user.orderAccounts.length,1);
+});

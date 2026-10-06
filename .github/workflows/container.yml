@@ -69,6 +69,12 @@ jobs:
           docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
             --mount type=bind,src="$PWD/.github/order-login-smoke.mjs",dst=/app/order-login-smoke.mjs,readonly \
             "$IMAGE" node /app/order-login-smoke.mjs
+      - name: Verify login and transaction resilience boundaries
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+          docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount type=bind,src="$PWD/.github/order-resilience-smoke.mjs",dst=/app/order-resilience-smoke.mjs,readonly \
+            "$IMAGE" node /app/order-resilience-smoke.mjs
       - name: Verify browser, proxy and preview resource cleanup
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"

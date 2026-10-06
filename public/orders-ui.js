@@ -99,7 +99,9 @@ document.addEventListener('click',async event=>{
     const closeWindow=()=>{orderLoginSession=null;$('#order-login-window').innerHTML='';delete $('#order-login-window').dataset.keys;};
     try{await withButton(button,async()=>{
       try{
-        await (action==='finish'?orderLoginQueue:orderLoginQueue.catch(()=>{}));if(!active())return;
+        // A lost action response is not proof that merchant login failed.
+        // Wait for queued input, then let the server verify the live session.
+        await orderLoginQueue.catch(()=>{});if(!active())return;
         $('#order-account-status').textContent=({start:'正在打开登录页面…',check:'正在验证登录状态…',finish:'正在保存登录会话…',cancel:'正在关闭登录…',logout:'正在清除登录状态…'}[action]);let data;
         if(action==='start'){
           const saved=await api(path,'PUT',{loginUrl:$('#order-login-url').value.trim()},{signal:operation.controller.signal});if(!active())return;replaceOrderAccount(saved.account);

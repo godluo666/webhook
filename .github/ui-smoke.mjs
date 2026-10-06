@@ -405,7 +405,12 @@ try {
   for (const [view, selector] of Object.entries(headings)) {
     await navigate(view);
     assert.equal(await page.locator(selector).isVisible(), true, 'Desktop page title must be visible for ' + view);
-    assert.equal(await page.locator('details, select:visible').count(), 0, 'No dropdown controls on ' + view);
+    // Shadowsocks encryption is intentionally a native dropdown, as requested.
+    assert.equal(await page.locator('details, select:visible:not(#source-ss-method)').count(), 0, 'No unexpected dropdown controls on ' + view);
+    if(view==='fetch-settings'){
+      const cipher=page.locator('#source-ss-method');assert.equal(await cipher.isVisible(),true);assert.equal(await cipher.getAttribute('data-native-select'),'');
+      assert.equal(await cipher.locator('option[value="aes-256-gcm"]').count(),1);assert.equal(await cipher.locator('option[value="chacha20-ietf-poly1305"]').count(),1);
+    }
   }
   const mobile = await context.newPage();
   await mobile.setViewportSize({ width: 390, height: 844 });

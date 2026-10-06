@@ -120,6 +120,10 @@ try{
   await clickLogin();await page.waitForFunction(()=>document.querySelectorAll('[data-login-field]').length===1,{timeout:20000});
   await page.locator('[data-order-account-action="finish"]').click();await page.waitForFunction(()=>document.querySelector('[data-order-account-action="finish"]')?.disabled===false);assert.ok(await page.locator('#order-login-image').isVisible(),'Incomplete login must remain open');assert.doesNotMatch(await page.locator('#order-account-status').innerText(),/正在保存/);assert.match(await page.locator('#order-account-status').innerText(),/登录|二次认证/);
   await page.locator('[data-login-field]').fill('123456');await clickLogin();await page.waitForFunction(()=>document.querySelector('#order-login-address')?.textContent.endsWith('/product'),null,{timeout:20000});
+  // The browser action completed, but its response was lost. Saving must still
+  // consult the merchant's live authentication rather than a rejected UI queue.
+  let droppedAction=0;await page.route('**'+accountPath+'/action',async route=>{const response=await route.fetch();droppedAction++;assert.equal((await response.json()).view.loginStatus,'authenticated');await route.abort('failed');});
+  await page.locator('[data-login-action="refresh"]').click();await page.waitForFunction(()=>/连接|响应|请求失败/.test(document.querySelector('#order-account-status')?.textContent||''));await page.unroute('**'+accountPath+'/action');assert.equal(droppedAction,1);
   const revisionBeforeSave=(await state()).orderAccounts[0].revision;let finishResponses=0;
   await page.route('**'+accountPath+'/finish',async route=>{
     const response=await route.fetch();finishResponses++;
@@ -128,9 +132,9 @@ try{
       await route.abort('failed');
     }else await route.fulfill({response});
   });
-  await page.locator('[data-order-account-action="finish"]').click();await page.waitForFunction(()=>!document.querySelector('#order-login-image'));
+  await page.locator('[data-order-account-action="finish"]').click();await page.waitForFunction(()=>!document.querySelector('#order-login-image'),null,{timeout:15000});
   await page.unroute('**'+accountPath+'/finish');assert.equal(finishResponses,2);assert.equal((await state()).orderAccounts[0].revision,revisionBeforeSave+1);
-  assert.match(await page.locator('#order-account-status').innerText(),/登录状态已保存/);console.log('PASS lost save response reconciled once without duplicate writes or stuck progress');
+  assert.match(await page.locator('#order-account-status').innerText(),/登录状态已保存/);console.log('PASS lost login-action and save responses recover with one authoritative save, no duplicate writes or stuck progress');
   let current=await state();assert.equal(current.orderAccounts[0].status,'saved');assert.equal(current.orderAccounts[0].session,undefined);assert.equal(JSON.stringify(current).includes(password),false);assert.equal(loginRequests,1);console.log('PASS private prelogin and 2FA');
   expired=true;await page.locator('[data-order-account-action="check"]').click();await page.waitForFunction(()=>document.querySelector('[data-order-account-action="check"]')?.disabled===false);
   assert.equal((await state()).orderAccounts[0].status,'expired');assert.doesNotMatch(await page.locator('#order-account-status').innerText(),/登录状态已保存|正在验证/);
