@@ -171,3 +171,8 @@ test('浏览器启动认证失败仍保留生成日志和错误代码，既不�
   const f=fixture();f.setLoginError(Object.assign(new Error('proxy authentication failed'),{code:'PROXY_AUTH_FAILED'}));await assert.rejects(f.service.generate(f.user,f.task));
   const log=f.user.orderExecutionLogs[0];assert.equal(log.status,'failed');assert.equal(log.result.error.code,'PROXY_AUTH_FAILED');assert.ok(log.events.some(e=>e.action==='浏览器执行失败'&&e.stage==='读取实际商品页面'&&e.error.code==='PROXY_AUTH_FAILED'));assert.equal(f.generated,0);assert.equal(f.commits,0);
 });
+test('优惠码选填且保持大小写，拒绝非文本、超长和多行码，修改后审批哈希失效',()=>{
+ assert.equal(validateOrderTask(input).couponCode,'');assert.equal(validateOrderTask({...input,couponCode:'  Save-20  '}).couponCode,'Save-20');
+ for(const couponCode of [20,{},'x'.repeat(129),'SAVE\n20','SAVE\u000020'])assert.throws(()=>validateOrderTask({...input,couponCode}),/优惠码/);
+ const task=validateOrderTask(input),hash=orderProgramHash(task);task.couponCode='SAVE20';assert.notEqual(orderProgramHash(task),hash);task.couponCode='';assert.equal(orderProgramHash(task),hash);
+});

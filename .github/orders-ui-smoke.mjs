@@ -144,7 +144,13 @@ try{
   const enable=async()=>{await page.locator('[data-order-editor-action="enable"]').click();await page.locator('[data-order-editor-action="run"]').waitFor();};
   const newConfig=async()=>{await page.locator('[data-order-editor-action="new"]').click();};
   const run=async()=>{await page.locator('[data-order-editor-action="run"]').click();await page.locator('[data-order-editor-action="new"]').waitFor({timeout:90000});};
-  await fillForm('Product A 自动下单',20,'submit',sourceBase+'/aff?aff=partner-42');await page.locator('#order-product').fill('');
+  await fillForm('Product A 自动下单',20,'submit',sourceBase+'/aff?aff=partner-42');
+  assert.equal(await page.locator('#order-coupon-code').inputValue(),'');
+  await page.locator('#order-coupon-code').fill('Save-UI20');const savedCoupon=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/order-tasks'&&response.request().method()==='POST');
+  await page.locator('[data-order-editor-action="save"]').click();assert.equal((await (await savedCoupon).json()).task.couponCode,'Save-UI20');
+  await page.reload();await openMonitor();assert.equal(await page.locator('#order-coupon-code').inputValue(),'Save-UI20');
+  await page.locator('#order-coupon-code').fill('');await page.locator('#order-product').fill('');
+  console.log('PASS optional coupon configuration persists across reload and can be cleared');
   assert.equal(await page.locator('#order-currency').count(),0);assert.equal(await page.locator('#order-product').getAttribute('required'),null);
   const ordersBeforePick=createdOrders;
   const previewResponse=page.waitForResponse(response=>response.url().endsWith('/order-product/preview')&&response.request().method()==='POST');
@@ -157,6 +163,9 @@ try{
 
   await page.waitForFunction(()=>document.querySelector('#order-product-selection')?.textContent.includes('已点选'));assert.equal(createdOrders,ordersBeforePick);assert.equal(paymentRequests,0);
   await generate();
+  await page.locator('#order-coupon-code').fill('Changed-after-trial');await page.locator('[data-order-editor-action="enable"]').click();
+  await page.waitForFunction(()=>document.body.innerText.includes('配置已修改，请先重新生成并试跑'));assert.equal((await state()).orderTasks[0].enabled,false);
+  await page.locator('#order-coupon-code').fill('');console.log('PASS changing coupon after trial cannot enable the stale configuration');
   assert.equal(createdOrders,0);assert.equal(paymentRequests,0);assert.equal(loginRequests,1,'Generation reuses saved session');current=await state();let task=current.orderTasks[0];assert.equal(task.monitorId,monitor.id);assert.equal(task.product,'');assert.equal(task.currency,'');assert.equal(task.verifiedProduct,'Product A');assert.equal(task.verifiedCurrency,'USD');assert.ok(task.productSelection);assert.equal(task.trial.affiliate.status,'verified');assert.equal(task.trial.affiliate.name,'partner_credit');
   const orderLogPath='/api/monitors/'+monitor.id+'/order-execution-logs';
   const readLogs=async()=>{const response=await context.request.get(base+orderLogPath);assert.ok(response.ok());return (await response.json()).report;};
