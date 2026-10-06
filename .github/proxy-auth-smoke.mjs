@@ -26,6 +26,7 @@ const launchContext=(profile,options)=>chromium.launchPersistentContext(profile,
 const listen=server=>new Promise(resolve=>server.listen(0,'127.0.0.1',()=>resolve(server.address().port)));
 const dataDir=await fs.mkdtemp(path.join(process.env.DATA_DIR||tmpdir(),'proxy-auth-smoke-'));
 const sockets=new Set(),originHeaders=[],invoices=new Map(),ledger=[];
+const rejectedConnects=[];
 let orders=0,payments=0,originChallenges=0,proxyChallenges=0,acceptedConnects=0,ssServer,replayPayment=false,unauthorizedWrites=0,replayedPayments=0;
 const target=https.createServer({key,cert},async(req,res)=>{
   originHeaders.push({authorization:req.headers.authorization,proxyAuthorization:req.headers['proxy-authorization']});
@@ -58,7 +59,7 @@ const targetPort=await listen(target),base='https://127.0.0.1:'+targetPort;
 const proxyToken='Basic '+Buffer.from('proxy-user:proxy-secret').toString('base64');
 const proxy=http.createServer((_req,res)=>{res.writeHead(403);res.end();});
 proxy.on('connect',(req,socket,head)=>{
-  if(req.headers['proxy-authorization']!==proxyToken){proxyChallenges++;socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="proxy-only"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');return;}
+  if(req.headers['proxy-authorization']!==proxyToken){proxyChallenges++;rejectedConnects.push({target:req.url==='127.0.0.1:'+targetPort?'merchant':'browser-background',credentials:Boolean(req.headers['proxy-authorization'])});socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="proxy-only"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');return;}
   if(req.url!=='127.0.0.1:'+targetPort){socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');return;}
   acceptedConnects++;const upstream=net.connect(targetPort,'127.0.0.1',()=>{socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');if(head.length)upstream.write(head);socket.pipe(upstream);upstream.pipe(socket);});
   sockets.add(upstream);upstream.on('error',()=>socket.destroy());upstream.once('close',()=>sockets.delete(upstream));socket.once('close',()=>upstream.destroy());
@@ -105,9 +106,18 @@ async function exercise(label,withProxy){
 }
 try{
   await exercise('authenticated HTTP CONNECT',work=>work(proxyUrl));assert.ok(proxyChallenges>0&&acceptedConnects>0);
-  const beforeBadOrders=orders,beforeBadPayments=payments,beforeChallenges=proxyChallenges;
+  const beforeBadOrders=orders,beforeBadPayments=payments,beforeRejected=rejectedConnects.length;
   await assert.rejects(createOrderBrowser({url:base+'/clientarea.php',executionMode:'pay',dryRun:true},{launch,proxyUrl:proxyUrl.replace('proxy-secret','incorrect-password')}),error=>error.code==='PROXY_AUTH_FAILED'&&!error.message.includes('incorrect-password'));
-  assert.ok(proxyChallenges-beforeChallenges<=8,'Rejected proxy authentication is bounded; challenges='+String(proxyChallenges-beforeChallenges));assert.equal(orders,beforeBadOrders);assert.equal(payments,beforeBadPayments);
+  const rejected=rejectedConnects.slice(beforeRejected),merchantRejected=rejected.filter(item=>item.target==='merchant');
+  console.log('Proxy rejection diagnostics: '+JSON.stringify(rejected));
+  // Chromium's browser-level background probes vary by platform and do not
+  // belong to the page CDP session. Check actual credential retries separately.
+  assert.ok(merchantRejected.length<=8,'Target proxy challenges are bounded');
+  assert.equal(merchantRejected.filter(item=>item.credentials).length,1,'Rejected credentials are sent once');
+  assert.ok(rejected.filter(item=>item.target==='browser-background').every(item=>!item.credentials),'Background probes never receive proxy credentials');
+  const afterClose=rejectedConnects.length;await new Promise(resolve=>setTimeout(resolve,250));
+  assert.equal(rejectedConnects.length,afterClose,'Failed browser is closed; no proxy probes continue');
+  assert.equal(orders,beforeBadOrders);assert.equal(payments,beforeBadPayments);
   await assert.rejects(createOrderBrowser({url:base+'/site-auth',executionMode:'pay',dryRun:true},{launch}),error=>error.code==='SITE_HTTP_AUTH_REQUIRED');
   console.log('PASS incorrect proxy credentials and origin HTTP authentication have distinct, redacted failures without orders or payments');
   const reservation=http.createServer(),ssPort=await listen(reservation);await new Promise(resolve=>reservation.close(resolve));
