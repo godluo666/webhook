@@ -29,3 +29,7 @@ body:has(.app-shell[data-view="monitors"]) #toast { top:88px; bottom:auto; }
 .order-product-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin:16px 0; }
 #order-product-window { min-width:0; margin:20px 0; overflow-wrap:anywhere; }
 #order-product-window .element-frame { width:100%; max-width:100%; }
+
+.order-execution-log { margin-top:24px; min-width:0; }
+.order-log-actions { display:flex; flex-wrap:wrap; gap:10px; margin:12px 0; }
+#order-execution-log-text { width:100%; max-width:100%; min-height:180px; resize:vertical; font:12px/1.65 ui-monospace,Consolas,monospace; overflow-wrap:anywhere; }

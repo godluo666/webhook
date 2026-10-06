@@ -2,9 +2,11 @@ FROM ghcr.io/shadowsocks/sslocal-rust:v1.25.0 AS shadowsocks
 FROM node:24-bookworm-slim
 
 ARG SOURCE_URL
+ARG BUILD_REVISION=unknown
 LABEL org.opencontainers.image.source=$SOURCE_URL
 
 ENV NODE_ENV=production \
+    MONITOR_BUILD_REVISION=${BUILD_REVISION} \
     HOST=0.0.0.0 \
     PORT=3000 \
     DATA_DIR=/app/.data \

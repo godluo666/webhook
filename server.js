@@ -28,6 +28,7 @@ import { resolveInterval, resolveRuleCondition, validateInterval } from './lib/r
 import { createScheduler } from './lib/scheduler.js';
 import { createElementPreview, selectedElements, selectedElement, discardElementPreview } from './lib/element-picker.js';
 import { createOrderService, validateOrderTask, publicOrderTask } from './lib/orders.js';
+import { createOrderExecutionLogs } from './lib/order-execution-log.js';
 import { createOrderAccountService, publicOrderAccount, savedOrderAccount } from './lib/order-account.js';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
@@ -83,8 +84,10 @@ function inspectMonitorService(user, monitor, plan) {
   return inspectRoutedService(monitor.url, plan, sourceOptions(user, monitor));
 }
 const ruleService = createRuleService({ fetchSource, sourceOptions, inspectService: inspectRoutedService });
+const orderExecutionLogs=createOrderExecutionLogs({persist:()=>store.persist(),sourceOptions});
 let orderAccountService;
 const orderService = createOrderService({
+  executionLogs:orderExecutionLogs,
   isAccountBusy:(user,monitorId)=>orderAccountService?.busy(user,{id:monitorId})||false,
   persist: () => store.persist(), withProxy: withSourceProxy, sourceOptions,
   requestAI: async (user, messages, {signal} = {}) => {
@@ -108,7 +111,7 @@ const orderService = createOrderService({
     if (monitor) await deliver(user, { event:'order.result', title:'自动下单 · ' + task.label, message:detail }, monitor.webhookIds);
   }
 });
-orderAccountService = createOrderAccountService({persist:()=>store.persist(),withProxy:withSourceProxy,sourceOptions,isOrderBusy:(user,monitor)=>user.orderTasks.some(task=>task.monitorId===monitor.id&&orderService.isBusy(user,task))});
+orderAccountService = createOrderAccountService({executionLogs:orderExecutionLogs,persist:()=>store.persist(),withProxy:withSourceProxy,sourceOptions,isOrderBusy:(user,monitor)=>user.orderTasks.some(task=>task.monitorId===monitor.id&&orderService.isBusy(user,task))});
 orderService.recover(store.state.users);
 function mergeRule(current, patch = {}) {
   const next = { ...current, ...patch };
@@ -1060,6 +1063,8 @@ async function handler(request, response) {
         if(selected.url!==urlOf(body.url,'商品地址'))throw new Error('商品地址已变化，请重新点选');
         return sendJson(response,200,{selection:{url:selected.url,selector:selected.target.selector,text:selected.target.text}});
       }
+      const orderLogMatch=pathname.match(/^\/api\/monitors\/([^/]+)\/order-execution-logs$/);
+      if(request.method==='GET'&&orderLogMatch){const monitor=user.monitors.find(m=>m.id===orderLogMatch[1]);if(!monitor)return sendJson(response,404,{error:'监控不存在'});return sendJson(response,200,{report:orderExecutionLogs.report(user,monitor.id)});}
       const accountMatch=pathname.match(/^\/api\/monitors\/([^/]+)\/order-account(?:\/(start|action|finish|cancel|check|logout))?$/);
       if(accountMatch){
         const monitor=user.monitors.find(m=>m.id===accountMatch[1]&&m.kind!=='reminder');
@@ -1605,7 +1610,7 @@ async function handler(request, response) {
     }
     if (request.method !== 'GET') return sendJson(response, 405, { error: '不支持的请求方法' });
     const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-    if (!['index.html', 'app.js', 'rule-ui.js', 'choices.js', 'panels.js', 'orders-ui.js', 'orders.css', 'minimal.css', 'picker.css', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
+    if (!['index.html', 'app.js', 'rule-ui.js', 'choices.js', 'panels.js', 'orders-ui.js', 'order-execution-log-ui.js', 'orders.css', 'minimal.css', 'picker.css', 'style.css', 'extra.css', 'spatial.css', 'premium.css', 'controls.css'].includes(filename)) return sendJson(response, 404, { error: '页面不存在' });
     const file = path.join(root, 'public', filename);
     response.writeHead(200, { 'content-type': contentTypes[path.extname(file)], 'content-security-policy': "default-src 'self'; connect-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'" });
     fs.createReadStream(file).pipe(response);

@@ -85,3 +85,10 @@ test('登录操作延长空闲期限，长期无人操作仍关闭窗口',async(
  await f.service.action(f.user,monitor,{sessionId:opened.sessionId,type:'refresh'});await new Promise(r=>setTimeout(r,80));
  assert.equal(f.leased,1);await f.service.cancel(f.user,monitor,{sessionId:opened.sessionId});assert.equal(f.leased,0);
 });
+
+test('登录保存失败和成功分别保留脱敏日志，重复完成请求不重复保存或制造执行记录',async()=>{
+  const f=setup(),opened=await f.service.start(f.user,monitor);await assert.rejects(f.service.finish(f.user,monitor,{sessionId:opened.sessionId}));
+  assert.equal(f.user.orderExecutionLogs[0].kind,'login-save');assert.equal(f.user.orderExecutionLogs[0].status,'failed');f.login();await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});
+  const count=f.user.orderExecutionLogs.length;await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});assert.equal(f.user.orderExecutionLogs.length,count);assert.equal(f.finishCalls,2);
+  assert.equal(f.user.orderExecutionLogs[0].status,'saved');const text=JSON.stringify(f.user.orderExecutionLogs);for(const secret of ['private-user','private-password','secret-session'])assert.ok(!text.includes(secret));
+});

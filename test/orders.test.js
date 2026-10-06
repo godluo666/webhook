@@ -160,3 +160,14 @@ test('代理认证或网站 HTTP 认证失败停止试跑，不重新生成 AI �
   assert.equal(execution.generated,1);assert.equal(execution.commits,0);assert.equal(execution.payments,0);assert.equal(execution.user.orderAccounts[0].status,'saved');assert.equal(execution.user.orderAccounts[0].session,original);
  }
 });
+
+test('日志保留同一次生成的两次试跑、执行结果和真实代码哈希，读取日志不重新执行',async()=>{
+  const f=fixture({pay:true});await f.service.generate(f.user,f.task);
+  const generated=f.user.orderExecutionLogs[0];assert.equal(generated.kind,'generate');assert.equal(generated.status,'passed');assert.equal(generated.program.codeHash,orderProgramHash(f.task));assert.deepEqual(generated.events.filter(e=>e.action==='试跑通过').map(e=>e.pass),[1,2]);
+  f.service.approve(f.user,f.task,orderProgramHash(f.task));await f.service.execute(f.user,f.task);
+  const executed=f.user.orderExecutionLogs[0];assert.equal(executed.kind,'execute');assert.equal(executed.status,'paid');assert.ok(executed.result.submissionStartedAt);assert.ok(executed.result.paymentStartedAt);assert.ok(executed.events.some(e=>e.action==='订单提交前记录'));assert.ok(executed.events.some(e=>e.action==='付款前记录'));assert.equal(f.commits,1);assert.equal(f.payments,1);
+});
+test('浏览器启动认证失败仍保留生成日志和错误代码，既不调用 AI 也不丢失阶段',async()=>{
+  const f=fixture();f.setLoginError(Object.assign(new Error('proxy authentication failed'),{code:'PROXY_AUTH_FAILED'}));await assert.rejects(f.service.generate(f.user,f.task));
+  const log=f.user.orderExecutionLogs[0];assert.equal(log.status,'failed');assert.equal(log.result.error.code,'PROXY_AUTH_FAILED');assert.ok(log.events.some(e=>e.action==='浏览器执行失败'&&e.stage==='读取实际商品页面'&&e.error.code==='PROXY_AUTH_FAILED'));assert.equal(f.generated,0);assert.equal(f.commits,0);
+});
