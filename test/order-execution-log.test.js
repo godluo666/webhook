@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {buildShadowsocksUrl} from '../lib/shadowsocks.js';
-import {createOrderExecutionLogs,diagnosticError,diagnosticPage} from '../lib/order-execution-log.js';
+import {createOrderExecutionLogs,diagnosticError,diagnosticPage,diagnosticAIInput,diagnosticAIOutput} from '../lib/order-execution-log.js';
 
 const fixture=()=>({id:'owner',settings:{aiKey:'ai-key-private',sourceProxy:'http://proxy-user:proxy-password@proxy.example:8080'},monitors:[{id:'m',label:'监控 A'},{id:'other'}],orderAccounts:[{monitorId:'m',credentials:{username:'site-private-user',password:'site-private-password'},session:{state:{cookies:[{name:'session',value:'cookie-private-value'}]},sessionStorage:{auth:'storage-private-value'},redactions:['otp-private-value']}}],orderTasks:[{id:'task',monitorId:'m',credentials:{password:'task-private-value'}}]});
 test('执行日志在写入和导出时隐藏凭据、Cookie、存储、请求体和 URL 令牌',()=>{
@@ -45,4 +45,36 @@ test('诊断日志存盘失败不改变执行结果，错误和页面摘要不�
 test('Shadowsocks 节点、密码及编码认证信息不会出现在日志里',()=>{
   const user=fixture(),password='ss-private-password',node=buildShadowsocksUrl({server:'node.example',port:8388,method:'aes-256-gcm',password}),store=createOrderExecutionLogs({sourceOptions:()=>({proxyUrl:node})});
   const log=store.start(user,'m',{kind:'generate'});log.event('代理认证失败',{detail:node+' '+password+' '+Buffer.from('aes-256-gcm:'+password).toString('base64url')});log.finish('failed');const text=JSON.stringify(store.report(user,'m'));assert.ok(!text.includes(password));assert.ok(!text.includes(node));assert.ok(!text.includes(Buffer.from('aes-256-gcm:'+password).toString('base64url')));assert.equal(store.report(user,'m').operations[0].network.type,'shadowsocks');
+});
+
+test('新版导出包含上海时间、请求及失败摘要，事件名称不被计划动作覆盖',()=>{
+  const user=fixture(),store=createOrderExecutionLogs(),log=store.start(user,'m',{kind:'discover'});
+  log.event('AI 请求开始',{requestId:'request-1',stage:'页面规划',attempt:1});
+  log.event('AI 请求超时，重新请求',{requestId:'request-1',stage:'页面规划',attempt:1});
+  log.event('AI 请求开始',{requestId:'request-1',stage:'页面规划',attempt:2});
+  log.event('动态计划',{action:'click',reason:'进入配置',sequence:999,at:'2026-10-07T16:00:00.000Z'});
+  const failure=Object.assign(new Error('定位失败'),{code:'AGENT_ELEMENT_MISSING',stage:'页面规划',timeoutMs:120000,locatorAttempts:[{strategy:'aria',matchCount:2,outcome:'ambiguous'}]});
+  log.event('动态步骤失败',{step:3,error:diagnosticError(failure),recovery:{allowed:true}});
+  log.event('重新观察并修复',{attempt:1});log.finish('failed',{error:failure});
+  const report=store.report(user,'m'),operation=report.operations[0];
+  assert.equal(report.schemaVersion,2);assert.equal(report.timeZone,'Asia/Shanghai');assert.match(report.exportedAt,/\+08:00$/);
+  for(const event of operation.events){assert.match(event.at,/\+08:00$/);assert.equal(typeof event.operationElapsedMs,'number');assert.ok(event.level);}
+  const planned=operation.events.find(event=>event.action==='动态计划');assert.equal(planned.stepAction,'click');assert.notEqual(planned.sequence,999);assert.equal(planned.sourceAt,'2026-10-08T00:00:00.000+08:00');
+  assert.equal(operation.diagnostics.aiAttempts,2);assert.equal(operation.diagnostics.aiRequests,1);assert.equal(operation.diagnostics.aiTimeouts,1);assert.equal(operation.diagnostics.recoveryAttempts,1);
+  assert.equal(operation.diagnostics.lastFailure.error.code,'AGENT_ELEMENT_MISSING');assert.equal(operation.diagnostics.lastFailure.error.timeoutMs,120000);assert.equal(operation.diagnostics.lastFailure.error.locatorAttempts[0].outcome,'ambiguous');
+});
+test('详细日志超过 500 条时完整导出已保留事件并含最终结果',()=>{
+  const user=fixture(),store=createOrderExecutionLogs(),log=store.start(user,'m',{kind:'discover'});
+  for(let i=0;i<700;i++)log.event('步骤',{step:i});
+  log.finish('prepared',{result:{status:'prepared',review:{total:10,currency:'USD'}}});
+  const report=store.report(user,'m'),operation=report.operations[0];
+  assert.equal(operation.events.length,user.orderExecutionLogs[0].events.length);assert.equal(operation.events.length,702);
+  assert.equal(operation.events.at(-1).action,'操作结束');assert.equal(operation.diagnostics.droppedEvents,0);assert.equal(report.retention.maxEventsPerOperation,1200);assert.equal(report.retention.maxBytesPerOperation,512*1024);
+});
+test('AI 诊断摘要保留页面规模和语义计划，不记录页面 HTML、输入值或图片',()=>{
+  const messages=[{role:'system',content:'planner'},{role:'user',content:[{type:'text',text:JSON.stringify({page:{url:'https://shop.example/product',title:'Product',html:'private-page-value',text:'private-text-value',elements:[{value:'private-input-value'}]},history:[{}],context:{submissionStarted:false,credentials:{password:'private-password'}}})},{type:'image_url',image_url:{url:'data:image/png;base64,private-image'}}]}];
+  const input=diagnosticAIInput(messages),output=diagnosticAIOutput({action:'fill',reason:'填写数量',target:{meaning:'quantity',ref:'e1',confidence:0.95},value:'private-fill-value'});
+  assert.equal(input.imageCount,1);assert.equal(input.page.elementCount,1);assert.equal(input.page.htmlChars,18);assert.equal(output.target.ref,'e1');assert.equal(output.valueLength,18);
+  for(const secret of ['private-page-value','private-text-value','private-input-value','private-password','private-image','private-fill-value'])assert.ok(!JSON.stringify({input,output}).includes(secret));
+  assert.doesNotThrow(()=>diagnosticAIOutput({configuration:'malformed',bindings:null}));
 });

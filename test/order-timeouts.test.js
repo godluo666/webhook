@@ -18,7 +18,8 @@ test('AI 超时仅重试本次请求，迟到回复不能影响返回，且传�
     if(++calls===1){options.signal.addEventListener('abort',()=>aborted++);return new Promise(()=>{});}
     return {action:'review'};
   },{},[],{timeoutMs:25,retryDelayMs:1,onEvent:(action,data)=>events.push({action,...data})});
-  assert.deepEqual(result,{action:'review'});assert.equal(calls,2);assert.equal(aborted,1);assert.equal(events[0].nextAttempt,2);
+  assert.deepEqual(result,{action:'review'});assert.equal(calls,2);assert.equal(aborted,1);assert.equal(events.find(event=>event.action==='AI 请求超时，重新请求').nextAttempt,2);
+  const starts=events.filter(event=>event.action==='AI 请求开始');assert.equal(starts.length,2);assert.equal(starts[0].requestId,starts[1].requestId);assert.equal(events.at(-1).action,'AI 响应完成');assert.equal(events.at(-1).response.action,'review');
 });
 test('AI 上游 TimeoutError 被翻译为带阶段的错误，达到上限停止',async()=>{
   let calls=0;await assert.rejects(requestOrderAI(async()=>{calls++;throw new DOMException('The operation was aborted due to timeout','TimeoutError');},{},[],{timeoutMs:50,retryDelayMs:1,stage:'生成业务 SOP'}),error=>{
@@ -30,7 +31,7 @@ test('手动取消 AI 请求或重试等待立即停止，不再发送请求',as
   const pending=requestOrderAI(async()=>{calls++;return new Promise(()=>{});},{},[],{signal:controller.signal,timeoutMs:200,retryDelayMs:1});
   controller.abort(new Error('用户停止试跑'));await assert.rejects(pending,/用户停止/);assert.ok(calls<=1);
   const backoff=new AbortController();
-  const retry=requestOrderAI(async()=>{throw new DOMException('timeout','TimeoutError');},{},[],{signal:backoff.signal,timeoutMs:200,retryDelayMs:1000,onEvent:()=>backoff.abort(new Error('停止重试'))});
+  const retry=requestOrderAI(async()=>{throw new DOMException('timeout','TimeoutError');},{},[],{signal:backoff.signal,timeoutMs:200,retryDelayMs:1000,onEvent:action=>{if(action==='AI 请求超时，重新请求')backoff.abort(new Error('停止重试'));}});
   await assert.rejects(retry,/停止重试/);
 });
 test('认证和无效模型结果不作为超时重试',async()=>{
@@ -87,4 +88,11 @@ test('动态探索整体预算约束观察和规划，忽略取消的迟到计�
   const program=validateOrderProgram({summary:'Explore',workflow:{version:2,requirements:[]}});
   await assert.rejects(runCommerceAgent(program,{},session,{timeoutMs:20,plan:async()=>{await delay(60);return {action:'click',reason:'Next',target:target('next','e0')};}}),{code:'AGENT_BUDGET_EXCEEDED'});
   await delay(80);assert.equal(acted,0);assert.ok(ttl>=15000);
+});
+
+test('AI 诊断记录 HTTP 和响应信息，日志回调失败不影响原响应或请求次数',async()=>{
+  const events=[];let calls=0;
+  const result=await requestOrderAI(async(_user,_messages,{onMetadata})=>{calls++;onMetadata({httpStatus:200,usage:{total_tokens:50}});return {action:'stop',reason:'真实输入缺失'};},{settings:{aiModel:'fixture',aiBaseUrl:'https://ai.example/v1'}},[],{onEvent:(action,data)=>events.push({action,...data})});
+  assert.equal(result.action,'stop');assert.equal(calls,1);assert.equal(events.find(event=>event.action==='AI 传输信息').httpStatus,200);assert.equal(events.at(-1).response.reason,'真实输入缺失');
+  await assert.doesNotReject(requestOrderAI(async()=>({configuration:'malformed'}),{},[],{onEvent:()=>{throw new Error('log unavailable');}}));
 });

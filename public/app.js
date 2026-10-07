@@ -101,6 +101,13 @@ const isNtfyHook = (hook) => hook.format === 'ntfy' || (!hook.format || hook.for
 const selectedIds = (root) => [...root.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value);
 const hasNtfyTarget = (ids) => activeHooks().some((hook) => ids.includes(hook.id) && isNtfyHook(hook));
 
+const shanghaiLogFormatter=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,hourCycle:'h23'});
+function shanghaiLogTime(value){const date=new Date(value);return Number.isFinite(date.getTime())?shanghaiLogFormatter.format(date).replace(',','.'):'';}
+function shanghaiLogRecord(value){
+  if(Array.isArray(value))return value.map(shanghaiLogRecord);
+  if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).map(([key,item])=>[key,typeof item==='string'&&/^(?:at|.*At|.*_at)$/.test(key)&&/^\d{4}-\d{2}-\d{2}T/.test(item)&&shanghaiLogTime(item)?shanghaiLogTime(item).replace(' ','T')+'+08:00':shanghaiLogRecord(item)]));
+  return value;
+}
 function relativeTime(timestamp) {
   if (!timestamp) return '尚未检查';
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(timestamp).getTime()) / 60000));
@@ -384,7 +391,7 @@ function renderLogs() {
   const logs = $('#log-errors-only').checked ? all.filter(entry => entry.status === 'error') : all;
   $('#log-count').textContent = '显示 ' + logs.length + ' 条';
   const list = $('#log-list'), scrollTop = list.scrollTop;
-  setListMarkup(list, logs.length ? logs.map(entry => '<div class="log-row ' + (entry.status === 'error' ? 'log-error' : '') + '"><strong>' + escapeHtml({ monitor: '检查', webhook: '发送', simulation: '模拟发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接', 'proxy-test': '代理测试' }[entry.kind] || entry.kind) + ' · ' + (entry.status === 'error' ? '失败' : '成功') + '</strong><span>' + escapeHtml(new Date(entry.at).toLocaleString('zh-CN')) + ' · ' + escapeHtml(entry.durationMs) + ' ms</span><p>' + escapeHtml(entry.detail) + '</p>' + (entry.url ? '<small>' + escapeHtml(entry.url) + '</small>' : '') + (entry.raw ? '<button type="button" class="mini-button" data-view-log="' + escapeHtml(entry.id) + '">查看原始记录</button>' : '') + '</div>').join('') : '<p class="field-help">没有符合条件的日志。</p>');
+  setListMarkup(list, logs.length ? logs.map(entry => '<div class="log-row ' + (entry.status === 'error' ? 'log-error' : '') + '"><strong>' + escapeHtml({ monitor: '检查', webhook: '发送', simulation: '模拟发送', parse: '解析', preview: '来源测试', 'ai-test': 'AI 连接', 'proxy-test': '代理测试' }[entry.kind] || entry.kind) + ' · ' + (entry.status === 'error' ? '失败' : '成功') + '</strong><span>' + escapeHtml(shanghaiLogTime(entry.at)+' 上海时间') + ' · ' + escapeHtml(entry.durationMs) + ' ms</span><p>' + escapeHtml(entry.detail) + '</p>' + (entry.url ? '<small>' + escapeHtml(entry.url) + '</small>' : '') + (entry.raw ? '<button type="button" class="mini-button" data-view-log="' + escapeHtml(entry.id) + '">查看原始记录</button>' : '') + '</div>').join('') : '<p class="field-help">没有符合条件的日志。</p>');
   list.scrollTop = scrollTop;
 }
 document.addEventListener('click', event => {
@@ -393,7 +400,7 @@ document.addEventListener('click', event => {
   const entry = (appState.logs || []).find(item => item.id === button.dataset.viewLog);
   if (!entry?.raw) return;
   const dialog = ruleDialog('原始记录');
-  dialog.querySelector('.rule-dialog-body').innerHTML = '<button type="button" class="mini-button" data-copy-log="' + escapeHtml(entry.id) + '">复制原始记录</button><pre class="raw-record">' + escapeHtml(JSON.stringify(entry.raw, null, 2)) + '</pre>';
+  dialog.querySelector('.rule-dialog-body').innerHTML = '<button type="button" class="mini-button" data-copy-log="' + escapeHtml(entry.id) + '">复制原始记录</button><pre class="raw-record">' + escapeHtml(JSON.stringify(shanghaiLogRecord(entry.raw), null, 2)) + '</pre>';
 });
 
 function render(force = false, resetEditorId) {
@@ -481,7 +488,7 @@ document.addEventListener('click', (event) => {
   if (!button) return;
   const entry = (appState.logs || []).find((item) => item.id === button.dataset.copyLog);
   if (!entry?.raw) return;
-  copyText(JSON.stringify(entry.raw, null, 2)).then(() => toast('原始记录已复制')).catch(() => toast('复制失败，请手动选择日志内容', true));
+  copyText(JSON.stringify(shanghaiLogRecord(entry.raw), null, 2)).then(() => toast('原始记录已复制')).catch(() => toast('复制失败，请手动选择日志内容', true));
 });
 
 function populateSettings() {

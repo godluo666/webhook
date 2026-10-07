@@ -106,7 +106,7 @@ try{
   const executable=process.env.MONITOR_BROWSER_EXECUTABLE||(process.platform==='win32'?'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe':'/usr/bin/chromium');
   child=spawn(process.execPath,['server.js'],{cwd:root,windowsHide:true,stdio:'ignore',env:{...process.env,DATA_DIR:dataDir,HOST:'127.0.0.1',PORT:String(port),MONITOR_BROWSER_EXECUTABLE:executable,ORDER_AI_TIMEOUT_MS:'1000',RESEND_API_KEY:'',MAIL_FROM:'',SIGNUP_CODE:''}});
   for(let i=0;i<100;i++){try{if((await fetch(base+'/api/auth/status')).ok)break;}catch{}await pause(50);}
-  browser=await chromium.launch({executablePath:executable,headless:true,args:['--no-sandbox']});const context=await browser.newContext({viewport:{width:1440,height:1000}});
+  browser=await chromium.launch({executablePath:executable,headless:true,args:['--no-sandbox']});const context=await browser.newContext({viewport:{width:1440,height:1000},timezoneId:'America/Los_Angeles'});
   await context.route(/\/api\/order-tasks\/[^/]+$/,async route=>{if(route.request().method()==='GET'&&droppedProgress===0){droppedProgress++;await route.abort('failed');}else await route.continue();});
   const post=async(endpoint,data={})=>{const r=await context.request.post(base+endpoint,{data});assert.ok(r.ok(),await r.text());return r.json();};
   const state=()=>context.request.get(base+'/api/state').then(r=>r.json());
@@ -197,12 +197,17 @@ try{
   const readLogs=async()=>{const response=await context.request.get(base+orderLogPath);assert.ok(response.ok());return (await response.json()).report;};
   await page.locator('[data-order-log-action="view"]').click();await page.waitForFunction(()=>document.querySelector('[data-order-log-content]')?.value.includes('webhook-radar/order-execution-log'));
   let logReport=JSON.parse(await page.locator('[data-order-log-content]').inputValue());
+  assert.equal(logReport.timeZone,'Asia/Shanghai');assert.equal(logReport.schemaVersion,2);assert.match(logReport.exportedAt,/\+08:00$/);
+  for(const operation of logReport.operations){assert.match(operation.startedAt,/\+08:00$/);for(const event of operation.events)assert.match(event.at,/\+08:00$/);}
+  const aiStart=logReport.operations.flatMap(operation=>operation.events).find(event=>event.action==='AI 请求开始');assert.ok(aiStart.requestId);assert.equal(aiStart.model,'fixture');assert.ok(aiStart.input.textChars>0);
+  assert.ok(logReport.operations.some(operation=>operation.events.some(event=>event.action==='AI 传输信息'&&event.httpStatus===200)));
   assert.ok(logReport.operations.some(log=>log.kind==='login-save'&&log.status==='saved'));const generationLog=logReport.operations.find(log=>log.kind==='generate'&&log.taskId===task.id);assert.equal(generationLog.status,'passed');assert.deepEqual(generationLog.events.filter(event=>event.action==='试跑通过').map(event=>event.pass),[1,2]);assert.ok(generationLog.program.workflow.prepareCode);
   for(const secret of [username,password,'logged-in'])assert.ok(!JSON.stringify(logReport).includes(secret));
   const writesBeforeLog=createdOrders,paymentsBeforeLog=paymentRequests,aiBeforeLog=aiRequests.length;
   await page.evaluate(()=>Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copiedOrderLog=text;}}}));
   await page.locator('[data-order-log-action="copy"]').click();await page.waitForFunction(()=>window.__copiedOrderLog?.includes('webhook-radar/order-execution-log'));assert.equal(await page.evaluate(()=>window.__copiedOrderLog),await page.locator('[data-order-log-content]').inputValue());
-  const downloading=page.waitForEvent('download');await page.locator('[data-order-log-action="download"]').click();const download=await downloading;assert.ok(download.suggestedFilename().endsWith('.txt'));const downloaded=JSON.parse(await fs.readFile(await download.path(),'utf8'));await download.delete();assert.equal(downloaded.format,'webhook-radar/order-execution-log');assert.deepEqual(downloaded.operations,(await readLogs()).operations);
+  const downloading=page.waitForEvent('download');await page.locator('[data-order-log-action="download"]').click();const download=await downloading;assert.ok(download.suggestedFilename().endsWith('-Asia-Shanghai.txt'));const downloaded=JSON.parse(await fs.readFile(await download.path(),'utf8'));await download.delete();assert.equal(downloaded.format,'webhook-radar/order-execution-log');assert.deepEqual(downloaded.operations,(await readLogs()).operations);assert.equal(downloaded.timeZone,'Asia/Shanghai');
+  assert.ok(await page.locator('.order-trace time').count());const displayTime=await page.locator('.order-trace time').first().textContent();assert.match(displayTime,/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}/);
   await page.locator('[data-order-log-action="refresh"]').click();assert.equal(createdOrders,writesBeforeLog);assert.equal(paymentRequests,paymentsBeforeLog);assert.equal(aiRequests.length,aiBeforeLog);assert.ok(!Object.hasOwn(await state(),'orderExecutionLogs'));
   const logScreenshots=process.env.UI_SMOKE_SCREENSHOT_DIR?path.resolve(process.env.UI_SMOKE_SCREENSHOT_DIR):path.join(root,'release','orders-ui-smoke');await fs.mkdir(logScreenshots,{recursive:true});
   await page.setViewportSize({width:1440,height:1000});await page.locator('.order-execution-log').screenshot({path:path.join(logScreenshots,'desktop-execution-log.png')});

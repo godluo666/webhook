@@ -20,7 +20,7 @@
 | lib/order-browser.js | 接入观察、动态定位与成功验证；保留请求许可、金额/币种/数量核验及原订单绑定。 |
 | lib/orders.js | 接入业务 SOP、两次探索试跑、审批哈希、动态执行与经验学习。 |
 | lib/order-workflow.js | 校验 v2 数据契约，并兼容旧 v1 代码 SOP。 |
-| lib/order-execution-log.js | 记录语义动作、修复、证据 ID、审批、交易起始记录和订单编号。 |
+| lib/order-execution-log.js | 记录上海时间的 AI 请求/响应摘要、页面观察、定位候选结果、验证及恢复详情、证据 ID、审批、交易起始记录和订单编号。 |
 | server.js | 初始化持久化存储并提供探索、profile 和页面证据 API。 |
 | public/orders-ui.js | 展示业务 SOP、配置核验及探索结果；沿用用户确认启用节点。 |
 

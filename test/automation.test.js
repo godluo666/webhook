@@ -43,7 +43,7 @@ test('定位按 ARIA、文本、Label、Placeholder、Name、ID、CSS、XPath �
   const candidates=[],loc=(kind,count,marker)=>({count:async()=>{candidates.push(kind);return count;},getAttribute:async()=>marker,isVisible:async()=>true});
   const page={getByRole:()=>loc('aria',2),getByText:()=>loc('text',1,'stale:e0'),getByLabel:()=>loc('label',1,'now:e0'),locator:()=>loc('css',0)};
   const found=await resolveSemanticTarget(page,{observationId:'now',elements:[{ref:'e0',role:'button',accessibleName:'Buy',text:'Buy',label:'Buy',visible:true}]},target('purchase'));
-  assert.equal(found.strategy,'label');assert.deepEqual(candidates,['aria','text','label']);
+  assert.equal(found.strategy,'label');assert.deepEqual(candidates,['aria','text','label']);assert.deepEqual(found.attempts.map(attempt=>attempt.outcome),['ambiguous','different_observed_element','matched']);
 });
 test('每步重新观察，购物车必须核验商品和数量，不能凭点击宣称成功',async()=>{
   const session=sessionFixture(),steps=[{action:'cart',reason:'Enter cart',target:target('add_to_cart')},{action:'verify_cart',reason:'Check actual cart',bindings:{product:target('product'),quantity:target('quantity','e1')}},review()];
@@ -123,3 +123,16 @@ test('探索通过两次试跑才开放用户确认，动态执行仍绑定原�
 });
 
 test('探索保留付款意图供试跑核验，只允许宿主 dryRun 会话',async()=>{const session=sessionFixture();session.dryRun=true;let mode;await discoverCommerceSite(program(),{...order,executionMode:'pay'},session,{plan:async({order})=>{mode=order.executionMode;return review();}});assert.equal(mode,'pay');session.dryRun=false;assert.throws(()=>discoverCommerceSite(program(),order,session,{}));});
+
+test('动态日志包含观察、完整计划、定位和最终验证，日志回调异常不改变核验结果',async()=>{
+  const session=sessionFixture(),events=[];
+  const result=await runCommerceAgent(program(),order,session,{plan:async()=>review(),onEvent:(action,data)=>events.push({action,...data})});
+  assert.equal(result.status,'prepared');assert.equal(events.find(event=>event.action==='页面观察').page.observationId,'page-1');
+  const planned=events.find(event=>event.plan);assert.equal(planned.plan.bindings.submit.ref,'e0');
+  const completed=events.filter(event=>event.receipt?.status==='prepared');assert.equal(completed.length,1);assert.equal(completed[0].receipt.review.total,10);assert.equal(typeof completed[0].durationMs,'number');
+  assert.equal(events.filter(event=>event.action==='语义定位').length,5);
+  const failed=sessionFixture(),value=program();value.workflow.requirements=[{name:'Cycle',value:'Yearly'}];const failures=[];
+  await assert.rejects(runCommerceAgent(value,order,failed,{autoRepair:false,plan:async()=>({...review(),configuration:[{name:'Cycle',target:target('billing_cycle')}]}),onEvent:(action,data)=>failures.push({action,...data})}),{code:'AGENT_CONFIGURATION_UNVERIFIED'});
+  assert.equal(failures.find(event=>event.action==='配置核验').observed,'Monthly');assert.equal(failures.find(event=>event.action==='动态步骤失败').recovery.allowed,false);
+  const safe=sessionFixture();assert.equal((await runCommerceAgent(program(),order,safe,{plan:async()=>review(),onEvent:()=>{throw new Error('diagnostic unavailable');}})).status,'prepared');
+});

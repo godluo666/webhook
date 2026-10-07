@@ -112,7 +112,7 @@ try {
     executablePath, headless: true,
     args: ['--no-sandbox', '--disable-dev-shm-usage']
   });
-  context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId:'America/Los_Angeles' });
   // Public IP deployments over HTTP do not expose these secure-context APIs.
   await context.addInitScript(() => {
     Object.defineProperty(crypto, 'randomUUID', { configurable: true, value: undefined });
@@ -245,6 +245,8 @@ try {
   assert.equal(current.settings.aiBaseUrl, mockBase + '/v1');
 
   await navigate('activity');
+  const logTime=await page.locator('.log-row span').first().textContent();assert.match(logTime,/上海时间/);
+  const latestLog=(await state()).logs[0];const expectedTime=new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',fractionalSecondDigits:3,hourCycle:'h23'}).format(new Date(latestLog.at)).replace(',','.');assert.ok(logTime.includes(expectedTime));
   await page.locator('[data-view-log]').first().click();
   await page.locator('.rule-dialog [data-copy-log]').click();
   await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('已复制'));

@@ -1,3 +1,4 @@
+function dataDateForOrderLog(text){try{return JSON.parse(text).exportedAt||Date.now();}catch{return Date.now();}}
 async function loadOrderExecutionLog(panel,monitor,epoch){
   const data=await api('/api/monitors/'+encodeURIComponent(monitor)+'/order-execution-logs','GET',undefined,{signal:AbortSignal.timeout(10000)});
   if(!panel.isConnected||orderMonitorId!==monitor||orderEditorEpoch!==epoch)return null;
@@ -13,7 +14,7 @@ document.addEventListener('click',async event=>{
     if(action==='copy'){await copyText(text);toast('执行日志已复制，可以直接发来分析');}
     if(action==='download'){
       const blob=new Blob([text],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');
-      link.href=url;link.download='order-execution-'+new Date().toISOString().replace(/[:.]/g,'-')+'.txt';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('执行日志已下载');
+      link.href=url;link.download='order-execution-'+shanghaiLogTime(dataDateForOrderLog(text)).replace(/[ :.]/g,'-')+'-Asia-Shanghai'+'.txt';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('执行日志已下载');
     }
   });
 });

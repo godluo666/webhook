@@ -1,3 +1,4 @@
+import {shanghaiTimestamp,shanghaiLogTimes} from './lib/log-time.js';
 import {createSiteMemory} from './automation/agent/memory.js';
 import {createEvidenceStore} from './automation/logs/evidence.js';
 import { configureRuntimeTemp } from './lib/runtime-temp.js';
@@ -95,14 +96,15 @@ const orderService = createOrderService({
   executionLogs:orderExecutionLogs,
   isAccountBusy:(user,monitorId)=>orderAccountService?.busy(user,{id:monitorId})||false,
   persist: () => store.persist(), withProxy: withSourceProxy, sourceOptions,
-  requestAI: async (user, messages, {signal,timeoutMs=120000} = {}) => {
+  requestAI: async (user, messages, {signal,timeoutMs=120000,onMetadata=()=>{}} = {}) => {
     if (!user.settings.aiKey || !user.settings.aiModel) throw new Error('请先填写 AI API Key 和模型名称');
     const raw = await fetchText(aiEndpoint(user.settings.aiBaseUrl), {
       method: 'POST', timeout: timeoutMs, maxBytes: 100000, signal,
+      onResponse:httpStatus=>onMetadata({httpStatus}),
       headers: { authorization: 'Bearer ' + user.settings.aiKey, 'content-type': 'application/json' },
       body: JSON.stringify({ model: user.settings.aiModel, messages })
     });
-    try { return JSON.parse(String(JSON.parse(raw).choices?.[0]?.message?.content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
+    try { const response=JSON.parse(raw);onMetadata({responseId:response.id,model:response.model,usage:response.usage,finishReason:response.choices?.[0]?.finish_reason,responseChars:raw.length});return JSON.parse(String(response.choices?.[0]?.message?.content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
     catch { throw new Error('AI 未返回有效的下单代码，请重新生成'); }
   },
   notify: async (user, task) => {
@@ -170,7 +172,7 @@ function addEvent(user, type, title, detail, monitorId = null, persistNow = true
 
 function addLog(user, kind, status, detail, url, durationMs, monitorId = null, raw = null, persistNow = true) {
   const displayUrl = kind === 'webhook' && url ? `${new URL(url).origin}/…` : url;
-  user.logs.unshift({ id: randomUUID(), kind, status, detail: String(detail).slice(0, 500), url: displayUrl, durationMs, monitorId, raw, at: new Date().toISOString() });
+  user.logs.unshift({ id: randomUUID(), kind, status, detail: String(detail).slice(0, 500), url: displayUrl, durationMs, monitorId, raw:shanghaiLogTimes(raw), timeZone:'Asia/Shanghai', at:shanghaiTimestamp() });
   user.logs.length = Math.min(user.logs.length, 300);
   if (persistNow) persist();
 }

@@ -18,12 +18,15 @@ export async function resolveSemanticTarget(page,observation,target){
   const marker=observation.observationId+':'+element.ref;
   const runtimeSelector='[data-agent-ref='+JSON.stringify(marker)+']';
   const candidates=locatorCandidates({...element,runtimeSelector,runtimeXPath:'xpath=//*[@data-agent-ref='+JSON.stringify(marker)+']'});
+  const attempts=[];
   for(const candidate of candidates){
     const locator=candidate.strategy==='aria'?page.getByRole(candidate.role,{name:candidate.value,exact:true}):candidate.strategy==='text'?page.getByText(candidate.value,{exact:true}):candidate.strategy==='label'?page.getByLabel(candidate.value,{exact:true}):candidate.strategy==='placeholder'?page.getByPlaceholder(candidate.value,{exact:true}):candidate.strategy==='name'?page.locator('[name='+JSON.stringify(candidate.value)+']'):candidate.strategy==='id'?page.locator('[id='+JSON.stringify(candidate.value)+']'):page.locator(candidate.value);
-    if(await locator.count()!==1)continue;
-    if(await locator.getAttribute('data-agent-ref')!==marker)continue;
-    if(element.visible&&!await locator.isVisible())continue;
-    return {selector:runtimeSelector,strategy:candidate.strategy,meaning:target.meaning,confidence:target.confidence};
+    const matchCount=await locator.count();
+    if(matchCount!==1){attempts.push({strategy:candidate.strategy,matchCount,outcome:matchCount?'ambiguous':'missing'});continue;}
+    if(await locator.getAttribute('data-agent-ref')!==marker){attempts.push({strategy:candidate.strategy,matchCount,outcome:'different_observed_element'});continue;}
+    if(element.visible&&!await locator.isVisible()){attempts.push({strategy:candidate.strategy,matchCount,outcome:'hidden'});continue;}
+    attempts.push({strategy:candidate.strategy,matchCount,outcome:'matched'});
+    return {selector:runtimeSelector,strategy:candidate.strategy,meaning:target.meaning,confidence:target.confidence,attempts};
   }
-  throw agentError('AGENT_ELEMENT_MISSING','当前页面语义元素已变化或不唯一：'+target.meaning);
+  throw Object.assign(agentError('AGENT_ELEMENT_MISSING','当前页面语义元素已变化或不唯一：'+target.meaning),{locatorAttempts:attempts,target:{meaning:target.meaning,ref:target.ref,confidence:target.confidence}});
 }
