@@ -50,7 +50,7 @@ test('优惠码由宿主固定阶段应用后才提交；留空不应用、失�
   const calls=[];await runOrderWorkflow(p,{executionMode:'prepare',couponCode},{applyCoupon:async (fields,checks)=>{assert.deepEqual(fields,coupon);assert.deepEqual(checks,checkout);calls.push('coupon');},submit:async()=>{calls.push('review');return {status:'prepared'};}});
   assert.deepEqual(calls,couponCode?['coupon','review']:['review']);
  }
- await assert.rejects(runOrderWorkflow(p,{couponCode:'INVALID'},{applyCoupon:async()=>{throw new Error('优惠码无效');},submit:async()=>assert.fail('must not submit')}),/优惠码无效/);
+ for(const couponFailurePolicy of ['stop','continue'])await assert.rejects(runOrderWorkflow(p,{couponCode:'INVALID',couponFailurePolicy},{applyCoupon:async()=>{throw new Error('优惠码请求被拦截');},submit:async()=>assert.fail('must not submit')}),/优惠码请求被拦截/);
  await assert.rejects(runOrderWorkflow(program('function(o,b){b.applyCoupon({});return {ready:true};}'),{couponCode:'SAVE20'},{applyCoupon:async()=>assert.fail('must not apply'),submit:async()=>assert.fail('must not submit')}));
 });
 

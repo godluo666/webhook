@@ -1,3 +1,5 @@
+import {createSiteMemory} from './automation/agent/memory.js';
+import {createEvidenceStore} from './automation/logs/evidence.js';
 import { configureRuntimeTemp } from './lib/runtime-temp.js';
 import { findProxyProfile, selectedProxyUrl, saveProxyProfile } from './lib/proxy-profiles.js';
 import { ExpiringMap } from './lib/expiring-map.js';
@@ -86,7 +88,10 @@ function inspectMonitorService(user, monitor, plan) {
 const ruleService = createRuleService({ fetchSource, sourceOptions, inspectService: inspectRoutedService });
 const orderExecutionLogs=createOrderExecutionLogs({persist:()=>store.persist(),sourceOptions});
 let orderAccountService;
+const orderEvidence=createEvidenceStore({directory:path.join(dataDir,'automation','logs')});
 const orderService = createOrderService({
+  siteMemory:createSiteMemory({directory:path.join(dataDir,'automation','profiles')}),
+  saveEvidence:(user,task,evidence)=>orderEvidence.save(user.id+':'+task.id,evidence),
   executionLogs:orderExecutionLogs,
   isAccountBusy:(user,monitorId)=>orderAccountService?.busy(user,{id:monitorId})||false,
   persist: () => store.persist(), withProxy: withSourceProxy, sourceOptions,
@@ -1096,11 +1101,20 @@ async function handler(request, response) {
           user.orderTasks.unshift(task); persist(); return sendJson(response, 201, {task:publicOrderTask(task)});
         }
       }
-      const orderMatch = pathname.match(/^\/api\/order-tasks\/([^/]+)(?:\/(generate|enable|pause|run))?$/);
+      const orderEvidenceMatch=pathname.match(/^\/api\/order-tasks\/([^/]+)\/evidence\/([0-9a-f-]{36})(?:\.(png|json))?$/);
+      if(request.method==='GET'&&orderEvidenceMatch){
+        const task=user.orderTasks.find(item=>item.id===orderEvidenceMatch[1]);
+        if(!task)return sendJson(response,404,{error:'下单任务不存在'});
+        const format=orderEvidenceMatch[3]||'json';
+        try{const artifact=await orderEvidence.read(user.id+':'+task.id,orderEvidenceMatch[2],format);response.writeHead(200,{'content-type':format==='png'?'image/png':'application/json; charset=utf-8','cache-control':'no-store'});return response.end(artifact);}
+        catch(error){if(error.code==='ENOENT')return sendJson(response,404,{error:'页面证据不存在或已过期'});throw error;}
+      }
+      const orderMatch = pathname.match(/^\/api\/order-tasks\/([^/]+)(?:\/(generate|discover|profile|enable|pause|run))?$/);
       if (orderMatch) {
         const task = user.orderTasks.find(t=>t.id===orderMatch[1]);
         if (!task) return sendJson(response, 404, {error:'下单任务不存在'});
         const action = orderMatch[2], body = ['PUT','POST'].includes(request.method) ? await readJson(request) : {};
+        if(request.method==='GET'&&action==='profile')return sendJson(response,200,{profile:await orderService.profile(user,task)});
         if (request.method === 'POST' && action === 'pause') return sendJson(response,200,{task:orderService.pause(user,task)});
         if (orderService.isBusy(user, task)) return sendJson(response, 409, {error:'任务正在执行，请等待结束后修改'});
         if (request.method === 'PUT' && !action) {
@@ -1111,9 +1125,9 @@ async function handler(request, response) {
           Object.assign(task, next); persist(); return sendJson(response, 200, {task:publicOrderTask(task)});
         }
         if (request.method === 'DELETE' && !action) { user.orderTasks=user.orderTasks.filter(t=>t!==task);persist();return sendJson(response,200,{ok:true}); }
-        if (request.method === 'POST' && action === 'generate') {
+        if (request.method === 'POST' && ['generate','discover'].includes(action)) {
           if (task.result || task.submissionStartedAt) throw new Error('已有执行记录，请创建新的下单任务');
-          await orderService.generate(user,task); return sendJson(response,200,{task:publicOrderTask(task)});
+          await orderService[action](user,task); return sendJson(response,200,{task:publicOrderTask(task)});
         }
         if (request.method === 'POST' && action === 'enable') return sendJson(response,200,{task:orderService.approve(user,task,body.codeHash)});
         if (request.method === 'POST' && action === 'run') return sendJson(response,200,{task:await orderService.execute(user,task,{manual:true})});

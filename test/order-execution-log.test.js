@@ -5,18 +5,18 @@ import {createOrderExecutionLogs,diagnosticError,diagnosticPage} from '../lib/or
 
 const fixture=()=>({id:'owner',settings:{aiKey:'ai-key-private',sourceProxy:'http://proxy-user:proxy-password@proxy.example:8080'},monitors:[{id:'m',label:'监控 A'},{id:'other'}],orderAccounts:[{monitorId:'m',credentials:{username:'site-private-user',password:'site-private-password'},session:{state:{cookies:[{name:'session',value:'cookie-private-value'}]},sessionStorage:{auth:'storage-private-value'},redactions:['otp-private-value']}}],orderTasks:[{id:'task',monitorId:'m',credentials:{password:'task-private-value'}}]});
 test('执行日志在写入和导出时隐藏凭据、Cookie、存储、请求体和 URL 令牌',()=>{
-  const user=fixture(),store=createOrderExecutionLogs({sourceOptions:()=>({proxyUrl:user.settings.sourceProxy})}),task={...user.orderTasks[0],url:'https://shop.example/clientarea.php?token=url-only-secret',quantity:1,maxTotal:10};
+  const user=fixture(),store=createOrderExecutionLogs({sourceOptions:()=>({proxyUrl:user.settings.sourceProxy})}),task={...user.orderTasks[0],url:'https://shop.example/clientarea.php?token=url-only-secret',quantity:1,maxTotal:10,couponCode:'SAVE20',couponFailurePolicy:'continue'};
   const log=store.start(user,'m',{kind:'execute',task});
   log.program({summary:'按实际页面核对',workflow:{version:1,prepareCode:'function(o,b){b.goto("/cart.php?a=view&key=relative-url-secret");return {ready:true};}'},checkout:{submitSelector:'#finish'}},'f'.repeat(64));
   log.event('请求失败',{error:diagnosticError(new Error('site-private-user site-private-password ai-key-private cookie-private-value storage-private-value otp-private-value task-private-value http://proxy-user:proxy-password@proxy.example:8080 Basic cHJveHk6c2VjcmV0 /pay?token=relative-token-secret {"password":"json-field-secret"}')),
     page:diagnosticPage({url:task.url,controls:[{tag:'input',id:'invoice',name:'invoiceid',value:'never-log-input',text:'never-log-page-body'},{tag:'a',href:'/account?key=control-url-secret'}]}),headers:{cookie:'never-log-header'},requestBody:'never-log-body',cookies:['never-log-cookie']});
-  log.finish('failed');
+  log.finish('failed',{result:{status:'prepared',review:{total:10,couponFailure:{code:'SAVE20',status:'unverified',failurePolicy:'continue',reason:'无法确认优惠生效'}}}});
   for(const value of [user.orderExecutionLogs,store.report(user,'m')]){
     const text=JSON.stringify(value);
     for(const secret of ['site-private-user','site-private-password','ai-key-private','cookie-private-value','storage-private-value','otp-private-value','task-private-value','proxy-user','proxy-password','url-only-secret','relative-url-secret','relative-token-secret','control-url-secret','cHJveHk6c2VjcmV0','never-log-input','never-log-page-body','never-log-header','never-log-body','never-log-cookie','json-field-secret'])assert.ok(!text.includes(secret),secret);
     assert.ok(text.includes('a=view'));assert.ok(text.includes('#finish'));
   }
-  assert.equal(store.report(user,'m').operations[0].network.type,'http_proxy');assert.equal(store.report(user,'m').operations[0].context.quantity,1);const basic=store.start(user,'m',{kind:'generate',task:{product:'Basic Plan'}});basic.finish('passed');assert.equal(store.report(user,'m').operations[0].context.product,'Basic Plan');
+  assert.equal(store.report(user,'m').operations[0].network.type,'http_proxy');assert.equal(store.report(user,'m').operations[0].context.quantity,1);assert.equal(store.report(user,'m').operations[0].context.couponFailurePolicy,'continue');assert.equal(store.report(user,'m').operations[0].result.receipt.review.couponFailure.status,'unverified');const basic=store.start(user,'m',{kind:'generate',task:{product:'Basic Plan'}});basic.finish('passed');assert.equal(store.report(user,'m').operations[0].context.product,'Basic Plan');
 });
 test('日志限制操作数量、事件数量和字节数，保留最终结果并明确标记截断',()=>{
   const user=fixture(),store=createOrderExecutionLogs({maxRecords:3,maxEvents:4,maxBytes:4096});

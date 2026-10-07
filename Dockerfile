@@ -25,6 +25,7 @@ COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node server.js ./
 COPY --chown=node:node lib ./lib
+COPY --chown=node:node automation ./automation
 COPY --chown=node:node public ./public
 
 # Durable accounts/orders stay in .data; transient Chromium/proxy writes use /tmp.
