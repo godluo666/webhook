@@ -140,10 +140,26 @@ try{
   assert.equal((await state()).orderAccounts[0].status,'expired');assert.doesNotMatch(await page.locator('#order-account-status').innerText(),/登录状态已保存|正在验证/);
   expired=false;await page.locator('[data-order-account-action="check"]').click();await page.waitForFunction(()=>document.querySelector('#order-account-status')?.textContent.includes('登录状态已保存'));console.log('PASS failed login check displays authoritative account state and recovers without reopening login');
   const fillForm=async(label,max=20,mode='submit',aff='')=>{await page.locator('#order-label').fill(label);await page.locator('#order-product').fill('Product A');await page.locator('#order-url').fill(sourceBase+'/product');await page.locator('#order-max-total').fill(String(max));await page.locator('#order-affiliate-url').fill(aff);await page.locator('[data-order-mode="'+mode+'"]').click();};
-  const generate=async()=>{await page.locator('[data-order-editor-action="generate"]').click();await page.locator('[data-order-editor-action="enable"]').waitFor({timeout:90000});};
+  const generate=async()=>{
+    const finished=page.waitForResponse(response=>/\/api\/order-tasks\/[^/]+\/generate$/.test(new URL(response.url()).pathname)&&response.request().method()==='POST',{timeout:90000});
+    await page.locator('[data-order-editor-action="generate"]').click();
+    try{const response=await finished;assert.equal(response.status(),200,await response.text());await page.locator('[data-order-editor-action="enable"]').waitFor();}
+    catch(error){const logs=await context.request.get(base+'/api/monitors/'+monitor.id+'/order-execution-logs');console.error('Generation diagnostics:',JSON.stringify(await logs.json()));throw error;}
+  };
   const enable=async()=>{await page.locator('[data-order-editor-action="enable"]').click();await page.locator('[data-order-editor-action="run"]').waitFor();};
-  const newConfig=async()=>{await page.locator('[data-order-editor-action="new"]').click();};
-  const run=async()=>{await page.locator('[data-order-editor-action="run"]').click();await page.locator('[data-order-editor-action="new"]').waitFor({timeout:90000});};
+  const newConfig=async()=>{
+    if(await page.locator('[data-order-editor-action="new"]').count()){await page.locator('[data-order-editor-action="new"]').click();return;}
+    // Pre-submit failures now reuse their configuration instead of inventing an order.
+    const task=(await state()).orderTasks[0];assert.equal(task.status,'needs_validation');assert.equal(task.result,null);assert.equal(task.submissionStartedAt,undefined);
+    await page.locator('[data-order-editor-action="generate"]').waitFor();
+  };
+  const run=async()=>{
+    const finished=page.waitForResponse(response=>/\/api\/order-tasks\/[^/]+\/run$/.test(new URL(response.url()).pathname)&&response.request().method()==='POST',{timeout:90000});
+    await page.locator('[data-order-editor-action="run"]').click();const response=await finished;assert.equal(response.status(),200);const task=(await response.json()).task;
+    if(task.status==='needs_validation'){assert.equal(task.result,null);assert.equal(task.approvedHash,null);assert.equal(task.submissionStartedAt,undefined);await page.locator('[data-order-editor-action="generate"]').waitFor();assert.match(await page.locator('.order-validation').innerText(),/没有发送订单/);}
+    else await page.locator('[data-order-editor-action="new"]').waitFor({timeout:90000});
+    console.log('PASS execution outcome: '+task.label+' → '+task.status);
+  };
   await fillForm('Product A 自动下单',20,'submit',sourceBase+'/aff?aff=partner-42');
   assert.equal(await page.locator('#order-coupon-code').inputValue(),'');
   await page.locator('#order-coupon-code').fill('Save-UI20');const savedCoupon=page.waitForResponse(response=>new URL(response.url()).pathname==='/api/order-tasks'&&response.request().method()==='POST');

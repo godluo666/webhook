@@ -25,9 +25,9 @@ test('下单配置拒绝无限预算、无效数量、带凭据的 URL；付款�
   assert.equal(task.enabled,false);assert.equal(JSON.stringify(publicOrderTask(task)).includes('private-site-secret'),false);
   assert.deepEqual(validateOrderTask({...input,url:'https://another-shop.example/a'},task).credentials,{});
 });
-function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false,paymentStructure=false,assistanceCode=null,trialAuthError=null}={}){
+function fixture({uncertain=false,fake=false,pay=false,paymentFailure=false,paymentUnknown=false,insufficientBalance=false,paymentStructure=false,assistanceCode=null,trialAuthError=null,generatedProgram=null}={}){
   const task=validateOrderTask({...input,executionMode:pay?'pay':input.executionMode}),user={id:'user-a',orderAccounts:[{monitorId:'monitor-a',loginUrl:input.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:input.url}}}],monitors:[{id:'monitor-a',kind:'webpage'}],orderTasks:[task]};let generated=0,commits=0,writes=0,payments=0,loginError=null,missingPayment=paymentStructure,opened=0;
-  const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));if(JSON.parse(messages[1].content).phase==='payment')return {summary:'从原账单真实 DOM 恢复付款定位',paymentCode:assistanceCode||'function(){return {checks:{}};}'};return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
+  const service=createOrderService({persist:()=>writes++,requestAI:async(_user,messages)=>{generated++;assert.ok(messages[1].content.includes('actual-random-selector'));if(generatedProgram)return generatedProgram;if(JSON.parse(messages[1].content).phase==='payment')return {summary:'从原订单账单真实 DOM 恢复付款定位',paymentCode:assistanceCode||'function(){return {checks:{}};}'};return pay?{...program,code:'function(order,browser){browser.goto(order.url);const receipt=browser.submit();if(receipt.status==="prepared")return receipt;return browser.pay({});}'}:program;},runScript:executeOrderScript,
     openBrowser:async(current,options)=>{if(loginError)throw loginError;if(trialAuthError&&++opened===2)throw trialAuthError;const session={trace:[],receipt:null,snapshot:async()=>({text:'Product A USD 10',elements:[{id:'actual-random-selector'}]}),close:async()=>{},methods:{goto:async()=>true,submit:async()=>{
       if(current.dryRun||current.executionMode==='prepare'){session.trace.push({action:'核对'});session.receipt={status:'prepared',review:{product:current.product,quantity:1,total:10,currency:'USD'}};return session.receipt;}
       await options.onBeforeSubmit({product:current.product,quantity:1,total:10,currency:'USD'});commits++;session.trace.push({action:'提交'});
@@ -175,4 +175,20 @@ test('优惠码选填且保持大小写，拒绝非文本、超长和多行码�
  assert.equal(validateOrderTask(input).couponCode,'');assert.equal(validateOrderTask({...input,couponCode:'  Save-20  '}).couponCode,'Save-20');
  for(const couponCode of [20,{},'x'.repeat(129),'SAVE\n20','SAVE\u000020'])assert.throws(()=>validateOrderTask({...input,couponCode}),/优惠码/);
  const task=validateOrderTask(input),hash=orderProgramHash(task);task.couponCode='SAVE20';assert.notEqual(orderProgramHash(task),hash);task.couponCode='';assert.equal(orderProgramHash(task),hash);
+});
+test('无效付款代码不再取得试跑或启用资格，未产生订单',async()=>{
+ const f=fixture({pay:true,generatedProgram:{...program,workflow:{...program.workflow,paymentCode:'function(){return {checks: ;}'}}});
+ await assert.rejects(f.service.generate(f.user,f.task),error=>error.code==='ORDER_SCRIPT_INVALID');assert.equal(f.task.trial,null);assert.equal(f.commits,0);assert.equal(f.payments,0);assert.throws(()=>f.service.approve(f.user,f.task,orderProgramHash(f.task)));
+});
+test('缺货不会反复调用 AI，保留配置且不允许启用未完成的试跑',async()=>{
+ for(const generatedProgram of [{status:'out_of_stock'},{...program,workflow:{...program.workflow,prepareCode:'function(){return {status:"out_of_stock"};}'}}]){
+  const f=fixture({generatedProgram});await assert.rejects(f.service.generate(f.user,f.task),error=>error.code==='ORDER_OUT_OF_STOCK');assert.equal(f.generated,1);assert.equal(f.task.status,'waiting_stock');assert.equal(f.task.enabled,false);assert.equal(f.commits,0);assert.equal(f.task.validation.preflight,'waiting_stock');assert.throws(()=>f.service.approve(f.user,f.task,orderProgramHash(f.task)));
+ }
+});
+test('提交前临时登录失败可在同一配置重新验证，旧授权不能直接重试',async()=>{
+ const f=fixture();await f.service.generate(f.user,f.task);f.service.approve(f.user,f.task,orderProgramHash(f.task));
+ f.setLoginError(Object.assign(new Error('暂时无法确认登录'),{code:'ORDER_LOGIN_UNVERIFIED'}));await f.service.execute(f.user,f.task);
+ assert.equal(f.task.status,'needs_validation');assert.equal(f.task.result,null);assert.equal(f.task.trial,null);assert.equal(f.task.approvedHash,null);assert.equal(f.task.lastAttempt.code,'ORDER_LOGIN_UNVERIFIED');assert.equal(f.commits,0);
+ await assert.rejects(f.service.execute(f.user,f.task));
+ f.setLoginError(null);await f.service.generate(f.user,f.task);assert.equal(f.task.status,'ready');assert.equal(f.task.validation.preflight,'passed');f.service.approve(f.user,f.task,orderProgramHash(f.task));await f.service.execute(f.user,f.task);assert.equal(f.commits,1);
 });

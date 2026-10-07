@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {runOrderWorkflow,runOrderPaymentCode,validateOrderWorkflow} from '../lib/order-workflow.js';
 import {validateOrderProgram} from '../lib/orders.js';
+import {validateOrderScript} from '../lib/order-script.js';
 const checkout={submitSelector:'#submit',productSelector:'#product',quantitySelector:'#quantity',totalSelector:'#total',currencySelector:'#currency',confirmationSelector:'#confirmation'};
 const program=(prepareCode='function(){return {ready:true};}',paymentCode='function(){return {checks:{paySelector:"#pay"}};}')=>validateOrderProgram({summary:'配置后由宿主按 SOP 核对提交',checkout,workflow:{version:1,prepareCode,paymentCode}},{requireWorkflow:true});
 test('SOP 禁止商品准备脚本提交或付款，未就绪和歧义都停在财务操作前',async()=>{
@@ -53,4 +54,17 @@ test('零金额优惠订单保留确认结果，不运行付款定位或发起�
  const receipt={status:'awaiting_payment',review:{total:0},paymentPending:{reason:'zero_total'}};
  const p=program('function(){return {ready:true};}','function(){throw new Error("must not locate payment");}');
  assert.deepEqual(await runOrderWorkflow(p,{executionMode:'pay'},{submit:async()=>receipt,pay:async()=>assert.fail('must not pay')}),receipt);
+});
+test('付款定位语法必须在准备和提交前通过，编译不执行函数体',async()=>{
+ let prepared=0,submits=0;
+ const p=program('function(o,b){b.text("#item");return {ready:true};}','function(){return {checks: ;}');
+ await assert.rejects(runOrderWorkflow(p,{executionMode:'pay'},{text:async()=>prepared++,submit:async()=>submits++}),error=>error.code==='ORDER_SCRIPT_INVALID');
+ assert.equal(prepared,0);assert.equal(submits,0);
+ await validateOrderScript('function(){while(true){} return {}; }');
+ for(const code of ['async function(){return {};}', '(function(){throw new Error("must not execute");})()', 'function(){throw new Error("must not execute");}()', 'function(){}.call(null)', 'function(){},function(){}', 'function(){return ; ; ; broken( }'])await assert.rejects(validateOrderScript(code),error=>error.code==='ORDER_SCRIPT_INVALID');
+});
+test('明确缺货在商品准备阶段返回等待状态，不调用提交或付款',async()=>{
+ let submits=0;
+ await assert.rejects(runOrderWorkflow(program('function(){return {status:"out_of_stock"};}'),{executionMode:'pay'},{submit:async()=>submits++}),error=>error.code==='ORDER_OUT_OF_STOCK');
+ assert.equal(submits,0);
 });

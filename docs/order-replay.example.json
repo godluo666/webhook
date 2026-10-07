@@ -1,0 +1,10 @@
+{
+  "paymentCode": "function(order,browser){if(browser.exists('#invoice-link'))return {invoiceLinkSelector:'#invoice-link'};return {checks:{paySelector:'#pay',invoiceSelector:'#invoice',totalSelector:'#total',currencySelector:'#currency',confirmationSelector:'#paid'}};}",
+  "order": {"maxTotal": 20},
+  "receipt": {"status": "ordered", "invoiceId": "42", "review": {"total": 10, "currency": "USD"}},
+  "pages": [
+    {"url": "https://merchant.example/confirmed", "html": "<a id='invoice-link' href='/invoice?id=42'>Invoice 42</a>"},
+    {"url": "https://merchant.example/invoice?id=42", "html": "<form action='/pay' method='post'><input type='hidden' id='invoice' name='invoiceid' value='42'><p id='total'>USD 10.00</p><p id='currency'>USD</p><button id='pay'>Pay now</button></form>"}
+  ],
+  "confirmationPage": {"url": "https://merchant.example/paid", "html": "<p id='paid'>Payment successful: invoice 42</p>"}
+}

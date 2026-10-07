@@ -82,6 +82,12 @@ jobs:
           docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
             --mount type=bind,src="$PWD/.github/order-coupon-smoke.mjs",dst=/app/order-coupon-smoke.mjs,readonly \
             "$IMAGE" node /app/order-coupon-smoke.mjs
+      - name: Verify order readiness, account evidence and stock transitions
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+          docker run --rm --init --read-only --tmpfs /tmp:rw,nosuid,nodev,size=512m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+            --mount type=bind,src="$PWD/.github/order-readiness-smoke.mjs",dst=/app/order-readiness-smoke.mjs,readonly \
+            "$IMAGE" node /app/order-readiness-smoke.mjs
       - name: Verify browser, proxy and preview resource cleanup
         run: |
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:latest"

@@ -2,6 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createOrderAccountService,publicOrderAccount,savedOrderAccount,orderAccountFingerprint} from '../lib/order-account.js';
 const monitor={id:'monitor-a'},userFor=id=>({id,monitors:[monitor],orderAccounts:[]});
+test('账户验证设置只接受同源账户页面，并参与会话版本变更',()=>{
+ const service=createOrderAccountService({persist:()=>{}}),user=userFor('proof');
+ const first=service.save(user,monitor,{loginUrl:'https://shop.example/login',checkUrl:'https://shop.example/profile',loggedInSelector:'#account-name'});
+ assert.equal(first.checkUrl,'https://shop.example/profile');assert.equal(first.loggedInSelector,'#account-name');
+ const unchanged=service.save(user,monitor,{loginUrl:first.loginUrl});assert.equal(unchanged.revision,first.revision);
+ for(const checkUrl of ['https://other.example/profile','https://user:pass@shop.example/profile','https://shop.example/cart.php?a=complete'])assert.throws(()=>service.save(user,monitor,{loginUrl:first.loginUrl,checkUrl}));
+ const changed=service.save(user,monitor,{loginUrl:first.loginUrl,loggedInSelector:'#other-name'});assert.equal(changed.revision,first.revision+1);
+});
 function setup(timeoutMs=10000,options={}){let leased=0,closed=0,valid=false,finishCalls=0,checkError=null;const openedTasks=[];const user=userFor('a');
   const service=createOrderAccountService({persist:()=>{if(options.persistError?.())throw new Error('会话写入失败');},timeoutMs,saveTimeoutMs:options.saveTimeoutMs,withProxy:async(_url,fn)=>{leased++;try{return await fn('http://proxy.example');}finally{leased--;}},openBrowser:async(task,browserOptions)=>{openedTasks.push(task);if(browserOptions.loginCheck&&checkError)throw checkError;return {close:async()=>{closed++;await options.closeGate;},productHtml:async()=>'<h1>Product A</h1>',remote:{view:async()=>({fields:[],image:'fixture'}),act:async()=>({fields:[],image:'updated'}),finish:async()=>{finishCalls++;await options.finishGate;if(!valid)throw new Error('登录尚未完成');return {state:{cookies:[{name:'private',value:'secret-session'}],origins:[]},check:{url:'https://shop.example/account'},testedAt:new Date().toISOString()};}}};}});
   service.save(user,monitor,{loginUrl:'https://shop.example/login',username:'private-user',password:'private-password'});
