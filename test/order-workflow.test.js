@@ -2,9 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {runOrderWorkflow,runOrderPaymentCode,validateOrderWorkflow} from '../lib/order-workflow.js';
 import {validateOrderProgram} from '../lib/orders.js';
-import {validateOrderScript} from '../lib/order-script.js';
+import {executeOrderScript,validateOrderScript} from '../lib/order-script.js';
 const checkout={submitSelector:'#submit',productSelector:'#product',quantitySelector:'#quantity',totalSelector:'#total',currencySelector:'#currency',confirmationSelector:'#confirmation'};
 const program=(prepareCode='function(){return {ready:true};}',paymentCode='function(){return {checks:{paySelector:"#pay"}};}')=>validateOrderProgram({summary:'配置后由宿主按 SOP 核对提交',checkout,workflow:{version:1,prepareCode,paymentCode}},{requireWorkflow:true});
+test('宿主认证和请求错误跨解释器保留类型，脚本捕获后也不能继续操作或提交',async()=>{
+ for(const code of ['ORDER_LOGIN_REQUIRED','ORDER_LOGIN_UNVERIFIED','PROXY_AUTH_FAILED','ORDER_REQUEST_BLOCKED']){
+  const failure=Object.assign(new Error('host rejected operation'),{code});let writes=0,submits=0;
+  const methods={goto:async()=>{throw failure;},fill:async()=>writes++,submit:async()=>{submits++;return {status:'ordered'};}};
+  for(const source of ['function(o,b){b.goto(o.url);return {ready:true};}','function(o,b){try{b.goto(o.url);}catch(e){}try{b.fill("#quantity","2");}catch(e){}return {ready:true};}']){
+   await assert.rejects(executeOrderScript(source,{},methods),error=>error===failure);
+   await assert.rejects(runOrderWorkflow(program(source),{executionMode:'submit'},methods),error=>error===failure);
+  }
+  assert.equal(writes,0);assert.equal(submits,0);
+ }
+});
+test('普通页面定位错误仍可由脚本处理，脚本伪造的错误类型不会冒充宿主认证结果',async()=>{
+ assert.deepEqual(await executeOrderScript('function(o,b){try{b.text("#missing");}catch(e){return {fallback:true};}}',{}, {text:async()=>{throw new Error('missing element');}}),{fallback:true});
+ await assert.rejects(executeOrderScript('function(){const e=new Error("script failure");e.code="ORDER_LOGIN_REQUIRED";throw e;}',{},{}),error=>error.code===undefined&&/script failure/.test(error.message));
+});
 test('SOP 禁止商品准备脚本提交或付款，未就绪和歧义都停在财务操作前',async()=>{
  let commits=0;const methods={submit:async()=>{commits++;return {status:'ordered'};},pay:async()=>assert.fail('must not pay')};
  for(const source of ['function(o,b){return b.submit();}','function(o,b){return b.pay({});}','function(){return {ready:false};}','function(){return {error:"商品歧义"};}'])await assert.rejects(runOrderWorkflow(program(source),{executionMode:'pay'},methods));

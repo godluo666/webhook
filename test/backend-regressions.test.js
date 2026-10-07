@@ -86,6 +86,40 @@ test('正在读取来源或发送通知的任务不能被删除，完成后可�
   assert.equal(notifications, 1);
 });
 
+test('通知积压不延迟本轮库存读取，每轮每条只重试一次，来源失败仍重试旧通知', async t => {
+  let available = false, sourceFailure = false;
+  const calls = [];
+  const { request, targetUrl } = await harness(t, (req, res) => {
+    if (req.url === '/source') {
+      calls.push('source');
+      res.writeHead(sourceFailure ? 500 : 200, { 'content-type': 'text/html' });
+      res.end(sourceFailure ? 'source failed' : available ? '<p>Available</p>' : '<p>Sold out</p>');
+      return;
+    }
+    if (req.url === '/hook') { calls.push('hook'); res.writeHead(503); res.end('try later'); return; }
+    res.writeHead(404); res.end();
+  });
+  await request('/api/settings', 'PUT', { webhooks: [{ id: 'hook', name: 'Slow channel', url: targetUrl + '/hook', enabled: true, format: 'generic' }] });
+  const created = await request('/api/monitors', 'POST', { kind: 'webpage', label: 'Stock priority', url: targetUrl + '/source', keyword: 'Available', mode: 'contains', intervalMinutes: 5, fetch: { mode: 'http' }, webhookIds: ['hook'] }, 201);
+  const id = created.monitors[0].id, endpoint = '/api/monitors/' + id + '/check';
+  available = true;
+  await request(endpoint, 'POST');
+  available = false; calls.length = 0;
+  await request(endpoint, 'POST');
+  assert.deepEqual(calls, ['source', 'hook']);
+  available = true; calls.length = 0;
+  const result = await request(endpoint, 'POST');
+  assert.deepEqual(calls, ['source', 'hook', 'hook']);
+  assert.equal(result.check.failedCount, 2);
+  assert.equal(result.monitors.find(m => m.id === id).pendingNotifications.length, 2);
+  sourceFailure = true; calls.length = 0;
+  const failed = await request(endpoint, 'POST');
+  assert.equal(failed.check.checked, false);
+  assert.equal(calls[0], 'source');
+  assert.deepEqual(calls.slice(-2), ['hook', 'hook']);
+  assert.equal(calls.filter(call => call === 'hook').length, 2);
+});
+
 test('AI 解析在清除或更换 Key 期间保持请求配置，响应和原始日志持续脱敏', async t => {
   const firstStarted = gate(), releaseFirst = gate(), failingStarted = gate(), releaseFailure = gate();
   const initialKey = 'audit-key-/+%secret', replacementKey = 'replacement-key-/+%secret';

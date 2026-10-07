@@ -130,3 +130,24 @@ test('登录地址修改和清除持久化失败时恢复原会话、凭据与�
  await assert.rejects(f.service.logout(f.user,monitor),/写入失败/);assert.deepEqual(account,previous);fail=false;
  const other={id:'new-monitor'};assert.equal(f.user.orderAccounts.length,1);fail=true;assert.throws(()=>f.service.save(f.user,other,{loginUrl:'https://shop.example/login'}),/写入失败/);assert.equal(f.user.orderAccounts.length,1);
 });
+
+test('验证和商品预览更新会话时，写入失败恢复原 Cookie 与账户状态，恢复存储后可重试',async()=>{
+ for(const operation of ['check','productPreview']){
+  let fail=false,closed=0;
+  const oldSession={state:{cookies:[{name:'auth',value:'old-auth'}],origins:[]},sessionStorage:{token:'old-token'},check:{url:'https://shop.example/account'}};
+  const fresh={state:{cookies:[{name:'auth',value:'fresh-auth'}],origins:[]},sessionStorage:{token:'fresh-token'}};
+  const user=userFor('refresh-'+operation),account={monitorId:monitor.id,loginUrl:'https://shop.example/login',revision:1,status:'saved',testedAt:'before-refresh',error:'',session:oldSession};user.orderAccounts.push(account);
+  const service=createOrderAccountService({persist:()=>{if(fail)throw new Error('会话写入失败');},openBrowser:async()=>({accountState:async()=>fresh,productHtml:async()=>'<h1>Product</h1>',close:async()=>{closed++;}})});
+  const run=()=>service[operation](user,monitor,{url:'https://shop.example/product'}),previous=structuredClone(account);
+  fail=true;await assert.rejects(run(),/写入失败/);assert.deepEqual(account,previous);assert.equal(account.session,oldSession);assert.equal(service.busy(user,monitor),false);assert.equal(closed,1);
+  fail=false;await run();assert.deepEqual(account.session.state,fresh.state);assert.deepEqual(account.session.sessionStorage,fresh.sessionStorage);assert.equal(account.session.check,oldSession.check);assert.equal(account.revision,1);assert.equal(closed,2);
+ }
+});
+
+test('确认登录失效但无法落盘时，不让内存账户状态与磁盘不一致',async()=>{
+ let fail=false;const f=setup(10000,{persistError:()=>fail}),opened=await f.service.start(f.user,monitor);f.login();await f.service.finish(f.user,monitor,{sessionId:opened.sessionId});
+ const account=f.user.orderAccounts[0],previous=structuredClone(account);
+ f.setCheckError(Object.assign(new Error('网站返回登录页面'),{code:'ORDER_LOGIN_REQUIRED'}));fail=true;
+ await assert.rejects(f.service.check(f.user,monitor),/写入失败/);assert.deepEqual(account,previous);assert.equal(f.service.busy(f.user,monitor),false);
+ fail=false;await assert.rejects(f.service.check(f.user,monitor),/登录页面/);assert.equal(account.status,'expired');
+});

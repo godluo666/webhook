@@ -17,13 +17,15 @@ const server=http.createServer(async(req,res)=>{
  if(url.pathname==='/cart-actual'){res.writeHead(303,{location:'/product?override=1'});res.end();return;}
  if(url.pathname==='/product'){
   const override=url.searchParams.has('override'),stale=url.searchParams.has('stale'),mutate=url.searchParams.has('mutate'),cross=url.searchParams.has('cross'),get=url.searchParams.has('get');
-  const target=cross?'https://other.invalid/create':'/create'+(url.searchParams.has('http500')?'?http500=1':'');
+  const target=cross?'https://other.invalid/create':'/create'+(url.searchParams.has('http500')?'?http500=1':url.searchParams.has('redirect500')?'?redirect500=1':'');
   res.end('<a href="/logout">Log out</a>'+(stale?'<p id="confirmation">Previous order created</p>':'')+'<form action="'+(override?'/wrong':target)+'" method="'+(override?'get':'post')+'"><h1 id="product">Product A</h1><input id="quantity" name="quantity" value="1"><p id="total">USD 10.00</p><p id="currency">USD</p><button id="submit"'+(override||cross?' formaction="'+target+'" formmethod="post"':'')+(get?' formmethod="get"':'')+(mutate?' onclick="document.getElementById(&#39;quantity&#39;).value=&#39;2&#39;"':'')+'>Submit Order</button></form>');return;
  }
  if(url.pathname==='/create'){
+  if(url.searchParams.has('redirect500')){res.writeHead(303,{location:'/failed-confirmation'});res.end();return;}
   if(url.searchParams.has('http500'))res.statusCode=500;
   res.end('<h1 id="confirmation">Order audit-42 created</h1><form action="/wrong" method="get"><input id="invoice" type="hidden" name="invoiceid" value="audit-42"><p id="invoice-total">USD 10.00</p><p id="invoice-currency">USD</p><p id="balance">USD 20.00</p><p id="balance-currency">USD</p><button id="pay" formaction="/pay-actual" formmethod="post">Pay now with account balance</button></form>');return;
  }
+ if(url.pathname==='/failed-confirmation'){res.statusCode=500;res.end('<h1 id="confirmation">Order audit-42 created</h1>');return;}
  if(url.pathname==='/pay-actual'){res.end('<h1 id="paid">Payment successful: audit-42 Paid</h1>');return;}
  res.statusCode=400;res.end('Wrong request');
 });
@@ -50,6 +52,9 @@ try{
  });
  await run('merchant HTTP 500 with a success-looking body remains an error after a single POST',async()=>{
   const before=requests.length;browser=await createOrderBrowser(task('?http500=1'));await assert.rejects(browser.methods.submit(),error=>error.code==='ORDER_REQUEST_HTTP_ERROR'&&/500/.test(error.message));assert.equal(requests.slice(before).filter(request=>request.path==='/create'&&request.method==='POST').length,1);assert.equal(browser.receipt,null);
+ });
+ await run('HTTP 500 after a POST redirect cannot turn success-looking text into a confirmed order',async()=>{
+  const before=requests.length;browser=await createOrderBrowser(task('?redirect500=1'));await assert.rejects(browser.methods.submit(),error=>error.code==='ORDER_REQUEST_HTTP_ERROR'&&/500/.test(error.message));assert.equal(requests.slice(before).filter(request=>request.path==='/create'&&request.method==='POST').length,1);assert.equal(browser.receipt,null);
  });
  for(const [suffix,label]of [['?get=1','GET override'],['?cross=1','cross-origin override']])await run(label+' fails before the durable submission record',async()=>{
   let submits=0;const before=requests.length;browser=await createOrderBrowser(task(suffix),{onBeforeSubmit:async()=>submits++});await assert.rejects(browser.methods.submit());assert.equal(submits,0);assert.ok(!requests.slice(before).some(request=>request.path==='/create'));

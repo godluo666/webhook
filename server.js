@@ -494,10 +494,14 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
   let responseStatus;
   let responseSample = '';
   let fetchDetails;
+  let deliveryAttempted = false;
+  const deliverPending = async () => {
+    deliveryAttempted = true;
+    const delivery = await flushPending(user, monitor);
+    sentCount += delivery.sentCount;
+    failedCount += delivery.failedCount;
+  };
   try {
-    const retried = await flushPending(user, monitor);
-    sentCount += retried.sentCount;
-    failedCount += retried.failedCount;
     let current;
     if (observed) { current = structuredClone(observed); fetchDetails = current.fetch; responseStatus = current.httpStatus; }
     else if (monitor.kind === 'unified') {
@@ -525,6 +529,7 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
     if (transitioned && monitor.enabled) void orderService.trigger(user, monitor);
     if (triggered) {
       if (!monitor.webhookIds.length) {
+        await deliverPending();
         monitor.lastError = '没有接收渠道，请先为任务选择 Webhook';
         monitor.lastCheckAt = new Date().toISOString();
         persist();
@@ -536,10 +541,10 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
         remainingIds: [...monitor.webhookIds]
       });
       persist();
-      const delivery = await flushPending(user, monitor);
-      sentCount += delivery.sentCount;
-      failedCount += delivery.failedCount;
     }
+    // A slow notification retry must not delay observing stock or starting an
+    // approved order. Flush old and new notifications once after the trigger.
+    await deliverPending();
     monitor.sourceFailures = 0;
     monitor.sourceRetryAt = null;
     monitor.lastSourceError = '';
@@ -570,6 +575,8 @@ async function checkMonitor(user, monitor, { manual = false, observed = null } =
     }
     return { checked: true, triggered, conditionSatisfied, sentCount, failedCount };
   } catch (error) {
+    // Previously queued notifications still get a retry when the source fails.
+    if (!deliveryAttempted) await deliverPending();
     monitor.lastCheckAt = new Date().toISOString();
     monitor.lastError = error.message;
     if (monitor.kind === 'unified' && error.code === 'RULE_EXTRACTION') {
