@@ -5,6 +5,7 @@ export function pageType(page){
   if(/invoice|账单|發票/i.test(text))return 'invoice';
   if(/checkout|place order|submit order|结账|提交订单/i.test(text))return 'checkout';
   if(/shopping cart|购物车|購物車/i.test(text))return 'cart';
+  if(/catalog|category|商品列表|产品列表|分類|分类/i.test(page.title||''))return 'catalog';
   return 'product_or_other';
 }
 export function confirmationEvidence(page,kind){

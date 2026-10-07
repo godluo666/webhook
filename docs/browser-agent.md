@@ -1,13 +1,13 @@
 # 通用浏览器下单 Agent
 
-新界面的“探索网站并试跑”使用业务 SOP v2：目标 → 浏览器探索 → 页面理解 → 单步规划 → 执行与验证 → 恢复 → 经验保存。业务计划没有网站 DOM、CSS/XPath 或执行代码。旧 v1 任务保留兼容执行接口，重新探索时迁移到 v2。
+新界面的“探索网站并试跑”使用业务 SOP v2：目标 → 浏览器探索 → 页面理解 → 单步规划 → 执行与验证 → 恢复 → 经验保存。业务计划没有网站 DOM、CSS/XPath 或执行代码。分类页和商品列表页都是有效入口；后续页面由浏览器逐页访问，不要求用户先提供购物车、结账或确认页快照。旧 v1 任务保留兼容执行接口，重新探索时迁移到 v2。
 
 ## 模块及接入
 
 | 文件 | 职责 |
 | --- | --- |
 | automation/browser/launcher.js | 复用现有 Chromium、代理、私有会话及请求许可。 |
-| automation/browser/dom-parser.js | 获取脱敏 HTML、DOM 树、页面文本、表单、选项、可交互元素及可访问性语义。 |
+| automation/browser/dom-parser.js | 获取脱敏 HTML、DOM 树、页面文本、表单、选项、可交互元素及可访问性语义；contextText 提供元素所属商品卡片/行的文字上下文。 |
 | automation/browser/locator.js | 按 ARIA → 可见文本 → Label → Placeholder → Name → ID → CSS → XPath 解析当前元素；歧义时不选第一项。 |
 | automation/browser/crawler.js | 探索实际购买流程，在最终提交前结束。 |
 | automation/agent/model.js | 不包含定位信息的通用九步 Business SOP，以及配置要求和目标结构校验。 |
@@ -158,5 +158,7 @@ automation-api.test.js 验证探索、经验和 JSON/PNG 证据接口的鉴权�
 automation-browser.test.js 启动本地模拟商城，生成随机 ID 和不同 DOM 包装，验证入口之外的购物车/结账/成功/账单页，单次提交和付款，网站付款选项在重复观察后的绑定，以及优惠请求跳转后全部 ID 改变仍能重新核验。Windows 可使用已安装 Edge，其他环境设置 MONITOR_BROWSER_EXECUTABLE；没有浏览器时该文件明确跳过。测试只操作 localhost，不创建真实商家订单。
 
 test/order-timeouts.test.js 验证 AI 响应体卡住、单次有限重试、取消等待、总体试跑预算、迟到计划不会执行，以及超时不重新生成整个 SOP。.github/orders-ui-smoke.mjs 使用本地 AI 响应体卡住一次和进度请求丢失一次的场景，验证后台 202 启动后自动恢复查询、两次试跑完成与手动停止。
+
+test/automation-discovery.test.js 验证模型错误索要未来页面快照时进入有界重新探索；真实结算证据缺失、购物车待核验及订单已提交时仍停止。automation-browser.test.js 从两种分类卡片布局进入配置、购物车和结账，两个同名 Order Now 按钮依据卡片语义区分，并模拟业务规划与单步规划分别错误拒绝一次，验证恢复后两次试跑和一次提交。
 
 已有 test/orders.test.js、test/order-workflow.test.js、test/order-execution-log.test.js 继续验证旧任务、账户/监控变化、预算、优惠、代理、重启和交易日志的兼容保护。真实模型效果需要在已登录的商家测试环境用 discover → 审阅 → enable → prepare 模式检验，不把模拟规划器当作真实模型适配证明。

@@ -5,6 +5,13 @@ export function inspectCommercePage(input){
   const labelText=el=>{const clone=el.cloneNode(true);clone.querySelectorAll('input,select,textarea,button').forEach(node=>node.remove());return readable(clone);};
   const visible=el=>!!el.getClientRects().length&&getComputedStyle(el).visibility!=='hidden';
   const role=el=>el.getAttribute('role')||({BUTTON:'button',A:'link',SELECT:'combobox',TEXTAREA:'textbox',H1:'heading',H2:'heading',H3:'heading'}[el.tagName])||(el.tagName==='INPUT'?({checkbox:'checkbox',radio:'radio',submit:'button',button:'button',number:'spinbutton'}[el.type]||'textbox'):null);
+  const contextText=el=>{
+    const own=readable(el);let last='';
+    for(let parent=el.parentElement,depth=0;parent&&depth<5&&!['BODY','HTML'].includes(parent.tagName);parent=parent.parentElement,depth++){
+      const value=readable(parent);if(value.length>1200)break;if(value&&value!==own)last=value;
+      if(value&&value!==own&&(parent.matches('article,li,tr,[role="listitem"]')||parent.querySelector('h1,h2,h3,h4,[role="heading"]')&&parent.querySelectorAll('a,button,input[type="submit"]').length<=3))return value.slice(0,1200);
+    }return last.slice(0,1200);
+  };
   const nodes=[...document.querySelectorAll('a,button,input,select,textarea,label,form,[role],[aria-label],h1,h2,h3,p,span,td,th,dt,dd,strong,output')].slice(0,600);
   const refs=new Map(nodes.map((el,index)=>[el,'e'+index]));
   if(assignRefs)for(const el of document.querySelectorAll('[data-agent-ref]'))el.removeAttribute('data-agent-ref');
@@ -15,7 +22,7 @@ export function inspectCommercePage(input){
     const privateField=el.tagName==='INPUT'&&(el.type==='password'||el.type==='hidden'||/token|secret|csrf|session|email|address|card|cvv|cvc/i.test(el.name+' '+el.id));
     const text=el.tagName==='INPUT'?(el.type==='submit'||el.type==='button'?el.value:''):readable(el).slice(0,300);
     const accessibleName=(el.getAttribute('aria-label')||labelled||label||text||el.getAttribute('alt')||el.getAttribute('title')||'').slice(0,300);
-    return {ref,tag:el.tagName.toLowerCase(),role:role(el),accessibleName,text,label:label.slice(0,300),placeholder:el.getAttribute('placeholder'),name:el.getAttribute('name'),id:el.id||null,
+    return {ref,tag:el.tagName.toLowerCase(),role:role(el),accessibleName,text,contextText:contextText(el),label:label.slice(0,300),placeholder:el.getAttribute('placeholder'),name:el.getAttribute('name'),id:el.id||null,
       type:el.getAttribute('type'),visible:visible(el),disabled:!!el.disabled,readOnly:!!el.readOnly,checked:['checkbox','radio'].includes(el.type)?el.checked:undefined,
       value:privateField?undefined:el.tagName==='SELECT'?[...el.selectedOptions].map(o=>o.textContent.trim()).join(' '):['INPUT','TEXTAREA'].includes(el.tagName)?el.value:undefined,
       href:el.tagName==='A'?el.getAttribute('href'):undefined,formRef:refs.get(el.form),parentRef:refs.get(el.parentElement),

@@ -23,6 +23,7 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
     const id=randomUUID(),heading=variant==='b'?'h2':'h1',wrap=variant==='b'?'article':'main';
     const gateway=variant==='w'?'<label>Payment<select name="paymentmethod"><option value="balance">Account balance</option><option value="alipay">Alipay</option></select></label>':'';
     const title='<'+heading+' id="title-'+id+'">Product A</'+heading+'>';
+    if(route==='/catalog'){const card=variant==='b'?'div':'article';return '<title>Store category</title><a href="/logout">Log out</a><main><h1>Server products</h1><'+card+'><h2>Product B</h2><p>32G RAM · 2 Available</p><a href="/start?v='+variant+'&other=1">Order Now</a></'+card+'><'+card+'><h2>Product A</h2><p>64G RAM · 4 Available</p><a href="/start?v='+variant+'">Order Now</a></'+card+'></main>';}
     if(route==='/start')return '<a href="/logout">Log out</a><'+wrap+'>'+title+'<form method="post" action="/basket?v='+variant+'"><label>Quantity<input id="qty-'+id+'" name="quantity" value="0"></label><button>Add to cart</button></form></'+wrap+'>';
     if(route==='/invoice')return '<main><span>USD 10.00</span><span>USD</span><span>100.00</span><form method="post" action="/charge"><input type="hidden" name="invoiceid" value="42">'+gateway+'<button>Pay invoice from account balance</button></form></main>';
     const promo='<form method="post" action="/promo?v='+variant+'"><input name="promocode" placeholder="Coupon code"><button>Apply coupon</button></form><span id="proof-'+id+'" '+(!discount?'hidden':'')+'>SAVE20</span><span id="discount-'+id+'" '+(!discount?'hidden':'')+'>2.00</span>';
@@ -31,6 +32,7 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
   const server=http.createServer(async(req,res)=>{
     const url=new URL(req.url,'http://local'),variant=url.searchParams.get('v')||'a';let body='';for await(const chunk of req)body+=chunk;requests.push({path:url.pathname,method:req.method,body});
     res.setHeader('content-type','text/html; charset=utf-8');
+    if(url.searchParams.has('other'))return res.end('<h1>Wrong product selected</h1>');
     if(url.pathname==='/basket'){res.writeHead(303,{location:'/checkout?v='+variant});return res.end();}
     if(url.pathname==='/promo'){counts.coupons++;res.writeHead(303,{location:'/checkout?v='+variant+'&discount=1'});return res.end();}
     if(url.pathname==='/finish'){counts.orders++;return res.end('<p>Order confirmed</p><p>Order number: ORD-'+counts.orders+'</p><a href="/invoice?id=42&v='+variant+'">View invoice #42</a>');}
@@ -43,6 +45,7 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
   const baseOrder={product:'Product A',quantity:1,maxTotal:20,currency:'USD',paymentMethod:{kind:'balance',name:'账户余额'},executionMode:'submit'};
   const plan=async({observation:page,context,order})=>{
     const action=step=>({reason:'Observed merchant semantics',...step});
+    if(page.title==='Store category')return action({action:'click',target:target(page,'purchase',el=>el.role==='link'&&el.text==='Order Now'&&el.contextText.includes('Product A'))});
     if(context.pendingVerification==='cart')return action({action:'verify_cart',bindings:{product:text(page,'product','Product A'),quantity:quantity(page)}});
     if(context.pendingVerification==='coupon')return action({action:'verify_coupon',bindings:coupon(page)});
     if(page.elements.some(el=>el.text==='Add to cart')){
@@ -64,9 +67,9 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
   };
   try{
     for(const variant of ['a','b'])await t.test('探索不同 DOM '+variant+'，试跑不提交',async()=>{
-      const order={...baseOrder,url:base+'/start?v='+variant,dryRun:true},session=await createOrderBrowser(order,{launch,onEvidence:async data=>{evidence.push(data);return {id:randomUUID()};}});
+      const order={...baseOrder,url:base+'/catalog?v='+variant,dryRun:true},session=await createOrderBrowser(order,{launch,onEvidence:async data=>{evidence.push(data);return {id:randomUUID()};}});
       try{
-        const observed=await session.methods.observe();assert.ok(observed.html);assert.ok(observed.domTree.length);assert.ok(observed.forms.length);
+        const observed=await session.methods.observe();assert.ok(observed.html);assert.ok(observed.domTree.length);assert.equal(observed.forms.length,0);assert.equal(observed.elements.filter(el=>el.role==='link'&&el.text==='Order Now').length,2);assert.ok(observed.elements.some(el=>el.contextText.includes('Product A')&&el.contextText.includes('64G RAM')));
         const result=await runCommerceAgent(business,order,session,{plan});assert.equal(result.status,'prepared');assert.equal(result.review.quantity,1);assert.deepEqual(result.review.configuration,[{name:'Cycle',value:'Monthly'}]);assert.equal(counts.orders,0);
         assert.doesNotMatch(JSON.stringify(evidence.at(-1).observation),/private-csrf-token/);assert.match(evidence.at(-1).image,/^data:image\/png;base64,/);
       }finally{await session.close();}
@@ -88,12 +91,13 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
       try{const result=await runCommerceAgent(business,order,session,{plan});assert.equal(result.status,'prepared');assert.equal(result.review.total,8);assert.equal(result.review.coupon.discount,2);assert.equal(counts.coupons,1);assert.equal(counts.orders,3);}finally{await session.close();}
     });
         await t.test('服务层使用真实浏览器探索两次、保存经验、审批后提交一次',async()=>{
-      const task=validateOrderTask({...baseOrder,url:base+'/start?v=b',monitorId:'native-monitor'}),user={id:'native-agent-user',settings:{},monitors:[{id:'native-monitor',kind:'webpage'}],orderTasks:[task],orderAccounts:[{monitorId:'native-monitor',loginUrl:task.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:task.url}}}]};
+      const task=validateOrderTask({...baseOrder,url:base+'/catalog?v=b',monitorId:'native-monitor'}),user={id:'native-agent-user',settings:{},monitors:[{id:'native-monitor',kind:'webpage'}],orderTasks:[task],orderAccounts:[{monitorId:'native-monitor',loginUrl:task.url,revision:1,status:'saved',session:{state:{cookies:[],origins:[]},check:{url:task.url}}}]};
+      let businessAttempts=0,listingRefusals=0;
       const service=createOrderService({persist:()=>{},openBrowser:(order,options)=>createOrderBrowser(order,{...options,launch}),requestAI:async(_user,messages)=>{
-        if(messages[0].content===BUSINESS_PROMPT)return {summary:'动态探索与核验',workflow:{version:2,requirements:[{name:'Cycle',value:'Monthly'}]}};
-        const input=JSON.parse(messages[1].content);return plan({observation:input.page,context:input.context,order:input.order});
+        if(messages[0].content===BUSINESS_PROMPT){const input=JSON.parse(messages[1].content);assert.equal(input.phase,'business_sop');assert.equal(input.discovery.followPagesAtRuntime,true);if(++businessAttempts===1)return {error:'Insufficient evidence: the category listing does not include cart or checkout DOM. Please provide confirmation page snapshots and checkout selectors.'};assert.match(input.feedback.error,/业务 SOP 不需要未来页面/);return {summary:'动态探索与核验',workflow:{version:2,requirements:[{name:'Cycle',value:'Monthly'}]}};}
+        const content=messages[1].content,input=JSON.parse(Array.isArray(content)?content.find(part=>part.type==='text').text:content);if(input.page.title==='Store category'&&listingRefusals++===0)return {action:'stop',reason:'Insufficient evidence: cannot determine checkout selectors without cart and confirmation page snapshots.'};return plan({observation:input.page,context:input.context,order:input.order});
       }});
-      const original=counts.orders;await service.discover(user,task);assert.equal(task.status,'ready');assert.equal(task.enabled,false);assert.equal(task.trial.preflightPasses,2);assert.equal(task.program.code,undefined);assert.equal(counts.orders,original);
+      const original=counts.orders;await service.discover(user,task);assert.equal(task.status,'ready');assert.equal(task.enabled,false);assert.equal(task.trial.preflightPasses,2);assert.equal(task.program.code,undefined);assert.equal(counts.orders,original);assert.equal(businessAttempts,2);assert.ok(user.orderExecutionLogs[0].events.some(event=>event.action==='重新观察并修复'));
       service.approve(user,task,orderProgramHash(task));await service.execute(user,task);assert.equal(task.status,'ordered');assert.equal(counts.orders,original+1);assert.equal((await service.profile(user,task)).outcomes.ordered,1);
     });
     assert.equal(requests.filter(req=>req.path==='/charge').length,2);

@@ -1,4 +1,4 @@
-const recoverable=new Set(['AGENT_ELEMENT_MISSING','AGENT_LOW_CONFIDENCE','AGENT_PLAN_INVALID','AGENT_STEP_UNVERIFIED','AGENT_CONFIGURATION_UNVERIFIED']);
+const recoverable=new Set(['AGENT_ELEMENT_MISSING','AGENT_LOW_CONFIDENCE','AGENT_PLAN_INVALID','AGENT_STEP_UNVERIFIED','AGENT_CONFIGURATION_UNVERIFIED','AGENT_DISCOVERY_REQUIRED']);
 export function canRecover(error,session,{signal,attempts,maxAttempts=2}){
   if(signal?.aborted||attempts>=maxAttempts||session.paymentStarted)return false;
   if(session.submissionStarted&&session.receipt?.status!=='ordered')return false;

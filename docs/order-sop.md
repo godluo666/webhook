@@ -93,9 +93,9 @@ node scripts/replay-order-payment.mjs docs/order-replay.example.json
 
 `prepareCode` 只能使用 `goto/snapshot/exists/text/fill/select/check/uncheck/click/cart/wait/choosePayment`。通用 `click` 不能提交表单或点击下单、付款按钮；商品配置表单使用受控 `cart`。准备函数可返回 `{ready:true, checkout:{...}}`，提供本次页面的六个唯一核对选择器，适应随机 ID。未找到明确商品或必要选项时返回 `{error:"具体原因"}`。
 
-`paymentCode` 只允许 `snapshot/exists/text/wait`，不能提交、填写或支付。若当前页有原订单的唯一账单链接，返回 `{invoiceLinkSelector:"实际链接选择器"}`；宿主打开后再次调用该函数。进入账单页后返回 `{checks:{paySelector,invoiceSelector,totalSelector,currencySelector,confirmationSelector,...}}`。可附带余额、余额币种、预选付款方式及扫码验证提示选择器。当前订单收据通过 `order.receipt` 提供。付款定位必须依据实际 DOM，不能猜测未来随机 ID。
+`paymentCode` 只允许 `snapshot/exists/text/wait`，不能提交、填写或支付。若当前页有原订单的唯一账单链接，返回 `{invoiceLinkSelector:"实际链接选择器"}`；宿主打开后再次调用该函数。进入账单页后返回 `{checks:{paySelector,invoiceSelector,totalSelector,currencySelector,confirmationSelector,...}}`。可附带余额、余额币种、预选付款方式及扫码验证提示选择器。当前订单收据通过 `order.receipt` 提供。付款定位必须依据实际 DOM，不能猜测未来随机 ID。旧订单的 AI 付款辅助仅定位当前原账单字段，付款成功由宿主在响应后动态核验，无需提前提供结果页 selector。
 
-两个函数共享 60 秒、80 次操作预算；在隔离的 QuickJS 中运行，无网络、文件或任意页面脚本权限。`code` 是宿主生成的完整流程展示，实际执行通过分阶段接口。新生成必须遵守 SOP；已经保存的旧配置仍兼容执行，重新生成时升级到版本 1。
+两个函数共享 60 秒、80 次操作预算；在隔离的 QuickJS 中运行，无网络、文件或任意页面脚本权限。`code` 是宿主生成的完整流程展示，实际执行通过分阶段接口。已经保存的 v1 配置仍兼容执行；重新探索时采用业务 SOP v2，逐页观察和动态定位，不再生成完整静态 selector 流程。
 
 ## 失败处理
 
