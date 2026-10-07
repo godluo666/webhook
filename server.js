@@ -95,10 +95,10 @@ const orderService = createOrderService({
   executionLogs:orderExecutionLogs,
   isAccountBusy:(user,monitorId)=>orderAccountService?.busy(user,{id:monitorId})||false,
   persist: () => store.persist(), withProxy: withSourceProxy, sourceOptions,
-  requestAI: async (user, messages, {signal} = {}) => {
+  requestAI: async (user, messages, {signal,timeoutMs=120000} = {}) => {
     if (!user.settings.aiKey || !user.settings.aiModel) throw new Error('请先填写 AI API Key 和模型名称');
     const raw = await fetchText(aiEndpoint(user.settings.aiBaseUrl), {
-      method: 'POST', timeout: 45000, maxBytes: 100000, signal:AbortSignal.any([signal || new AbortController().signal, AbortSignal.timeout(45000)]),
+      method: 'POST', timeout: timeoutMs, maxBytes: 100000, signal,
       headers: { authorization: 'Bearer ' + user.settings.aiKey, 'content-type': 'application/json' },
       body: JSON.stringify({ model: user.settings.aiModel, messages })
     });
@@ -1114,6 +1114,7 @@ async function handler(request, response) {
         const task = user.orderTasks.find(t=>t.id===orderMatch[1]);
         if (!task) return sendJson(response, 404, {error:'下单任务不存在'});
         const action = orderMatch[2], body = ['PUT','POST'].includes(request.method) ? await readJson(request) : {};
+        if(request.method==='GET'&&!action)return sendJson(response,200,{task:publicOrderTask(task)});
         if(request.method==='GET'&&action==='profile')return sendJson(response,200,{profile:await orderService.profile(user,task)});
         if (request.method === 'POST' && action === 'pause') return sendJson(response,200,{task:orderService.pause(user,task)});
         if (orderService.isBusy(user, task)) return sendJson(response, 409, {error:'任务正在执行，请等待结束后修改'});
@@ -1127,7 +1128,11 @@ async function handler(request, response) {
         if (request.method === 'DELETE' && !action) { user.orderTasks=user.orderTasks.filter(t=>t!==task);persist();return sendJson(response,200,{ok:true}); }
         if (request.method === 'POST' && ['generate','discover'].includes(action)) {
           if (task.result || task.submissionStartedAt) throw new Error('已有执行记录，请创建新的下单任务');
-          await orderService[action](user,task); return sendJson(response,200,{task:publicOrderTask(task)});
+          const operation=orderService[action](user,task);
+          if(body.background===true&&orderService.isBusy(user,task)){
+            operation.catch(()=>{});return sendJson(response,202,{task:publicOrderTask(task)});
+          }
+          await operation; return sendJson(response,200,{task:publicOrderTask(task)});
         }
         if (request.method === 'POST' && action === 'enable') return sendJson(response,200,{task:orderService.approve(user,task,body.codeHash)});
         if (request.method === 'POST' && action === 'run') return sendJson(response,200,{task:await orderService.execute(user,task,{manual:true})});

@@ -11,6 +11,7 @@ const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const root=process.cwd(), dataDir=await fs.mkdtemp(path.join(tmpdir(),'radar-orders-ui-'));
 const nonce=randomBytes(4).toString('hex'), id=key=>key+'-'+nonce;
 let available=false,total=9.5,createdOrders=0,paymentRequests=0,paidOrders=0,invoiceExtra=0,invoiceCurrency="USD",loginRequests=0,affiliateVisits=0,affiliateOrders=0,expired=false,layoutChanged=false,affWorking=true,requireOtp=true,sessionSequence=0,validSession='logged-in';
+let stalledAI=0,droppedProgress=0;
 const aiRequests=[],messages=[],errors=[],orderRequestTimes=[];let productReads=0,overwriteAffOnSubmit=false,accountBalance=100,hideBalance=false,productCurrency='USD',foreignGateway=false;const invoices=new Map();let actualGateway=false,gatewayRadio=false,paymentConfirmation='Paid',gatewayLabel='Alipay',paymentLayoutChanged=false,externalCashier=false,replayRedirect=false,replayedPayments=0,gatewayFee=false,swapMethodOnPay=false,cashierReads=0;let cashierBase;
 const password='private-site-password-'+nonce, username='buyer@example.test';
 let sourceBase;
@@ -41,6 +42,7 @@ const mock=http.createServer(async(req,res)=>{
     const configPage=evidence.order.url.endsWith('/config');
     if(configPage && evidence.feedback) assert.ok(evidence.feedback.page?.elements.some(el=>el.id===id('total')+(layoutChanged?'-changed':'')),'Repair must receive the real next-page DOM');
     const generatedCheckout=configPage&&!evidence.feedback?{...checkout,totalSelector:'#unknown-next-page-total-'+nonce}:{...checkout,totalSelector:'#'+id('total')+(layoutChanged?'-changed':'')};
+    if(evidence.order.instruction==='timeout-once'&&!stalledAI++){res.writeHead(200,{'content-type':'application/json'});res.write('{"choices":');return;}
     if(evidence.order.instruction==='hold-to-cancel')await pause(5000);
     let selectedCode=prepareCode,selectedPayment=paymentCode;
     if(actualGateway&&evidence.order.executionMode==='pay'){
@@ -102,9 +104,10 @@ let browser,child,page;
 try{
   sourceBase='http://127.0.0.1:'+await listen(mock);cashierBase='http://127.0.0.1:'+await listen(cashier);const reserve=http.createServer(),port=await listen(reserve);await new Promise(r=>reserve.close(r));const base='http://127.0.0.1:'+port;
   const executable=process.env.MONITOR_BROWSER_EXECUTABLE||(process.platform==='win32'?'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe':'/usr/bin/chromium');
-  child=spawn(process.execPath,['server.js'],{cwd:root,windowsHide:true,stdio:'ignore',env:{...process.env,DATA_DIR:dataDir,HOST:'127.0.0.1',PORT:String(port),MONITOR_BROWSER_EXECUTABLE:executable,RESEND_API_KEY:'',MAIL_FROM:'',SIGNUP_CODE:''}});
+  child=spawn(process.execPath,['server.js'],{cwd:root,windowsHide:true,stdio:'ignore',env:{...process.env,DATA_DIR:dataDir,HOST:'127.0.0.1',PORT:String(port),MONITOR_BROWSER_EXECUTABLE:executable,ORDER_AI_TIMEOUT_MS:'1000',RESEND_API_KEY:'',MAIL_FROM:'',SIGNUP_CODE:''}});
   for(let i=0;i<100;i++){try{if((await fetch(base+'/api/auth/status')).ok)break;}catch{}await pause(50);}
   browser=await chromium.launch({executablePath:executable,headless:true,args:['--no-sandbox']});const context=await browser.newContext({viewport:{width:1440,height:1000}});
+  await context.route(/\/api\/order-tasks\/[^/]+$/,async route=>{if(route.request().method()==='GET'&&droppedProgress===0){droppedProgress++;await route.abort('failed');}else await route.continue();});
   const post=async(endpoint,data={})=>{const r=await context.request.post(base+endpoint,{data});assert.ok(r.ok(),await r.text());return r.json();};
   const state=()=>context.request.get(base+'/api/state').then(r=>r.json());
   await post('/api/auth/register',{username:'order-ui-user',password:'order-ui-password-123'});
@@ -143,7 +146,7 @@ try{
   const generate=async()=>{
     const finished=page.waitForResponse(response=>/\/api\/order-tasks\/[^/]+\/generate$/.test(new URL(response.url()).pathname)&&response.request().method()==='POST',{timeout:90000});
     await page.locator('[data-order-editor-action="generate"]').click();
-    try{const response=await finished;assert.equal(response.status(),200,await response.text());await page.locator('[data-order-editor-action="enable"]').waitFor();}
+    try{const response=await finished;assert.equal(response.status(),202,await response.text());assert.equal(response.request().postDataJSON().background,true);await page.locator('[data-order-editor-action="enable"]').waitFor();}
     catch(error){const logs=await context.request.get(base+'/api/monitors/'+monitor.id+'/order-execution-logs');console.error('Generation diagnostics:',JSON.stringify(await logs.json()));throw error;}
   };
   const enable=async()=>{await page.locator('[data-order-editor-action="enable"]').click();await page.locator('[data-order-editor-action="run"]').waitFor();};
@@ -181,7 +184,8 @@ try{
   assert.equal((await context.request.post(base+'/api/monitors/'+monitor.id+'/order-product/select',{data:{previewId:canceledId,index:0,url:sourceBase+'/product'}})).status(),404,'Canceled previews are released');
 
   await page.waitForFunction(()=>document.querySelector('#order-product-selection')?.textContent.includes('已点选'));assert.equal(createdOrders,ordersBeforePick);assert.equal(paymentRequests,0);
-  await generate();
+  await page.locator('#order-instruction').fill('timeout-once');const requestsBeforeTimeout=aiRequests.length;
+  await generate();assert.equal(stalledAI,2);assert.equal(droppedProgress,1);assert.equal(aiRequests.length-requestsBeforeTimeout,2);assert.deepEqual(aiRequests.at(-1),aiRequests.at(-2));assert.equal(createdOrders,ordersBeforePick);assert.equal(paymentRequests,0);console.log('PASS background trial recovers from a stalled AI response body and a lost progress query without replaying webpage actions');
   await page.locator('[data-order-coupon-failure="continue"]').click();await page.locator('[data-order-editor-action="enable"]').click();
   await page.waitForFunction(()=>document.body.innerText.includes('优惠码失败处理已修改，请先重新生成并试跑'));assert.equal((await state()).orderTasks[0].enabled,false);
   await page.locator('[data-order-coupon-failure="stop"]').click();

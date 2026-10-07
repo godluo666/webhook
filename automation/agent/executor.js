@@ -1,3 +1,4 @@
+import {DEFAULT_ORDER_TIMEOUTS,createOrderDeadline,abortable} from '../../lib/order-timeouts.js';
 import {validateStep} from './planner.js';
 import {agentError,validateTarget} from './model.js';
 import {canRecover,recoveryContext} from './recovery.js';
@@ -6,9 +7,11 @@ const checkoutKeys={submit:'submitSelector',product:'productSelector',quantity:'
 const couponKeys={input:'inputSelector',apply:'applySelector',appliedCode:'appliedCodeSelector',discount:'discountSelector'};
 const paymentKeys={pay:'paySelector',invoice:'invoiceSelector',total:'totalSelector',currency:'currencySelector',balance:'balanceSelector',balanceCurrency:'balanceCurrencySelector',pending:'pendingSelector'};
 const normalize=value=>String(value).normalize('NFKC').replace(/\s+/g,' ').trim().toLowerCase();
-export async function runCommerceAgent(program,order,session,{plan,signal,memory=null,onEvent=()=>{},onLearn=async()=>{},maxSteps=40,timeoutMs=180000,autoRepair=true}={}){
+export async function runCommerceAgent(program,order,session,{plan,signal,memory=null,onEvent=()=>{},onLearn=async()=>{},maxSteps=40,timeoutMs=DEFAULT_ORDER_TIMEOUTS.agentTimeoutMs,autoRepair=true}={}){
   if(!plan||!session.methods.observe||!session.methods.resolveSemantic)throw agentError('AGENT_UNAVAILABLE',"浏览器缺少语义观察和动态规划能力");
-  const methods=session.methods,history=[],deadline=Date.now()+timeoutMs;
+  const budget=createOrderDeadline({signal,timeoutMs,code:'AGENT_BUDGET_EXCEEDED',stage:'动态页面探索'});signal=budget.signal;
+  const methods=Object.fromEntries(Object.entries(session.methods).map(([name,method])=>[name,(...args)=>abortable(()=>method.apply(session.methods,args),signal)]));
+  const planWithinBudget=input=>abortable(()=>plan({...input,signal}),signal),history=[],deadline=Date.now()+timeoutMs;
   let repairs=0,pendingVerification=null,couponFailed=false,couponApplied=!order.couponCode,feedback=null,image=null;
   const resolve=async target=>{validateTarget(target);const located=await methods.resolveSemantic(target);onEvent('语义定位',{meaning:target.meaning,strategy:located.strategy,confidence:target.confidence});return located.selector;};
   const bind=async (bindings,map,required=Object.keys(map))=>{
@@ -29,10 +32,10 @@ export async function runCommerceAgent(program,order,session,{plan,signal,memory
   try{
     for(let index=0;index<maxSteps;index++){
       signal?.throwIfAborted();if(Date.now()>deadline)throw agentError('AGENT_BUDGET_EXCEEDED',"动态执行已超时");
-      session.keepAlive?.(Math.max(1000,deadline-Date.now()));
+      session.keepAlive?.(Math.max(1000,deadline-Date.now())+15000);
       const observation=await methods.observe();
       try{
-        const step=validateStep(await plan({order,workflow:program.workflow,observation,history,memory,context:{pendingVerification,couponApplied,receipt:session.receipt,submissionStarted:session.submissionStarted,paymentStarted:session.paymentStarted},feedback,image,signal:AbortSignal.any([signal||new AbortController().signal,AbortSignal.timeout(Math.max(1,deadline-Date.now()))])}));
+        const step=validateStep(await planWithinBudget({order,workflow:program.workflow,observation,history,memory,context:{pendingVerification,couponApplied,receipt:session.receipt,submissionStarted:session.submissionStarted,paymentStarted:session.paymentStarted},feedback,image,signal}));
         onEvent('动态计划',{action:step.action,reason:step.reason,meanings:[...(step.target?[step.target.meaning]:[]),...Object.values(step.bindings||{}).map(target=>target.meaning)]});
         feedback=null;image=null;signal?.throwIfAborted();
         if(step.action==='stop')throw agentError('AGENT_NEEDS_INPUT',step.reason);
@@ -61,7 +64,7 @@ export async function runCommerceAgent(program,order,session,{plan,signal,memory
           result=await methods.applyCoupon(checks,{...totals,semantic:true,confirmationSelector:'[data-agent-confirmation="order"]'},{
             rebind:async()=>{
               const page=await methods.observe();
-              const next=validateStep(await plan({order,workflow:program.workflow,observation:page,history,memory,context:{pendingVerification:'coupon',receipt:session.receipt},signal}));
+              const next=validateStep(await planWithinBudget({order,workflow:program.workflow,observation:page,history,memory,context:{pendingVerification:'coupon',receipt:session.receipt},signal}));
               if(next.action!=='verify_coupon')throw agentError('AGENT_STEP_UNVERIFIED','优惠请求后只能重新定位核验字段');
               if(next.paymentMethod)await methods.choosePayment({selector:await resolve(next.paymentMethod.target),value:next.paymentMethod.value});
               return {coupon:await bind(next.bindings,couponKeys),checkout:await bind(next.bindings,checkoutKeys)};
@@ -102,4 +105,5 @@ export async function runCommerceAgent(program,order,session,{plan,signal,memory
     }
     throw agentError('AGENT_BUDGET_EXCEEDED',"动态执行达到最大操作数");
   }catch(error){await onLearn({history,status:'failed',error}).catch(()=>{});throw error;}
+  finally{budget.close();}
 }

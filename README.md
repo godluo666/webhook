@@ -65,6 +65,9 @@ node server.js
 | `RESEND_API_KEY` | 邮箱验证码发信服务的 API Key |
 | `MAIL_FROM` | 发件地址，须属于已在 Resend 验证的域名 |
 | `HTTP_PROXY` / `HTTPS_PROXY` | Node.js 24.14+ 会自动使用代理，并跳过本地地址；较旧版本请通过运行环境配置网络 |
+| `ORDER_AI_TIMEOUT_MS` | 单次下单 AI 请求等待时间，默认 120000（2 分钟），超时最多重试 1 次 |
+| `ORDER_AGENT_TIMEOUT_MS` | 每轮动态探索预算，默认 600000（10 分钟） |
+| `ORDER_TRIAL_TIMEOUT_MS` | 生成 SOP 与两次试跑的总预算，默认 1500000（25 分钟） |
 | `MONITOR_BROWSER_EXECUTABLE` | 直接运行 Node 时指定 Chrome / Chromium 可执行文件，Docker 已内置 |
 | `MONITOR_BROWSER_ENABLED=0` | 关闭浏览器读取，默认启用 |
 | `MONITOR_TEMP_DIR` | 可选私有临时目录；新版 Docker 的浏览器和代理临时文件使用 /tmp，Compose 挂载有容量上限的 tmpfs |

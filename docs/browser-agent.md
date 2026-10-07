@@ -120,8 +120,9 @@
 | 请求 | 用途 |
 | --- | --- |
 | POST /api/order-tasks | 创建任务。输入 url、instruction（任务目标）、monitorId、quantity、maxTotal、currency 和 executionMode；登录会话仍需提前保存。 |
-| POST /api/order-tasks/:id/discover | 探索实际购买流程，并连续试跑两次。返回 task，状态 ready、enabled=false。 |
-| POST /api/order-tasks/:id/generate | 保留旧客户端入口，使用新的业务规划提示词。 |
+| POST /api/order-tasks/:id/discover | 探索实际购买流程，并连续试跑两次；body.background=true 返回 HTTP 202，由进度接口查询结果。默认同步返回 ready、enabled=false。 |
+| POST /api/order-tasks/:id/generate | 保留旧客户端入口，使用新的业务规划提示词；同样支持 background=true。界面默认后台试跑，每秒查询进度，连接短暂中断时重试查询。 |
+| GET /api/order-tasks/:id | 查询试跑状态、progress.stage/pass/step、errorCode 与最终 task；不会重新执行任务。 |
 | GET /api/order-tasks/:id/profile | 读取当前网站在该用户/监控下的经验，未有记录时 profile=null。 |
 | POST /api/order-tasks/:id/enable | 用户审阅实际核验结果及业务计划后传入 {codeHash: task.trial.codeHash}；金额、要求、账户或任务变化会撤销授权。 |
 | POST /api/order-tasks/:id/run | 执行已授权任务。每次观察即时规划，原订单提交与付款各最多一次。 |
@@ -136,7 +137,7 @@
 
 两次试跑只在提交前停止，要求商品、数量、配置、总价、币种和付款意图一致；用户确认后才能启用。提交和付款前保存截图、核验值与持久化交易起始标记。实际 POST 请求继续绑定表单、数量、优惠码、付款方式及账单号，不能用通用 click 绕过。
 
-恢复默认最多 2 次，总动作上限 40，总动态执行预算 180 秒，取消信号传递给模型和浏览器。元素缺失或页面结构变化在同一浏览器重新理解。购物车已点击但结果不明时先核验购物车，不能再添加。认证、挑战、请求被拦截、预算/币种错误不会通过 AI 放宽。提交后仅允许处理已确认的原订单；提交/付款结果不明时保留核对状态，不能重试交易。业务要求改变须重新试跑并确认。
+恢复默认最多 2 次，总动作上限 40，每轮动态执行预算默认 600 秒（ORDER_AGENT_TIMEOUT_MS），取消信号传递给模型和浏览器。单次 AI 响应默认等待 120 秒（ORDER_AI_TIMEOUT_MS），超时仅重新请求同一个规划，最多重试 1 次；不重新生成整个业务计划或重放网页操作。生成业务 SOP 和两次试跑共用 1500 秒总预算（ORDER_TRIAL_TIMEOUT_MS）；上层取消或预算到期立即停止，迟到规划不会执行。元素缺失或页面结构变化在同一浏览器重新理解。购物车已点击但结果不明时先核验购物车，不能再添加。认证、挑战、请求被拦截、预算/币种错误不会通过 AI 放宽。提交后仅允许处理已确认的原订单；提交/付款结果不明时保留核对状态，不能重试交易。业务要求改变须重新试跑并确认。
 
 订单成功要求实际成功响应后的唯一新订单编号和明确成功提示；付款成功要求新的明确付款提示。失败文字、旧提示、点击完成或 AI 自称成功都不作为成功结果。
 
@@ -155,5 +156,7 @@ automation.test.js 验证业务 SOP 禁止定位/代码、八级定位回退、�
 automation-api.test.js 验证探索、经验和 JSON/PNG 证据接口的鉴权及用户/任务隔离。
 
 automation-browser.test.js 启动本地模拟商城，生成随机 ID 和不同 DOM 包装，验证入口之外的购物车/结账/成功/账单页，单次提交和付款，网站付款选项在重复观察后的绑定，以及优惠请求跳转后全部 ID 改变仍能重新核验。Windows 可使用已安装 Edge，其他环境设置 MONITOR_BROWSER_EXECUTABLE；没有浏览器时该文件明确跳过。测试只操作 localhost，不创建真实商家订单。
+
+test/order-timeouts.test.js 验证 AI 响应体卡住、单次有限重试、取消等待、总体试跑预算、迟到计划不会执行，以及超时不重新生成整个 SOP。.github/orders-ui-smoke.mjs 使用本地 AI 响应体卡住一次和进度请求丢失一次的场景，验证后台 202 启动后自动恢复查询、两次试跑完成与手动停止。
 
 已有 test/orders.test.js、test/order-workflow.test.js、test/order-execution-log.test.js 继续验证旧任务、账户/监控变化、预算、优惠、代理、重启和交易日志的兼容保护。真实模型效果需要在已登录的商家测试环境用 discover → 审阅 → enable → prepare 模式检验，不把模拟规划器当作真实模型适配证明。
