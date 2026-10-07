@@ -78,3 +78,11 @@ test('AI 诊断摘要保留页面规模和语义计划，不记录页面 HTML、
   for(const secret of ['private-page-value','private-text-value','private-input-value','private-password','private-image','private-fill-value'])assert.ok(!JSON.stringify({input,output}).includes(secret));
   assert.doesNotThrow(()=>diagnosticAIOutput({configuration:'malformed',bindings:null}));
 });
+
+test('页面诊断和 AI 请求日志明确保留截断标志及完整语义元素数量',()=>{
+ const page={url:'https://shop.example/checkout',totalElements:1408,totalDomNodes:2200,truncated:{elements:false,forms:false,text:true,html:true,domTree:true},elements:[{tag:'button',text:'Place order',value:'private'}]};
+ for(const summary of [diagnosticPage(page),diagnosticAIInput([{role:'user',content:JSON.stringify({page})}]).page]){
+  assert.equal(summary.totalElements,1408);assert.equal(summary.totalDomNodes,2200);assert.deepEqual(summary.truncated,page.truncated);
+  assert.ok(!JSON.stringify(summary).includes('private'));
+ }
+});

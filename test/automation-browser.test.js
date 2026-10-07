@@ -23,6 +23,10 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
     const id=randomUUID(),heading=variant==='b'?'h2':'h1',wrap=variant==='b'?'article':'main';
     const gateway=variant==='w'?'<label>Payment<select name="paymentmethod"><option value="balance">Account balance</option><option value="alipay">Alipay</option></select></label>':'';
     const title='<'+heading+' id="title-'+id+'">Product A</'+heading+'>';
+    if(route==='/long')return '<nav>'+Array.from({length:700},(_,i)=>'<a href="#nav-'+i+'">Navigation '+i+'</a>').join('')+'</nav>'+
+      '<div>'+Array.from({length:700},(_,i)=>'<span>Irrelevant decorative text outside the checkout '+i+'</span>').join('')+'</div>'+
+      Array.from({length:41},(_,i)=>'<form action="/unused-'+i+'" method="post"></form>').join('')+
+      '<section>'+html('/checkout',variant)+'</section>';
     if(route==='/catalog'){const card=variant==='b'?'div':'article';return '<title>Store category</title><a href="/logout">Log out</a><main><h1>Server products</h1><'+card+'><h2>Product B</h2><p>32G RAM · 2 Available</p><a href="/start?v='+variant+'&other=1">Order Now</a></'+card+'><'+card+'><h2>Product A</h2><p>64G RAM · 4 Available</p><a href="/start?v='+variant+'">Order Now</a></'+card+'></main>';}
     if(route==='/start')return '<a href="/logout">Log out</a><'+wrap+'>'+title+'<form method="post" action="/basket?v='+variant+'"><label>Quantity<input id="qty-'+id+'" name="quantity" value="0"></label><button>Add to cart</button></form></'+wrap+'>';
     if(route==='/invoice')return '<main><span>USD 10.00</span><span>USD</span><span>100.00</span><form method="post" action="/charge"><input type="hidden" name="invoiceid" value="42">'+gateway+'<button>Pay invoice from account balance</button></form></main>';
@@ -66,6 +70,26 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
     return action({action:'review',bindings,configuration:[{name:'Cycle',target:target(page,'billing_cycle',el=>el.tag==='select'&&el.label==='Cycle')}]});
   };
   try{
+    await t.test('长页面末尾的结算控件、核验文本及表单层级仍能完成真实试跑',async()=>{
+      const order={...baseOrder,url:base+'/long?v=b',dryRun:true},session=await createOrderBrowser(order,{launch});
+      try{
+        const observed=await session.methods.observe();
+        assert.ok(observed.elements.length>1400);assert.equal(observed.totalElements,observed.elements.length);
+        assert.equal(observed.truncated.elements,false);assert.equal(observed.forms.length,43);
+        assert.ok(observed.truncated.text);assert.ok(observed.truncated.html);
+        const submit=observed.elements.find(el=>el.text==='Place order'),tree=observed.domTree.find(node=>node.elementRef===submit.ref);
+        assert.ok(tree);assert.ok(tree.parent);assert.ok(observed.domTree.some(node=>node.node===tree.parent&&node.tag==='form'));
+        const result=await runCommerceAgent(business,order,session,{plan});
+        assert.equal(result.status,'prepared');assert.equal(result.review.total,10);assert.equal(result.review.quantity,1);assert.equal(counts.orders,0);
+      }finally{await session.close();}
+    });
+    await t.test('点选商品的缺货和可用数量变化不阻断分类页探索，错误规格仍被拒绝',async()=>{
+      const url=base+'/catalog?v=b',selection={url,selector:'#unused-legacy-selector',text:'Product A 64G RAM Out of stock Order Now'};
+      const order={...baseOrder,url,dryRun:true,program:business,productSelection:selection};
+      const session=await createOrderBrowser(order,{launch});
+      try{const result=await runCommerceAgent(business,order,session,{plan});assert.equal(result.status,'prepared');assert.equal(counts.orders,0);}finally{await session.close();}
+      await assert.rejects(createOrderBrowser({...order,productSelection:{...selection,text:'Product A 32G RAM 4 Available Order Now'}},{launch}),/商品身份或规格/);
+    });
     for(const variant of ['a','b'])await t.test('探索不同 DOM '+variant+'，试跑不提交',async()=>{
       const order={...baseOrder,url:base+'/catalog?v='+variant,dryRun:true},session=await createOrderBrowser(order,{launch,onEvidence:async data=>{evidence.push(data);return {id:randomUUID()};}});
       try{

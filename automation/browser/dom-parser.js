@@ -12,7 +12,9 @@ export function inspectCommercePage(input){
       if(value&&value!==own&&(parent.matches('article,li,tr,[role="listitem"]')||parent.querySelector('h1,h2,h3,h4,[role="heading"]')&&parent.querySelectorAll('a,button,input[type="submit"]').length<=3))return value.slice(0,1200);
     }return last.slice(0,1200);
   };
-  const nodes=[...document.querySelectorAll('a,button,input,select,textarea,label,form,[role],[aria-label],h1,h2,h3,p,span,td,th,dt,dd,strong,output')].slice(0,600);
+  // Every semantic node can provide a purchase action or a verification field.
+  // Bound large text/HTML fields, rather than dropping later controls.
+  const nodes=[...document.querySelectorAll('a,button,input,select,textarea,label,form,[role],[aria-label],h1,h2,h3,p,span,td,th,dt,dd,strong,output')];
   const refs=new Map(nodes.map((el,index)=>[el,'e'+index]));
   if(assignRefs)for(const el of document.querySelectorAll('[data-agent-ref]'))el.removeAttribute('data-agent-ref');
   const elements=nodes.map(el=>{
@@ -31,7 +33,15 @@ export function inspectCommercePage(input){
   const clone=document.documentElement.cloneNode(true);
   clone.querySelectorAll('script,style,noscript,iframe').forEach(el=>el.remove());
   clone.querySelectorAll('*').forEach(el=>{for(const attr of [...el.attributes])if(/^on/i.test(attr.name)||/value|token|nonce|secret|password|csrf/i.test(attr.name))el.removeAttribute(attr.name);if(el.tagName==='TEXTAREA')el.textContent='[hidden]';});
-  const forms=[...document.forms].slice(0,40).map(form=>({ref:refs.get(form),method:form.method,action:form.getAttribute('action'),fields:elements.filter(el=>el.formRef===refs.get(form)).map(el=>el.ref)}));
-  const treeNodes=[document.body,...document.body.querySelectorAll('*')].filter(el=>!['SCRIPT','STYLE','NOSCRIPT'].includes(el.tagName)).slice(0,1200),treeRefs=new Map(treeNodes.map((el,index)=>[el,'n'+index]));
-  return {observationId,url:location.href,title:document.title,text:(document.body.innerText||'').slice(0,24000),html:clone.outerHTML.slice(0,64000),domTree:treeNodes.map(el=>({node:treeRefs.get(el),parent:treeRefs.get(el.parentElement),elementRef:refs.get(el),tag:el.tagName.toLowerCase(),role:role(el)})),elements,forms};
+  const forms=[...document.forms].map(form=>({ref:refs.get(form),method:form.method,action:form.getAttribute('action'),fields:elements.filter(el=>el.formRef===refs.get(form)).map(el=>el.ref)}));
+  const allTreeNodes=[document.documentElement,...document.documentElement.querySelectorAll('*')].filter(el=>!['SCRIPT','STYLE','NOSCRIPT'].includes(el.tagName));
+  const includedTreeNodes=new Set(allTreeNodes.slice(0,1200));
+  // Preserve the hierarchy of every observed control, even after the outline limit.
+  for(const node of nodes)for(let parent=node;parent&&!includedTreeNodes.has(parent);parent=parent.parentElement)includedTreeNodes.add(parent);
+  const treeNodes=allTreeNodes.filter(el=>includedTreeNodes.has(el)),treeRefs=new Map(treeNodes.map((el,index)=>[el,'n'+index]));
+  const text=document.body.innerText||'',html=clone.outerHTML;
+  return {observationId,url:location.href,title:document.title,text:text.slice(0,24000),html:html.slice(0,64000),
+    totalElements:nodes.length,totalDomNodes:allTreeNodes.length,
+    truncated:{elements:false,forms:false,text:text.length>24000,html:html.length>64000,domTree:treeNodes.length<allTreeNodes.length},
+    domTree:treeNodes.map(el=>({node:treeRefs.get(el),parent:treeRefs.get(el.parentElement),elementRef:refs.get(el),tag:el.tagName.toLowerCase(),role:role(el)})),elements,forms};
 }
