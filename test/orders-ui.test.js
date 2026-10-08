@@ -18,3 +18,13 @@ test('order editor renders optional login verification inputs for new and saved 
     assert.match(root.innerHTML,/data-order-login-settings-panel class="hidden"/);
   }
 });
+
+test('generation polling retries lost progress responses without resubmitting generation',async()=>{
+  const calls=[],responses=[Object.assign(new Error('lost response'),{code:'RADAR_CONNECTION_FAILED'}),{task:{status:'generating'}},{task:{status:'ready'}}];
+  const context=vm.createContext({window:{addEventListener(){}},document:{addEventListener(){}},AbortSignal,setTimeout:callback=>callback(),api:async(...args)=>{calls.push(args);const next=responses.shift();if(next instanceof Error)throw next;return next;}});
+  vm.runInContext(source,context);
+  const result=await context.waitForOrderGeneration('/api/order-tasks/task',{task:{status:'generating'}},()=>true);
+  assert.equal(result.task.status,'ready');assert.equal(calls.length,3);
+  for(const [path,method] of calls){assert.equal(path,'/api/order-tasks/task');assert.equal(method,'GET');}
+  assert.match(source,/api\(path\+'\/generate','POST',\{background:true\}\)/);
+});

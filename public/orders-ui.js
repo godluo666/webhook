@@ -13,6 +13,17 @@ function orderValidationReport(task){
   const detail=(task.failure?'<p>阶段：'+escapeHtml(task.failure.stage)+' · 分类：'+escapeHtml(task.failure.category)+' · 订单请求：'+(task.failure.orderRequestSent==='no'?'未发出':'可能已发出，请核对原订单')+'</p><p>'+escapeHtml(task.failure.suggestion)+'</p>':'')+(task.preparation?'<p>已核验阶段：'+escapeHtml((task.preparation.verifiedStages||[]).join('、')||'尚无完整核验阶段')+'；待验证：'+escapeHtml((task.preparation.pending||[]).join('、'))+'。页面观察与前端候选不算验证通过。</p>':'')+(task.submissionContract?.status==='unverified'?'<p>AJAX 提交契约待验证，未放行最终交易请求。</p>':'')+(task.stockAuthorization?'<p>已明确授权等待补货；到期：'+escapeHtml(task.stockAuthorization.expiresAt)+'。补货后需两次完整试跑；业务范围变化暂停审批。</p>':'');
   return '<div class="order-validation" role="status">'+detail+'<p>代码语法：'+syntax+' · 提交前核验：'+preflight+'</p>'+(task.executionMode==='pay'?'<p>账单定位与付款结果：'+({paid:'本次实际付款已确认',awaiting_payment:orderStatusLabel(task.result),payment_failed:'已下单，付款未完成',uncertain:'执行结果待核对，请查看原订单'}[task.result?.status]||'尚未实际验证；提交前试跑不创建订单或付款')+'</p>':'')+(task.status==='needs_validation'?'<p>本次停在提交前，没有发送订单。恢复登录或页面后，可在原配置重新生成并验证，再启用。</p>':'')+(task.status==='waiting_stock'?'<p>已保留配置。缺货时无法核验真实结算，补货后请重新生成并验证。</p>':'')+'</div>';
 }
+async function waitForOrderGeneration(path,data,active){
+  const deadline=Date.now()+10*60*1000;
+  while(['generating','stopping'].includes(data.task.status)){
+    if(!active())return data;
+    if(Date.now()>=deadline)throw new Error('生成仍在后台进行，请稍后刷新查看结果');
+    await new Promise(resolve=>setTimeout(resolve,1000));
+    try{data=await api(path,'GET',undefined,{signal:AbortSignal.timeout(10000)});}
+    catch(error){if(!['RADAR_CONNECTION_FAILED','RADAR_INVALID_RESPONSE'].includes(error.code)&&error.name!=='TimeoutError')throw error;}
+  }
+  return data;
+}
 function orderTasks(){return appState.orderTasks||[];}
 function orderAccount(){return (appState.orderAccounts||[]).find(a=>a.monitorId===orderMonitorId);}
 function orderField(label,id,value='',type='text',extra=''){return '<label for="'+id+'">'+label+'<input id="'+id+'" type="'+type+'" '+extra+' value="'+escapeHtml(value)+'"></label>';}
@@ -160,7 +171,12 @@ document.addEventListener('click',async event=>{
     let id=orderEditorId,data;
     if(['save','generate'].includes(action)){data=await api(id?'/api/order-tasks/'+encodeURIComponent(id):'/api/order-tasks',id?'PUT':'POST',payload);if(workspace!==workspaceEpoch)return;replaceOrderTask(data.task);id=data.task.id;if(active())orderEditorId=id;}
     if(['generate','run'].includes(action)&&active()){$('#order-cancel').classList.remove('hidden');form.querySelectorAll('[data-order-editor-action]').forEach(el=>el.classList.add('order-action-hidden'));}
-    if(action==='generate')data=await api('/api/order-tasks/'+encodeURIComponent(id)+'/generate','POST');
+    if(action==='generate'){
+      const path='/api/order-tasks/'+encodeURIComponent(id);
+      data=await api(path+'/generate','POST',{background:true});
+      data=await waitForOrderGeneration(path,data,active);
+      if(data.task.error)throw new Error(data.task.error);
+    }
     if(action==='enable')data=await api('/api/order-tasks/'+encodeURIComponent(id)+'/enable','POST',{codeHash:task.trial.codeHash});
     if(['pause','run','wait-stock'].includes(action))data=await api('/api/order-tasks/'+encodeURIComponent(id)+'/'+action,'POST');
     if(workspace!==workspaceEpoch)return;replaceOrderTask(data.task);if(active())openOrderEditor(data.task);toast(action==='generate'?'代码生成与试跑完成':action==='enable'?'已启用当前监控的自动下单':'下单配置已更新');
