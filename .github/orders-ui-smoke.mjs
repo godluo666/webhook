@@ -173,7 +173,7 @@ try{
   await page.locator('[data-order-coupon-failure="stop"]').click();
   await page.locator('#order-coupon-code').fill('');await page.locator('#order-product').fill('');
   console.log('PASS optional coupon configuration persists across reload and can be cleared');
-  assert.equal(await page.locator('#order-currency').count(),0);assert.equal(await page.locator('#order-product').getAttribute('required'),null);
+  assert.equal(await page.locator('#order-currency').inputValue(),'');assert.equal(await page.locator('#order-currency').getAttribute('required'),null);assert.equal(await page.locator('#order-product').getAttribute('required'),null);
   const ordersBeforePick=createdOrders;
   const previewResponse=page.waitForResponse(response=>response.url().endsWith('/order-product/preview')&&response.request().method()==='POST');
   await page.locator('[data-order-product-pick]').click();const previewId=(await (await previewResponse).json()).id;await page.frameLocator('#order-product-window iframe').locator('h2').click();
