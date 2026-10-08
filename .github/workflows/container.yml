@@ -2,7 +2,7 @@ name: Build and publish container
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/order-workflow-compatibility]
   workflow_dispatch:
 
 permissions:
