@@ -42,6 +42,10 @@ docker pull ghcr.io/godluo666/webhook:latest
 
 之前一键安装若回退到 `webhook-radar:local`，请再运行一次上面的一键命令，让现有容器改用 GHCR 镜像；数据仍在 `webhook-radar_radar_data` 卷中。之后在 1Panel 的**容器列表**选中 `webhook-radar` 对应的容器，使用容器的**升级／更新镜像**操作，拉取 `latest` 并重建容器。只在**镜像列表**点“拉取”不会更新已经运行的容器。若要由 1Panel 管理整个编排，可以将仓库的 `compose.yaml` 粘贴到 1Panel 新建编排的编辑器中；请在编排变量中设置 `RADAR_BIND=0.0.0.0`，沿用相同的数据卷，先停止旧容器以免 3000 端口冲突。
 
+## 自动下单验证
+
+生成阶段遇到认证失败时，任务保持 `needs_validation`，不会启用或提交订单；恢复认证后需重新验证。AI 仅返回缺货且没有可用 SOP 时，保留准备线索并进入 `waiting_stock`，不重复请求同一份 AI 计划；已有或同时返回的 SOP 仍可探索可访问阶段。缺货不跳过两次试跑和审批，其他可修复的生成或试跑错误仍按有界次数恢复。
+
 ## 启动
 
 需要 Node.js 20.18.1 或更新版本，建议使用 Node.js 24。

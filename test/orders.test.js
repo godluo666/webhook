@@ -162,7 +162,8 @@ test('代理认证或网站 HTTP 认证失败停止试跑，不重新生成 AI �
  for(const code of ['PROXY_AUTH_FAILED','SITE_HTTP_AUTH_REQUIRED']){
   const f=fixture({pay:true,trialAuthError:Object.assign(new Error('认证未完成'),{code})}),account=f.user.orderAccounts[0],saved=account.session;
   await assert.rejects(f.service.generate(f.user,f.task),error=>error.code===code);
-  assert.equal(f.generated,1);assert.equal(f.commits,0);assert.equal(f.payments,0);assert.equal(account.status,'saved');assert.equal(account.session,saved);assert.equal(f.task.status,'failed');assert.equal(f.task.approvedHash,null);
+  assert.equal(f.generated,1);assert.equal(f.commits,0);assert.equal(f.payments,0);assert.equal(account.status,'saved');assert.equal(account.session,saved);assert.equal(f.task.status,'needs_validation');assert.equal(f.task.approvedHash,null);assert.equal(f.task.enabled,false);assert.equal(f.task.trial,null);
+  assert.throws(()=>f.service.approve(f.user,f.task,orderProgramHash(f.task)));await assert.rejects(f.service.execute(f.user,f.task));
   const execution=fixture({pay:true});await execution.service.generate(execution.user,execution.task);execution.service.approve(execution.user,execution.task,orderProgramHash(execution.task));const original=execution.user.orderAccounts[0].session;execution.setLoginError(Object.assign(new Error('认证未完成'),{code}));await execution.service.execute(execution.user,execution.task);
   assert.equal(execution.generated,1);assert.equal(execution.commits,0);assert.equal(execution.payments,0);assert.equal(execution.user.orderAccounts[0].status,'saved');assert.equal(execution.user.orderAccounts[0].session,original);
  }
@@ -192,9 +193,20 @@ test('无效付款代码不再取得试跑或启用资格，未产生订单',asy
  await assert.rejects(f.service.generate(f.user,f.task),error=>error.code==='ORDER_SCRIPT_INVALID');assert.equal(f.task.trial,null);assert.equal(f.commits,0);assert.equal(f.payments,0);assert.throws(()=>f.service.approve(f.user,f.task,orderProgramHash(f.task)));
 });
 test('缺货不会反复调用 AI，保留配置且不允许启用未完成的试跑',async()=>{
- for(const generatedProgram of [{status:'out_of_stock'},{...program,workflow:{...program.workflow,prepareCode:'function(){return {status:"out_of_stock"};}'}}]){
+ for(const generatedProgram of [{status:'out_of_stock'},{...program,workflow:{...program.workflow,prepareCode:'function(){return {status:"out_of_stock"};}'}},{...program,status:'out_of_stock',workflow:{...program.workflow,prepareCode:'function(){return {status:"out_of_stock"};}'}}]){
   const f=fixture({generatedProgram});await assert.rejects(f.service.generate(f.user,f.task),error=>error.code==='ORDER_OUT_OF_STOCK');assert.equal(f.generated,1);assert.equal(f.task.status,'waiting_stock');assert.equal(f.task.enabled,false);assert.equal(f.commits,0);assert.equal(f.task.validation.preflight,'waiting_stock');assert.throws(()=>f.service.approve(f.user,f.task,orderProgramHash(f.task)));
  }
+});
+test('缺货响应保留准备线索，并复用已有完整 SOP 而非重复请求 AI',async()=>{
+ const fresh=fixture({generatedProgram:{status:'out_of_stock'}});
+ await assert.rejects(fresh.service.generate(fresh.user,fresh.task),error=>error.code==='ORDER_OUT_OF_STOCK');
+ assert.deepEqual(fresh.task.preparation.pending,['configuration','checkout','request_contract','two_preflights']);assert.equal(fresh.task.failure.category,'waiting_stock');assert.equal(fresh.generated,1);
+ const f=fixture({generatedProgram:{status:'out_of_stock'}});
+ f.task.program=validateOrderProgram({...program,workflow:{...program.workflow,prepareCode:'function(){return {status:"out_of_stock"};}'}});
+ const checkout=f.task.program.checkout;
+ await assert.rejects(f.service.generate(f.user,f.task),error=>error.code==='ORDER_OUT_OF_STOCK');
+ assert.equal(f.generated,1);assert.deepEqual(f.task.program.checkout,checkout);assert.equal(f.task.validation.syntax,'passed');assert.equal(f.task.status,'waiting_stock');assert.equal(f.task.enabled,false);assert.equal(f.commits,0);assert.equal(f.task.trial,null);
+ assert.throws(()=>f.service.approve(f.user,f.task,orderProgramHash(f.task)));await assert.rejects(f.service.execute(f.user,f.task));
 });
 test('提交前临时登录失败可在同一配置重新验证，旧授权不能直接重试',async()=>{
  const f=fixture();await f.service.generate(f.user,f.task);f.service.approve(f.user,f.task,orderProgramHash(f.task));
