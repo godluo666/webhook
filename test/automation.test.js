@@ -57,6 +57,23 @@ test('商品规格不符时在提交前停止，选项和输入都验证实际�
   assert.equal(session.calls.length,0);
   await assert.rejects(runCommerceAgent(program(),order,session,{autoRepair:false,plan:async()=>({action:'fill',reason:'Set quantity',target:target('quantity'),value:'2'})}),{code:'AGENT_STEP_UNVERIFIED'});
 });
+test('提交前观察上下文失效可恢复，提交结果不明时禁止恢复',async()=>{
+  const session=sessionFixture(),observe=session.methods.observe;let first=true;
+  session.methods.observe=async()=>{if(first){first=false;throw new Error('Execution context was destroyed');}return observe();};
+  const result=await runCommerceAgent(program(),order,session,{plan:async()=>review()});
+  assert.equal(result.status,'prepared');assert.equal(session.calls.filter(call=>call[0]==='submit').length,1);
+  assert.equal(canRecover(new Error('Execution context was destroyed'),{submissionStarted:true,receipt:null},{attempts:0}),false);
+});
+test('下拉框按实际选项值核验，不受显示文字变化影响',async()=>{
+  for(const selectedValue of ['monthly','yearly']){
+    const session=sessionFixture();session.methods.select=async()=>{};
+    session.methods.readSemantic=async()=>({selectedValue,value:'Monthly — updated price'});
+    const steps=[{action:'select',reason:'Select cycle',target:target('cycle'),value:'monthly'},review()];
+    const run=runCommerceAgent(program(),order,session,{autoRepair:false,plan:async()=>steps.shift()});
+    if(selectedValue==='monthly')assert.equal((await run).status,'prepared');
+    else {await assert.rejects(run,{code:'AGENT_STEP_UNVERIFIED'});assert.equal(session.calls.length,0);}
+  }
+});
 test('页面变化在同一浏览器采集证据并修复；认证错误和交易结果未知不恢复',async()=>{
   const session=sessionFixture();let attempts=0,context,stale=true;
   session.captureEvidence=async()=>({id:'evidence-id',image:'data:image/png;base64,AA=='});

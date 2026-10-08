@@ -27,6 +27,7 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
       '<div>'+Array.from({length:700},(_,i)=>'<span>Irrelevant decorative text outside the checkout '+i+'</span>').join('')+'</div>'+
       Array.from({length:41},(_,i)=>'<form action="/unused-'+i+'" method="post"></form>').join('')+
       '<section>'+html('/checkout',variant)+'</section>';
+    if(route==='/semantic')return '<div id="product">Product A</div><div id="total">USD 10.00</div><div id="layout"><span>Nested text</span></div><form><label>Region<select name="region">'+Array.from({length:100},(_,i)=>'<option value="region-'+i+'">Region '+i+'</option>').join('')+'</select></label></form>';
     if(route==='/catalog'){const card=variant==='b'?'div':'article';return '<title>Store category</title><a href="/logout">Log out</a><main><h1>Server products</h1><'+card+'><h2>Product B</h2><p>32G RAM · 2 Available</p><a href="/start?v='+variant+'&other=1">Order Now</a></'+card+'><'+card+'><h2>Product A</h2><p>64G RAM · 4 Available</p><a href="/start?v='+variant+'">Order Now</a></'+card+'></main>';}
     if(route==='/start')return '<a href="/logout">Log out</a><'+wrap+'>'+title+'<form method="post" action="/basket?v='+variant+'"><label>Quantity<input id="qty-'+id+'" name="quantity" value="0"></label><button>Add to cart</button></form></'+wrap+'>';
     if(route==='/invoice')return '<main><span>USD 10.00</span><span>USD</span><span>100.00</span><form method="post" action="/charge"><input type="hidden" name="invoiceid" value="42">'+gateway+'<button>Pay invoice from account balance</button></form></main>';
@@ -70,6 +71,24 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
     return action({action:'review',bindings,configuration:[{name:'Cycle',target:target(page,'billing_cycle',el=>el.tag==='select'&&el.label==='Cycle')}]});
   };
   try{
+    await t.test('普通容器核验文本和第 80 项之后的选项仍可观察与操作',async()=>{
+      const session=await createOrderBrowser({...baseOrder,url:base+'/semantic',dryRun:true},{launch});
+      try{
+        const observed=await session.methods.observe();
+        for(const [id,value]of [['product','Product A'],['total','USD 10.00']]){
+          const field=target(observed,id,el=>el.id===id);
+          assert.equal((await session.methods.readSemantic(field)).text,value);
+        }
+        assert.ok(!observed.elements.some(el=>el.id==='layout'));
+        const region=target(observed,'region',el=>el.name==='region');
+        const options=observed.elements.find(el=>el.ref===region.ref).options;
+        assert.equal(options.length,100);assert.equal(options[99].value,'region-99');
+        const located=await session.methods.resolveSemantic(region);
+        await session.methods.select(located.selector,options[99].value);
+        assert.equal((await session.methods.readSemantic(region)).value,'Region 99');
+        assert.equal(counts.orders,0);
+      }finally{await session.close();}
+    });
     await t.test('长页面末尾的结算控件、核验文本及表单层级仍能完成真实试跑',async()=>{
       const order={...baseOrder,url:base+'/long?v=b',dryRun:true},session=await createOrderBrowser(order,{launch});
       try{

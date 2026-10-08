@@ -1111,7 +1111,7 @@ async function handler(request, response) {
         try{const artifact=await orderEvidence.read(user.id+':'+task.id,orderEvidenceMatch[2],format);response.writeHead(200,{'content-type':format==='png'?'image/png':'application/json; charset=utf-8','cache-control':'no-store'});return response.end(artifact);}
         catch(error){if(error.code==='ENOENT')return sendJson(response,404,{error:'页面证据不存在或已过期'});throw error;}
       }
-      const orderMatch = pathname.match(/^\/api\/order-tasks\/([^/]+)(?:\/(generate|discover|profile|enable|pause|run))?$/);
+      const orderMatch = pathname.match(/^\/api\/order-tasks\/([^/]+)(?:\/(generate|discover|profile|enable|wait-stock|pause|run))?$/);
       if (orderMatch) {
         const task = user.orderTasks.find(t=>t.id===orderMatch[1]);
         if (!task) return sendJson(response, 404, {error:'下单任务不存在'});
@@ -1136,6 +1136,7 @@ async function handler(request, response) {
           }
           await operation; return sendJson(response,200,{task:publicOrderTask(task)});
         }
+        if (request.method === 'POST' && action === 'wait-stock') return sendJson(response,200,{task:orderService.waitStock(user,task)});
         if (request.method === 'POST' && action === 'enable') return sendJson(response,200,{task:orderService.approve(user,task,body.codeHash)});
         if (request.method === 'POST' && action === 'run') return sendJson(response,200,{task:await orderService.execute(user,task,{manual:true})});
         return sendJson(response,405,{error:'不支持的请求方法'});

@@ -14,7 +14,9 @@ export function inspectCommercePage(input){
   };
   // Every semantic node can provide a purchase action or a verification field.
   // Bound large text/HTML fields, rather than dropping later controls.
-  const nodes=[...document.querySelectorAll('a,button,input,select,textarea,label,form,[role],[aria-label],h1,h2,h3,p,span,td,th,dt,dd,strong,output')];
+  const nodes=[...document.querySelectorAll('a,button,input,select,textarea,label,form,[role],[aria-label],h1,h2,h3,h4,h5,h6,p,span,td,th,dt,dd,strong,output,div,li,b,em,small')].filter(el=>
+    !el.matches('div,li,b,em,small')||el.hasAttribute('role')||el.hasAttribute('aria-label')||
+    [...el.childNodes].some(node=>node.nodeType===3&&node.textContent.trim()));
   const refs=new Map(nodes.map((el,index)=>[el,'e'+index]));
   if(assignRefs)for(const el of document.querySelectorAll('[data-agent-ref]'))el.removeAttribute('data-agent-ref');
   const elements=nodes.map(el=>{
@@ -28,7 +30,7 @@ export function inspectCommercePage(input){
       type:el.getAttribute('type'),visible:visible(el),disabled:!!el.disabled,readOnly:!!el.readOnly,checked:['checkbox','radio'].includes(el.type)?el.checked:undefined,
       value:privateField?undefined:el.tagName==='SELECT'?[...el.selectedOptions].map(o=>o.textContent.trim()).join(' '):['INPUT','TEXTAREA'].includes(el.tagName)?el.value:undefined,
       href:el.tagName==='A'?el.getAttribute('href'):undefined,formRef:refs.get(el.form),parentRef:refs.get(el.parentElement),
-      options:el.tagName==='SELECT'?[...el.options].slice(0,80).map(o=>({value:o.value,text:o.textContent.trim(),selected:o.selected,disabled:o.disabled})):undefined};
+      options:el.tagName==='SELECT'?[...el.options].map(o=>({value:o.value,text:o.textContent.trim(),selected:o.selected,disabled:o.disabled})):undefined};
   });
   const clone=document.documentElement.cloneNode(true);
   clone.querySelectorAll('script,style,noscript,iframe').forEach(el=>el.remove());

@@ -1,4 +1,6 @@
 import {diagnosticError,diagnosticPage,diagnosticAIOutput,diagnosticReceipt} from '../../lib/order-execution-log.js';
+import {parseOrderQuantity,matchesProductSelection} from '../../lib/order-evidence.js';
+import {orderFailure} from '../../lib/order-diagnostics.js';
 import {DEFAULT_ORDER_TIMEOUTS,createOrderDeadline,abortable} from '../../lib/order-timeouts.js';
 import {validateStep} from './planner.js';
 import {agentError,validateTarget} from './model.js';
@@ -14,7 +16,8 @@ export async function runCommerceAgent(program,order,session,{plan,signal,memory
   const budget=createOrderDeadline({signal,timeoutMs,code:'AGENT_BUDGET_EXCEEDED',stage:'动态页面探索'});signal=budget.signal;
   const methods=Object.fromEntries(Object.entries(session.methods).map(([name,method])=>[name,(...args)=>abortable(()=>method.apply(session.methods,args),signal)]));
   const planWithinBudget=input=>abortable(()=>plan({...input,signal}),signal),history=[],deadline=Date.now()+timeoutMs;
-  let repairs=0,pendingVerification=null,couponFailed=false,couponApplied=!order.couponCode,feedback=null,image=null;
+  let repairs=0,pendingVerification=null,couponFailed=false,couponApplied=!order.couponCode,feedback=null,image=null,stage='observation',currentAction=null,lastState='',stagnant=0;
+  const completed=new Set();
   const resolve=async target=>{validateTarget(target);const located=await methods.resolveSemantic(target);emit('语义定位',{meaning:target.meaning,ref:target.ref,strategy:located.strategy,confidence:target.confidence,selector:located.selector,attempts:located.attempts});return located.selector;};
   const bind=async (bindings,map,required=Object.keys(map))=>{
     if(!bindings||required.some(key=>!bindings[key]))throw agentError('AGENT_PLAN_INVALID',"缺少当前页面核验字段："+required.join(','));
@@ -37,33 +40,47 @@ export async function runCommerceAgent(program,order,session,{plan,signal,memory
     for(let index=0;index<maxSteps;index++){
       signal?.throwIfAborted();if(Date.now()>deadline)throw agentError('AGENT_BUDGET_EXCEEDED',"动态执行已超时");
       session.keepAlive?.(Math.max(1000,deadline-Date.now())+15000);
-      const stepStarted=Date.now(),observation=await methods.observe();
-      emit('页面观察',{step:index+1,durationMs:Date.now()-stepStarted,pageType:pageType(observation),page:diagnosticPage({...observation,controls:(observation.elements||[]).filter(el=>el.role&&['link','button','textbox','spinbutton','combobox','checkbox','radio'].includes(el.role)).slice(0,48)},{semantics:true}),pendingVerification,submissionStarted:!!session.submissionStarted,paymentStarted:!!session.paymentStarted});
+      const stepStarted=Date.now();let observation={elements:[],url:order.url};
       try{
+      stage='observation';currentAction=null;
+      observation=await methods.observe();
+      const state=JSON.stringify([observation.url,observation.text,(observation.elements||[]).map(({text,value,checked,disabled})=>({text,value,checked,disabled}))]);
+      stagnant=state===lastState?stagnant+1:0;lastState=state;
+      if(stagnant>=4)throw agentError('AGENT_NO_PROGRESS','同页连续无进展，请重新识别流程分支');
+      stage='planning';
+      emit('页面观察',{step:index+1,durationMs:Date.now()-stepStarted,pageType:pageType(observation),page:diagnosticPage({...observation,controls:(observation.elements||[]).filter(el=>el.role&&['link','button','textbox','spinbutton','combobox','checkbox','radio'].includes(el.role)).slice(0,48)},{semantics:true}),pendingVerification,submissionStarted:!!session.submissionStarted,paymentStarted:!!session.paymentStarted});
         const step=validateStep(await planWithinBudget({order,workflow:program.workflow,observation,history,memory,context:{pendingVerification,couponApplied,receipt:session.receipt,submissionStarted:session.submissionStarted,paymentStarted:session.paymentStarted},feedback,image,signal}));
         emit('动态计划',{step:index+1,observationId:observation.observationId,url:observation.url,plan:diagnosticAIOutput(step),remainingMs:Math.max(0,deadline-Date.now()),action:step.action,reason:step.reason,meanings:[...(step.target?[step.target.meaning]:[]),...Object.values(step.bindings||{}).map(target=>target.meaning)]});
-        feedback=null;image=null;signal?.throwIfAborted();
-        if(step.action==='stop')throw agentError('AGENT_NEEDS_INPUT',step.reason);
+        feedback=null;image=null;signal?.throwIfAborted();currentAction=step.action;stage=step.action==='review'?'checkout':step.action==='cart'||step.action==='verify_cart'?'cart':'configuration';
+        if(step.action==='stop'){
+          const stock=/out\s+of\s+stock|sold\s+out|缺货|无货|售罄/i.test(step.reason+' '+(observation.text||''));
+          throw agentError(stock?'ORDER_OUT_OF_STOCK':'AGENT_NEEDS_INPUT',step.reason);
+        }
         if(session.submissionStarted&&!['invoice','pay'].includes(step.action))throw agentError('AGENT_PLAN_INVALID',"订单已提交，只能处理原订单账单");
         if(pendingVerification==='cart'&&step.action!=='verify_cart')throw agentError('AGENT_STEP_UNVERIFIED',"购物车操作后必须先核验商品和数量");
         let result;
-        if(['fill','select','check','uncheck','click','cart','choosePayment','invoice'].includes(step.action)){
+        if(step.action==='wait'){
+          const milliseconds=Number(step.value);if(!Number.isInteger(milliseconds)||milliseconds<100||milliseconds>2000)throw agentError('AGENT_PLAN_INVALID','等待必须在 100 到 2000 毫秒之间');
+          result=await methods.pause(milliseconds);
+        }else if(['fill','select','check','uncheck','click','configure','cart','choosePayment','invoice'].includes(step.action)){
           const target=await resolve(step.target);
           if(step.action==='choosePayment')result=await methods.choosePayment({selector:target,value:step.value});
           else {if(step.action==='cart')pendingVerification='cart';result=await methods[step.action](target,...(['fill','select'].includes(step.action)?[step.value]:[]));}
           if(['fill','select','check','uncheck'].includes(step.action)){
             const actual=await read(step.target);
-            const expected=step.action==='select'?observation.elements.find(el=>el.ref===step.target.ref)?.options?.find(option=>option.value===String(step.value))?.text:step.value;
-            const matched=['check','uncheck'].includes(step.action)?actual.checked===(step.action==='check'):expected!==undefined&&String(actual.value)===String(expected);
-            emit('输入核验',{action:step.action,target:step.target,matched,...(['check','uncheck'].includes(step.action)?{expectedChecked:step.action==='check',observedChecked:actual.checked}:{expectedLength:String(expected??'').length,observedLength:String(actual.value??'').length})});
+            const expected=step.action==='select'&&actual.selectedValue===undefined?observation.elements.find(el=>el.ref===step.target.ref)?.options?.find(option=>option.value===String(step.value))?.text:step.value;
+            const observedValue=step.action==='select'?(actual.selectedValue??actual.value):actual.value;
+            const matched=['check','uncheck'].includes(step.action)?actual.checked===(step.action==='check'):expected!==undefined&&String(observedValue)===String(expected);
+            emit('输入核验',{action:step.action,target:step.target,matched,...(['check','uncheck'].includes(step.action)?{expectedChecked:step.action==='check',observedChecked:actual.checked}:{expectedLength:String(expected??'').length,observedLength:String(observedValue??'').length})});
             if(step.action==='check'||step.action==='uncheck'){if(actual.checked!==(step.action==='check'))throw agentError('AGENT_STEP_UNVERIFIED',"网站未接受勾选状态");}
-            else if(expected===undefined||String(actual.value)!==String(expected))throw agentError('AGENT_STEP_UNVERIFIED',"实际输入或选项与计划不符");
+            else if(!matched)throw agentError('AGENT_STEP_UNVERIFIED',"实际输入或选项与计划不符");
           }
-          if(step.action==='cart')pendingVerification='cart';
+          if(step.action==='cart'||result?.cartMutation)pendingVerification='cart';
         }else if(step.action==='verify_cart'){
           if(!step.bindings?.product||!step.bindings?.quantity)throw agentError('AGENT_STEP_UNVERIFIED',"购物车缺少商品和数量证据");
           const product=await read(step.bindings.product),quantity=await read(step.bindings.quantity);
-          const matched=!!normalize(product.text)&&(!order.product||normalize(product.text)===normalize(order.product))&&Number(quantity.value??quantity.text)===order.quantity;
+          const identity=order.product||order.productSelection?.text;
+          const matched=!!normalize(product.text)&&(!identity||matchesProductSelection(identity,product.text))&&parseOrderQuantity(quantity.value??quantity.text)===order.quantity;
           emit('购物车核验',{expected:{product:order.product,quantity:order.quantity},observed:{product:product.text,quantity:quantity.value??quantity.text},matched});
           if(!matched)throw agentError('AGENT_STEP_UNVERIFIED',"购物车商品或数量与任务不符");
           pendingVerification=null;
@@ -104,18 +121,18 @@ export async function runCommerceAgent(program,order,session,{plan,signal,memory
           await onLearn({history,status:result.status});return result;
         }
         const entry={action:step.action,pageType:pageType(observation),meanings:[...(step.target?[step.target.meaning]:[]),...Object.values(step.bindings||{}).map(t=>t.meaning)],verified:true};
-        history.push(entry);emit('动态步骤完成',{...entry,step:index+1,durationMs:Date.now()-stepStarted,pendingVerification,receipt:diagnosticReceipt(result)});
+        history.push(entry);if(['verify_cart'].includes(step.action))completed.add(step.action);emit('动态步骤完成',{...entry,step:index+1,durationMs:Date.now()-stepStarted,pendingVerification,receipt:diagnosticReceipt(result)});
       }catch(error){
         const recoveryAllowed=autoRepair&&canRecover(error,session,{signal,attempts:repairs});
         emit('动态步骤失败',{step:index+1,observationId:observation.observationId,url:observation.url,durationMs:Date.now()-stepStarted,error:diagnosticError(error),pendingVerification,recovery:{enabled:autoRepair,allowed:recoveryAllowed,attempts:repairs,maxAttempts:2},transaction:{submissionStarted:!!session.submissionStarted,paymentStarted:!!session.paymentStarted,receiptStatus:session.receipt?.status}});
         if(!recoveryAllowed)throw error;
-        repairs++;const recovered=await recoveryContext(error,session,history);
+        repairs++;const recovered=await recoveryContext(error,session,history,{signal,run:fn=>abortable(fn,signal)});stagnant=0;
         await onLearn({history:[...history,{action:'recover',pageType:pageType(observation),meanings:[],verified:false}],status:'recovery',error});
         feedback=recovered.feedback;image=recovered.image;history.push({action:'recover',pageType:pageType(recovered.observation),meanings:[],verified:false});
         emit('重新观察并修复',{attempt:repairs,maxAttempts:2,evidenceId:feedback.evidenceId,url:feedback.url,observationId:recovered.observation.observationId,error:feedback.error,historySteps:history.length,pendingVerification});
       }
     }
     throw agentError('AGENT_BUDGET_EXCEEDED',"动态执行达到最大操作数");
-  }catch(error){await onLearn({history,status:'failed',error}).catch(()=>{});throw error;}
+  }catch(error){error.orderFailure=orderFailure(error,{stage,action:currentAction,submissionStarted:session.submissionStarted,paymentStarted:session.paymentStarted});error.orderPreparation={verifiedStages:[...completed],observedSteps:history.filter(item=>item.verified).map(({action,pageType})=>({action,pageType})),pending:['checkout','request_contract','two_preflights'],candidates:[],at:new Date().toISOString()};await onLearn({history,status:'failed',error}).catch(()=>{});throw error;}
   finally{budget.close();}
 }
