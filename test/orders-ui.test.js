@@ -28,3 +28,10 @@ test('generation polling retries lost progress responses without resubmitting ge
   for(const [path,method] of calls){assert.equal(path,'/api/order-tasks/task');assert.equal(method,'GET');}
   assert.match(source,/api\(path\+'\/generate','POST',\{background:true\}\)/);
 });
+
+test('unresolved steps show a concrete confirmation question and candidates',()=>{
+  const context=vm.createContext({window:{addEventListener(){}},document:{addEventListener(){}},escapeHtml:value=>String(value??'').replaceAll('&','&amp;').replaceAll('<','&lt;')});
+  vm.runInContext(source,context);
+  const html=context.orderValidationReport({status:'needs_validation',executionMode:'prepare',validation:{syntax:'passed'},input:{question:'请选择套餐',reason:'两个同名购买按钮',candidates:[{label:'购买 <script>',context:'套餐 A',options:['月付','年付']}]},failure:{stage:'planning',category:'needs_input',orderRequestSent:'no',suggestion:'请确认'}});
+  assert.match(html,/需要你确认/);assert.match(html,/请选择套餐/);assert.match(html,/套餐 A/);assert.match(html,/月付、年付/);assert.doesNotMatch(html,/<script>/);
+});

@@ -1,3 +1,4 @@
+import {createAssistedPlanner} from '../automation/agent/local-planner.js';
 import {BUSINESS_PROMPT} from '../automation/agent/planner.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +17,7 @@ const target=(page,meaning,predicate)=>{
 const text=(page,meaning,value)=>target(page,meaning,el=>el.text===value&&['button','h1','h2','span','p','a'].includes(el.tag));
 const quantity=page=>target(page,'quantity',el=>el.label==='Quantity'&&el.tag==='input');
 const checkout=page=>({submit:text(page,'submit_order','Place order'),product:text(page,'product','Product A'),quantity:quantity(page),total:text(page,'total',page.text.includes('USD 8.00')?'USD 8.00':'USD 10.00'),currency:text(page,'currency','USD')});
-const coupon=page=>({...checkout(page),input:target(page,'coupon_input',el=>el.placeholder==='Coupon code'),apply:text(page,'apply_coupon','Apply coupon'),appliedCode:target(page,'applied_coupon',el=>el.name===null&&el.id?.startsWith('proof-')),discount:target(page,'discount',el=>el.id?.startsWith('discount-'))});
+const coupon=page=>({...checkout(page),input:target(page,'coupon_input',el=>el.placeholder==='Coupon code'),apply:text(page,'apply_coupon','Apply coupon'),appliedCode:target(page,'applied_coupon',el=>el.name==null&&el.id?.startsWith('proof-')),discount:target(page,'discount',el=>el.id?.startsWith('discount-'))});
 test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付款及优惠重绑定',{skip:!executable,timeout:90000},async t=>{
   const requests=[],counts={orders:0,payments:0,coupons:0},evidence=[];
   const html=(route,variant,discount=false)=>{
@@ -142,6 +143,36 @@ test('真实浏览器在未知后续页面和变化 DOM 上探索、提交、付
       }});
       const original=counts.orders;await service.discover(user,task);assert.equal(task.status,'ready');assert.equal(task.enabled,false);assert.equal(task.trial.preflightPasses,2);assert.equal(task.program.code,undefined);assert.equal(counts.orders,original);assert.equal(businessAttempts,2);assert.ok(user.orderExecutionLogs[0].events.some(event=>event.action==='重新观察并修复'));
       service.approve(user,task,orderProgramHash(task));await service.execute(user,task);assert.equal(task.status,'ordered');assert.equal(counts.orders,original+1);assert.equal((await service.profile(user,task)).outcomes.ordered,1);
+    });
+    await t.test('已发现的真实购买流程在两次试跑与一次提交中由代码复用',async()=>{
+      const recipes=[],beforeOrders=counts.orders;let assistance=0,discoveredCalls;
+      for(let pass=0;pass<3;pass++){
+        const order={...baseOrder,url:base+'/catalog?v=a',dryRun:pass<2};
+        const session=await createOrderBrowser(order,{launch});
+        try{
+          const assisted=createAssistedPlanner(async input=>{assistance++;return plan(input);},{recipes});
+          const result=await runCommerceAgent(business,order,session,{plan:assisted});
+          assert.equal(result.status,pass<2?'prepared':'ordered');
+          assert.equal(counts.orders,beforeOrders+(pass===2?1:0));
+          if(pass===0){discoveredCalls=assistance;assert.ok(discoveredCalls>0);}else assert.equal(assistance,discoveredCalls,'known flow must not ask AI again');
+        }finally{await session.close();}
+      }
+      assert.ok(recipes.length>=3);
+    });
+    await t.test('优惠应用和跳转后的核验流程也能复用而不逐步再问 AI',async()=>{
+      const recipes=[];let assistance=0,firstCalls;
+      for(let pass=0;pass<2;pass++){
+        const order={...baseOrder,url:base+'/checkout?v=b',couponCode:'SAVE20',dryRun:true};
+        const session=await createOrderBrowser(order,{launch});
+        try{
+          const assisted=createAssistedPlanner(async input=>{assistance++;return plan(input);},{recipes});
+          const result=await runCommerceAgent(business,order,session,{plan:assisted});
+          assert.equal(result.status,'prepared');assert.equal(result.review.coupon.discount,2);
+          if(pass===0)firstCalls=assistance;else assert.equal(assistance,firstCalls);
+        }finally{await session.close();}
+      }
+      assert.ok(recipes.some(recipe=>recipe.template.action==='apply_coupon'));
+      assert.ok(recipes.some(recipe=>recipe.template.action==='verify_coupon'));
     });
     assert.equal(requests.filter(req=>req.path==='/charge').length,2);
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
